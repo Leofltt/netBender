@@ -1,10 +1,12 @@
 #pragma once
 #include "backend.h"
+#include "BackendFactory.h"
 #include <JuceHeader.h>
 #include <mutex>
 #include <atomic>
 #include <vector>
 #include <algorithm>
+#include <memory>
 
 class CircularBuffer {
 public:
@@ -14,9 +16,16 @@ public:
     {
         m_buffer = std::move(other.m_buffer);
         m_capacity = other.m_capacity;
+        m_mask = other.m_mask;
         m_writeIndex = other.m_writeIndex;
         m_readIndex = other.m_readIndex;
         m_available.store(other.m_available.load());
+
+        other.m_capacity = 0;
+        other.m_mask = 0;
+        other.m_writeIndex = 0;
+        other.m_readIndex = 0;
+        other.m_available.store(0);
     }
     
     CircularBuffer& operator=(CircularBuffer&& other) noexcept
@@ -25,9 +34,16 @@ public:
         {
             m_buffer = std::move(other.m_buffer);
             m_capacity = other.m_capacity;
+            m_mask = other.m_mask;
             m_writeIndex = other.m_writeIndex;
             m_readIndex = other.m_readIndex;
             m_available.store(other.m_available.load());
+
+            other.m_capacity = 0;
+            other.m_mask = 0;
+            other.m_writeIndex = 0;
+            other.m_readIndex = 0;
+            other.m_available.store(0);
         }
         return *this;
     }
@@ -49,7 +65,7 @@ public:
     }
     
     void put(const float* data, int numSamples) {
-        if (m_capacity <= 0 || numSamples <= 0) return;
+        if (m_capacity <= 0 || numSamples <= 0 || m_buffer.empty()) return;
         int toWrite = std::min(numSamples, m_capacity);
 
         if (data != nullptr) {
@@ -67,15 +83,21 @@ public:
         }
 
         m_writeIndex = (m_writeIndex + toWrite) & m_mask;
-        m_available.fetch_add(toWrite);
+        int prevAvail = m_available.fetch_add(toWrite);
+        if (prevAvail + toWrite > m_capacity) {
+            // Buffer overflow: clamp available and advance readIndex past overwritten samples
+            int overflow = (prevAvail + toWrite) - m_capacity;
+            m_readIndex = (m_readIndex + overflow) & m_mask;
+            m_available.store(m_capacity);
+        }
     }
     
     void get(float* dest, int numSamples) {
         if (m_capacity <= 0 || numSamples <= 0 || dest == nullptr) return;
-        int avail = m_available.load();
+        int avail = std::min(m_available.load(), m_capacity);
         int toRead = std::min(numSamples, avail);
 
-        if (toRead > 0) {
+        if (toRead > 0 && !m_buffer.empty()) {
             int firstPart = std::min(toRead, m_capacity - m_readIndex);
             std::memcpy(dest, m_buffer.data() + m_readIndex, firstPart * sizeof(float));
             if (toRead > firstPart) {
@@ -90,7 +112,30 @@ public:
         }
     }
     
-    int getAvailable() const { return m_available.load(); }
+    int getAvailable() const { return std::min(m_available.load(), m_capacity); }
+    
+    int peek(float* dest, int numSamples) const {
+        if (m_capacity <= 0 || numSamples <= 0 || dest == nullptr || m_buffer.empty()) return 0;
+        int avail = std::min(m_available.load(), m_capacity);
+        int toRead = std::min(numSamples, avail);
+
+        if (toRead > 0) {
+            int firstPart = std::min(toRead, m_capacity - m_readIndex);
+            std::memcpy(dest, m_buffer.data() + m_readIndex, firstPart * sizeof(float));
+            if (toRead > firstPart) {
+                std::memcpy(dest + firstPart, m_buffer.data(), (toRead - firstPart) * sizeof(float));
+            }
+        }
+        return toRead;
+    }
+
+    void drop(int numSamples) {
+        if (m_capacity <= 0 || numSamples <= 0) return;
+        int avail = std::min(m_available.load(), m_capacity);
+        int toDrop = std::min(numSamples, avail);
+        m_readIndex = (m_readIndex + toDrop) & m_mask;
+        m_available.fetch_sub(toDrop);
+    }
     
     void clear() {
         if (m_capacity > 0)
@@ -159,7 +204,8 @@ public:
 
     // Backend methods
     bool loadModel(const juce::File& file);
-    Backend& getBackend() { return m_backend; }
+    IBackend& getBackend() { return *m_backend; }
+    TorchBackend* getTorchBackend() { return dynamic_cast<TorchBackend*>(m_backend.get()); }
     bool isModelLoaded() const { return m_modelLoaded.load(); }
     juce::String getModelPath() const { return m_modelPath; }
     juce::String getCurrentMethod() const { return m_currentMethod; }
@@ -171,9 +217,11 @@ public:
     void setBufferSize(int size);
     double getModelSampleRate() const { return m_modelSampleRate.load(); }
     bool isResamplingActive() const { return m_resamplingActive.load(); }
+    bool isUsingGpu() const { return m_useGpu.load(); }
+    void setUseGpu(bool enabled);
 
     // Latent bending hook (applied during autoencode mode)
-    void setLatentHook(Backend::LatentHook hook) { m_latentHook = hook; }
+    void setLatentHook(IBackend::LatentHook hook) { m_latentHook = hook; }
 
     enum class LatentMode
     {
@@ -209,7 +257,7 @@ public:
     void setLatentSlew(float slew) { m_latentSlew.store(juce::jlimit(0.0f, 0.999f, slew)); }
     float getLatentSlew() const { return m_latentSlew.load(); }
 
-    bool hasAutoencode() { return m_backend.has_autoencode(); }
+    bool hasAutoencode() { return m_backend ? m_backend->has_autoencode() : false; }
 
     // Thread communication
     void runInference();
@@ -405,7 +453,8 @@ public:
     {
         m_blownFuse.store(false);
         clearAllLayerBending();
-        m_backend.reset_all_layer_weights();
+        if (m_backend)
+            m_backend->reset_all_layer_weights();
     }
     void setAutoResetFuse(bool enabled) { m_autoResetFuse.store(enabled); }
     bool getAutoResetFuse() const { return m_autoResetFuse.load(); }
@@ -455,9 +504,10 @@ public:
 private:
     friend class ModelThread;
 
-    Backend m_backend;
-    Backend::LatentHook m_latentHook { nullptr };
+    std::unique_ptr<IBackend> m_backend;
+    IBackend::LatentHook m_latentHook { nullptr };
     std::atomic<bool> m_modelLoaded { false };
+    std::atomic<bool> m_useGpu { false };
     juce::String m_modelPath;
     juce::String m_currentMethod;
     int m_bufferSize { 2048 };
@@ -467,16 +517,16 @@ private:
     std::atomic<float> m_dryWet { 1.0f }; // 0.0 = Dry, 1.0 = Wet
 
     // Latent Terrain State
-    std::atomic<bool>        m_latentEnabled { true };
+    std::atomic<bool>        m_latentEnabled { false };
     std::atomic<LatentMode>  m_latentMode { LatentMode::FourierOrbit };
     std::atomic<float>       m_latentX { 0.0f };
     std::atomic<float>       m_latentY { 0.0f };
     std::atomic<float>       m_latentDepth { 0.5f };
     std::atomic<float>       m_latentSlew { 0.0f };
-    at::Tensor               m_prevLatentTensor;
-    at::Tensor               m_rffMatrix; // Random Fourier Feature projection matrix B [D/2, 2]
-    at::Tensor               m_coordsTensor; // Preallocated [2, 1] tensor for zero-alloc projection
+    std::vector<float>       m_prevLatentBuffer;
+    std::vector<float>       m_rffMatrix; // Random Fourier Feature projection matrix B [D/2 * 2]
     int                      m_cachedLatentDim { 0 };
+    void applyLatentTerrainHook(IBackend::LatentBuffer& buf);
 
     // Safety Sentry state
     std::atomic<bool> m_blownFuse { false };
@@ -536,6 +586,7 @@ private:
     std::vector<juce::CatmullRomInterpolator> m_output_resamplers;
     std::vector<std::vector<float>> m_resampled_in_scratch;
     std::vector<std::vector<float>> m_resampled_out_scratch;
+    std::vector<float> m_dryBlockScratch;
 
     void initBuffers();
 

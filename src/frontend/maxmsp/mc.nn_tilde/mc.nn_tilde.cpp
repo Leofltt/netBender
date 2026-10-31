@@ -44,11 +44,11 @@ void model_perform_async(nn_class* nn_instance) {
         }
         if (nn_instance->had_buffer_reset) {
           in_model.clear(); 
-          for (int c(0); c < nn_instance->m_model_in * nn_instance->get_batches(); c++) {
+          for (int c(0); c < (int)nn_instance->m_in_model.size() && c < nn_instance->m_model_in * nn_instance->get_batches(); c++) {
             in_model.push_back(nn_instance->m_in_model[c].get());
           }
           out_model.clear(); 
-          for (int c(0); c < nn_instance->m_model_out * nn_instance->get_batches(); c++) {
+          for (int c(0); c < (int)nn_instance->m_out_model.size() && c < nn_instance->m_model_out * nn_instance->get_batches(); c++) {
             out_model.push_back(nn_instance->m_out_model[c].get());
           }
         }
@@ -71,12 +71,12 @@ long simplemc_inputchanged(c74::max::t_object *x, long index, long count);
 class mc_nn: public nn_base<mc_nn, mc_operator<>> {
 
 public:
-    MIN_DESCRIPTION{"Multi-channel interface for deep learning models"};
-    MIN_TAGS{"audio, deep learning, ai"};
-    MIN_AUTHOR{"Antoine Caillon & Axel Chemla--Romeu-Santos"};
-    MIN_RELATED{"nn.info, nn~, mcs.nn~"};
+    MIN_DESCRIPTION{"Multi-channel interface for deep learning models and live circuit bending"};
+    MIN_TAGS{"audio, deep learning, ai, bending"};
+    MIN_AUTHOR{"NetBender / Antoine Caillon & Axel Chemla--Romeu-Santos"};
+    MIN_RELATED{"netBender.info, netBender~, mcs.netBender~"};
 
-    static std::string get_external_name() { return "mc.nn~";} 
+    static std::string get_external_name() { return "mc.netBender~";} 
     mc_nn(const atoms &args = {}) {
         init_external(args); 
     }
@@ -112,9 +112,8 @@ public:
     message<> maxclass_setup{
       this, "maxclass_setup",
       [this](const c74::min::atoms &args, const int inlet) -> c74::min::atoms {
-        cout << "mc.nn~ " << VERSION << " - torch " << TORCH_VERSION
-             << " - 2024-2025 - Antoine Caillon & Axel Chemla--Romeu-Santos" << endl;
-        cout << "visit https://www.github.com/acids-ircam" << endl;
+        cout << "mc.netBender~ " << VERSION << " (ExecuTorch / ONNX / Torch " << TORCH_VERSION
+             << ") - NetBender / ACIDS" << endl;
         c74::max::t_class *c = args[0];
         c74::max::class_addmethod(
             c, (c74::max::method)simplemc_multichanneloutputs,
@@ -169,11 +168,10 @@ void mc_nn::init_inlets_and_outlets() {
   for (int i(0); i < n_inlets; i++) {
     std::string input_label = "";
     try {
-      input_label = m_model->get_model()
-                        .attr(m_method + "_input_labels")
-                        .toList()
-                        .get(i)
-                        .toStringRef();
+      input_label = m_model->get_input_label(m_method, i);
+      if (input_label.find("(signal)") == 0) {
+        input_label = "(multichannel)" + input_label.substr(8);
+      }
     } catch (...) {
       input_label = "(multichannel) model input " + std::to_string(i);
     }
@@ -183,11 +181,10 @@ void mc_nn::init_inlets_and_outlets() {
   for (int i(0); i < n_outlets; i++) {
     std::string output_label = "";
     try {
-      output_label = m_model->get_model()
-                         .attr(m_method + "_output_labels")
-                         .toList()
-                         .get(i)
-                         .toStringRef();
+      output_label = m_model->get_output_label(m_method, i);
+      if (output_label.find("(signal)") == 0) {
+        output_label = "(multichannel)" + output_label.substr(8);
+      }
     } catch (...) {
       output_label = "(multichannel) model output " + std::to_string(i);
     }
@@ -216,14 +213,14 @@ void mc_nn::init_buffers() {
   // }
 
   m_buffer_in = n_inlets * get_batches();
-  if (m_in_buffer.get() != nullptr) { m_in_buffer.release(); }
+  m_in_buffer.reset();
   m_in_buffer = std::make_unique<circular_buffer<double, float>[]>(m_buffer_in); 
   for (int i = 0; i < m_buffer_in; i++) {
     m_in_buffer[i].initialize(m_buffer_size);
   }
 
   m_buffer_out = n_outlets * get_batches_out();
-  if (m_out_buffer.get() == nullptr) { m_out_buffer.release(); }
+  m_out_buffer.reset();
   m_out_buffer = std::make_unique<circular_buffer<float, double>[]>(m_buffer_out); 
   for (int i = 0; i < m_buffer_out; i++) {
     m_out_buffer[i].initialize(m_buffer_size);
