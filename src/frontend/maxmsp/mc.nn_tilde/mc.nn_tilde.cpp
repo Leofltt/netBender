@@ -44,11 +44,11 @@ void model_perform_async(nn_class* nn_instance) {
         }
         if (nn_instance->had_buffer_reset) {
           in_model.clear(); 
-          for (int c(0); c < nn_instance->m_model_in * nn_instance->get_batches(); c++) {
+          for (int c(0); c < (int)nn_instance->m_in_model.size() && c < nn_instance->m_model_in * nn_instance->get_batches(); c++) {
             in_model.push_back(nn_instance->m_in_model[c].get());
           }
           out_model.clear(); 
-          for (int c(0); c < nn_instance->m_model_out * nn_instance->get_batches(); c++) {
+          for (int c(0); c < (int)nn_instance->m_out_model.size() && c < nn_instance->m_model_out * nn_instance->get_batches(); c++) {
             out_model.push_back(nn_instance->m_out_model[c].get());
           }
         }
@@ -213,14 +213,14 @@ void mc_nn::init_buffers() {
   // }
 
   m_buffer_in = n_inlets * get_batches();
-  if (m_in_buffer.get() != nullptr) { m_in_buffer.release(); }
+  m_in_buffer.reset();
   m_in_buffer = std::make_unique<circular_buffer<double, float>[]>(m_buffer_in); 
   for (int i = 0; i < m_buffer_in; i++) {
     m_in_buffer[i].initialize(m_buffer_size);
   }
 
   m_buffer_out = n_outlets * get_batches_out();
-  if (m_out_buffer.get() == nullptr) { m_out_buffer.release(); }
+  m_out_buffer.reset();
   m_out_buffer = std::make_unique<circular_buffer<float, double>[]>(m_buffer_out); 
   for (int i = 0; i < m_buffer_out; i++) {
     m_out_buffer[i].initialize(m_buffer_size);

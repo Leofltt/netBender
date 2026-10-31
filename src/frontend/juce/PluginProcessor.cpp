@@ -18,7 +18,7 @@ void ModelThread::stop()
 {
     signalThreadShouldExit();
     m_event.signal();
-    stopThread(2000);
+    stopThread(-1);
 }
 
 void ModelThread::run()
@@ -33,6 +33,7 @@ void ModelThread::run()
             
         if (m_processing.load())
         {
+            const juce::ScopedAutoReleasePool pool;
             m_processor.runInference();
             m_processing.store(false);
         }
@@ -373,13 +374,15 @@ void NNBendingAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     float dryGain = 1.0f - wetGain;
     bool fuseBlown = m_blownFuse.load();
 
-    std::vector<float> dryBlock(numSamples, 0.0f);
+    if ((int)m_dryBlockScratch.size() < numSamples)
+        m_dryBlockScratch.resize(numSamples, 0.0f);
+
     for (int c = 0; c < (int)totalNumOutputChannels; ++c)
     {
         int dryCh = std::min(c, (int)m_dry_delay_buffers.size() - 1);
         if (dryCh >= 0)
         {
-            m_dry_delay_buffers[dryCh].get(dryBlock.data(), numSamples);
+            m_dry_delay_buffers[dryCh].get(m_dryBlockScratch.data(), numSamples);
             float* outPtr = buffer.getWritePointer(c);
             
             if (fuseBlown)
@@ -387,7 +390,7 @@ void NNBendingAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 // Blown fuse: bypass wet model output and pass pure dry audio to protect listeners
                 for (int i = 0; i < numSamples; ++i)
                 {
-                    outPtr[i] = dryBlock[i];
+                    outPtr[i] = m_dryBlockScratch[i];
                 }
             }
             else
@@ -407,7 +410,7 @@ void NNBendingAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     // Transparent soft headroom saturation on wet model output:
                     // Linear unity gain for |x| <= 0.6, smoothly compressing transient peaks to <= 1.3f
                     float satWet = (std::abs(rawWet) < 0.6f) ? rawWet : (std::tanh(rawWet * 0.77f) * 1.3f);
-                    float sample = satWet * wetGain + dryBlock[i] * dryGain;
+                    float sample = satWet * wetGain + m_dryBlockScratch[i] * dryGain;
 
                     // Hard cutoff safety check for runaway signals
                     if (std::isnan(sample) || std::isinf(sample) || std::abs(sample) > 2.0f)
@@ -458,72 +461,88 @@ bool NNBendingAudioProcessor::loadModel(const juce::File& file)
     
     std::string path = file.getFullPathName().toStdString();
     
-    auto newBackend = BackendFactory::createForFile(path);
-    if (!newBackend)
-        return false;
-
-    if (file.getFileName().containsIgnoreCase("_coreml.pte") || file.getFileName().containsIgnoreCase("_mps.pte"))
-        m_useGpu.store(true);
-    else if (file.getFileName().containsIgnoreCase("_xnnpack.pte") || file.getFileName().containsIgnoreCase("_portable.pte"))
-        m_useGpu.store(false);
-
-    newBackend->use_gpu(m_useGpu.load());
-    m_backend = std::move(newBackend);
-
-    int err = m_backend->load(path, getSampleRate());
-    if (err == 0)
+    try
     {
-        m_modelPath = file.getFullPathName();
-        
-        // Find default mode: prefer "forward", else "prior", else first available
-        auto modes = m_backend->get_plugin_modes();
-        if (!modes.empty())
+        auto newBackend = BackendFactory::createForFile(path);
+        if (!newBackend)
+            return false;
+
+        if (file.getFileName().containsIgnoreCase("_coreml.pte") || file.getFileName().containsIgnoreCase("_mps.pte"))
+            m_useGpu.store(true);
+        else if (file.getFileName().containsIgnoreCase("_xnnpack.pte") || file.getFileName().containsIgnoreCase("_portable.pte"))
+            m_useGpu.store(false);
+
+        newBackend->use_gpu(m_useGpu.load());
+        m_backend = std::move(newBackend);
+
+        int err = m_backend->load(path, getSampleRate());
+        if (err == 0)
         {
-            std::string defaultMode = modes[0];
-            for (const auto& m : modes)
+            m_modelPath = file.getFullPathName();
+            
+            // Find default mode: prefer "forward", else "prior", else first available
+            auto modes = m_backend->get_plugin_modes();
+            if (!modes.empty())
             {
-                if (m == "forward")
+                std::string defaultMode = modes[0];
+                for (const auto& m : modes)
                 {
-                    defaultMode = "forward";
-                    break;
+                    if (m == "forward")
+                    {
+                        defaultMode = "forward";
+                        break;
+                    }
+                }
+                m_currentMethod = defaultMode;
+                
+                auto params = m_backend->get_mode_params(defaultMode);
+                if (params.size() >= 4)
+                {
+                    m_model_in = params[0];
+                    m_model_out = params[2];
                 }
             }
-            m_currentMethod = defaultMode;
-            
-            auto params = m_backend->get_mode_params(defaultMode);
-            if (params.size() >= 4)
+
+            // Auto-configure buffer size to backend preferred size or model ratio.
+            int prefSize = m_backend->get_preferred_buffer_size();
+            if (prefSize > 0)
             {
-                m_model_in = params[0];
-                m_model_out = params[2];
+                m_bufferSize = prefSize;
             }
+            else
+            {
+                int higher_ratio = m_backend->get_higher_ratio();
+                int reqSize = 1;
+                while (reqSize < higher_ratio)
+                    reqSize <<= 1;
+                int minBufferForRatio = (higher_ratio >= 2048) ? 4096 : 2048;
+                m_bufferSize = std::max(minBufferForRatio, reqSize * 2);
+            }
+            
+            // Reset latent terrain cached matrices on new model load
+            m_rffMatrix.clear();
+            m_prevLatentBuffer.clear();
+            m_cachedLatentDim = 0;
+
+            // Query model sample rate vs host sample rate
+            double hostSr = getSampleRate();
+            m_hostSampleRate.store(hostSr > 0.0 ? hostSr : 44100.0);
+            double modelSr = m_backend->get_sample_rate();
+            m_modelSampleRate.store(modelSr);
+            m_resamplingActive.store(std::abs(m_hostSampleRate.load() - modelSr) > 1.0);
+
+            m_modelLoaded.store(true);
+            initBuffers();
+            return true;
         }
-
-        // Auto-configure buffer size to model ratio.
-        // For deep convolutional autoencoders (such as Stable Audio / Oobleck / DAC / RAVE 2048),
-        // each chunk needs multiple latent frames (at least 2 frames, >= 4096 samples)
-        // to satisfy convolutional receptive field and streaming padding.
-        int higher_ratio = m_backend->get_higher_ratio();
-        int reqSize = 1;
-        while (reqSize < higher_ratio)
-            reqSize <<= 1;
-        int minBufferForRatio = (higher_ratio >= 2048) ? 4096 : 2048;
-        m_bufferSize = std::max(minBufferForRatio, reqSize * 2);
-        
-        // Reset latent terrain cached matrices on new model load
-        m_rffMatrix.clear();
-        m_prevLatentBuffer.clear();
-        m_cachedLatentDim = 0;
-
-        // Query model sample rate vs host sample rate
-        double hostSr = getSampleRate();
-        m_hostSampleRate.store(hostSr > 0.0 ? hostSr : 44100.0);
-        double modelSr = m_backend->get_sample_rate();
-        m_modelSampleRate.store(modelSr);
-        m_resamplingActive.store(std::abs(m_hostSampleRate.load() - modelSr) > 1.0);
-
-        m_modelLoaded.store(true);
-        initBuffers();
-        return true;
+    }
+    catch (const std::exception& e)
+    {
+        DBG("Exception loading model: " << e.what());
+    }
+    catch (...)
+    {
+        DBG("Unknown exception loading model");
     }
     
     return false;
@@ -539,8 +558,8 @@ void NNBendingAudioProcessor::setCurrentMethod(const juce::String& method)
 
     if (isValidMode)
     {
-        m_model_thread.stop();
-
+        int prevIn = m_model_in;
+        int prevOut = m_model_out;
         m_currentMethod = method;
         auto params = m_backend->get_mode_params(methodStr);
         if (params.size() >= 4)
@@ -548,7 +567,15 @@ void NNBendingAudioProcessor::setCurrentMethod(const juce::String& method)
             m_model_in = params[0];
             m_model_out = params[2];
         }
-        initBuffers();
+
+        if (prevIn != m_model_in || prevOut != m_model_out)
+        {
+            initBuffers();
+        }
+        else
+        {
+            m_backend->clear_decode_gen_fifo();
+        }
     }
 }
 
@@ -652,6 +679,8 @@ void NNBendingAudioProcessor::initBuffers()
     for (auto& buf : m_resampled_out_scratch)
         buf.assign(maxScratchSize, 0.0f);
 
+    m_dryBlockScratch.assign(maxScratchSize, 0.0f);
+
     for (int i = 0; i < n_in; ++i)
     {
         m_in_buffers[i].init(m_bufferSize);
@@ -673,11 +702,11 @@ void NNBendingAudioProcessor::initBuffers()
         m_out_buffers[i].init(m_bufferSize);
         m_staging_out[i].assign(m_bufferSize, 0.0f);
         m_worker_out[i].assign(m_bufferSize, 0.0f);
-        // Pre-fill output buffer with 1 buffer of latency cushion in forward mode
+        // Pre-fill output buffer with latency cushion in forward mode
         // to prevent starvation during background model inference and align with dry delay buffer
-        if (m_model_in > 0)
+        if (m_model_in > 0 && latencySamples > 0)
         {
-            m_out_buffers[i].put(nullptr, m_bufferSize);
+            m_out_buffers[i].put(nullptr, latencySamples);
         }
     }
     

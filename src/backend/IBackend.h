@@ -99,6 +99,7 @@ public:
   virtual auto get_available_methods(LockedModel* model = nullptr) -> std::vector<std::string> = 0;
   virtual auto get_method_params(std::string method) -> std::vector<int> = 0;
   virtual auto get_higher_ratio() -> int = 0;
+  virtual auto get_preferred_buffer_size() -> int { return 0; }
 
   // Parameter Introspection & Bending
   virtual auto get_available_layers() -> std::vector<std::string> = 0;

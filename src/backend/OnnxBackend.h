@@ -70,6 +70,7 @@ public:
     auto get_available_methods(LockedModel* model = nullptr) -> std::vector<std::string> override;
     auto get_method_params(std::string method) -> std::vector<int> override;
     auto get_higher_ratio() -> int override;
+    auto get_preferred_buffer_size() -> int override;
 
     // Parameter Introspection & Bending
     auto get_available_layers() -> std::vector<std::string> override;

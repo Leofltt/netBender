@@ -16,9 +16,16 @@ public:
     {
         m_buffer = std::move(other.m_buffer);
         m_capacity = other.m_capacity;
+        m_mask = other.m_mask;
         m_writeIndex = other.m_writeIndex;
         m_readIndex = other.m_readIndex;
         m_available.store(other.m_available.load());
+
+        other.m_capacity = 0;
+        other.m_mask = 0;
+        other.m_writeIndex = 0;
+        other.m_readIndex = 0;
+        other.m_available.store(0);
     }
     
     CircularBuffer& operator=(CircularBuffer&& other) noexcept
@@ -27,9 +34,16 @@ public:
         {
             m_buffer = std::move(other.m_buffer);
             m_capacity = other.m_capacity;
+            m_mask = other.m_mask;
             m_writeIndex = other.m_writeIndex;
             m_readIndex = other.m_readIndex;
             m_available.store(other.m_available.load());
+
+            other.m_capacity = 0;
+            other.m_mask = 0;
+            other.m_writeIndex = 0;
+            other.m_readIndex = 0;
+            other.m_available.store(0);
         }
         return *this;
     }
@@ -51,7 +65,7 @@ public:
     }
     
     void put(const float* data, int numSamples) {
-        if (m_capacity <= 0 || numSamples <= 0) return;
+        if (m_capacity <= 0 || numSamples <= 0 || m_buffer.empty()) return;
         int toWrite = std::min(numSamples, m_capacity);
 
         if (data != nullptr) {
@@ -69,15 +83,21 @@ public:
         }
 
         m_writeIndex = (m_writeIndex + toWrite) & m_mask;
-        m_available.fetch_add(toWrite);
+        int prevAvail = m_available.fetch_add(toWrite);
+        if (prevAvail + toWrite > m_capacity) {
+            // Buffer overflow: clamp available and advance readIndex past overwritten samples
+            int overflow = (prevAvail + toWrite) - m_capacity;
+            m_readIndex = (m_readIndex + overflow) & m_mask;
+            m_available.store(m_capacity);
+        }
     }
     
     void get(float* dest, int numSamples) {
         if (m_capacity <= 0 || numSamples <= 0 || dest == nullptr) return;
-        int avail = m_available.load();
+        int avail = std::min(m_available.load(), m_capacity);
         int toRead = std::min(numSamples, avail);
 
-        if (toRead > 0) {
+        if (toRead > 0 && !m_buffer.empty()) {
             int firstPart = std::min(toRead, m_capacity - m_readIndex);
             std::memcpy(dest, m_buffer.data() + m_readIndex, firstPart * sizeof(float));
             if (toRead > firstPart) {
@@ -92,11 +112,11 @@ public:
         }
     }
     
-    int getAvailable() const { return m_available.load(); }
+    int getAvailable() const { return std::min(m_available.load(), m_capacity); }
     
     int peek(float* dest, int numSamples) const {
-        if (m_capacity <= 0 || numSamples <= 0 || dest == nullptr) return 0;
-        int avail = m_available.load();
+        if (m_capacity <= 0 || numSamples <= 0 || dest == nullptr || m_buffer.empty()) return 0;
+        int avail = std::min(m_available.load(), m_capacity);
         int toRead = std::min(numSamples, avail);
 
         if (toRead > 0) {
@@ -111,7 +131,7 @@ public:
 
     void drop(int numSamples) {
         if (m_capacity <= 0 || numSamples <= 0) return;
-        int avail = m_available.load();
+        int avail = std::min(m_available.load(), m_capacity);
         int toDrop = std::min(numSamples, avail);
         m_readIndex = (m_readIndex + toDrop) & m_mask;
         m_available.fetch_sub(toDrop);
@@ -497,7 +517,7 @@ private:
     std::atomic<float> m_dryWet { 1.0f }; // 0.0 = Dry, 1.0 = Wet
 
     // Latent Terrain State
-    std::atomic<bool>        m_latentEnabled { true };
+    std::atomic<bool>        m_latentEnabled { false };
     std::atomic<LatentMode>  m_latentMode { LatentMode::FourierOrbit };
     std::atomic<float>       m_latentX { 0.0f };
     std::atomic<float>       m_latentY { 0.0f };
@@ -566,6 +586,7 @@ private:
     std::vector<juce::CatmullRomInterpolator> m_output_resamplers;
     std::vector<std::vector<float>> m_resampled_in_scratch;
     std::vector<std::vector<float>> m_resampled_out_scratch;
+    std::vector<float> m_dryBlockScratch;
 
     void initBuffers();
 

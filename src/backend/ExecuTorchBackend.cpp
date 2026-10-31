@@ -190,7 +190,7 @@ auto ExecuTorchBackend::load_metadata_and_sidecar(const std::string& base_path) 
 }
 
 auto ExecuTorchBackend::load(std::string path, double sample_rate, const std::string* target_method) -> int {
-    std::lock_guard<std::mutex> lock(m_session_mutex);
+    std::unique_lock<std::mutex> lock(m_session_mutex);
     m_loaded = false;
     m_path = path;
     m_sample_rate = sample_rate > 0.0 ? sample_rate : 44100.0;
@@ -290,6 +290,26 @@ auto ExecuTorchBackend::load(std::string path, double sample_rate, const std::st
     m_loaded = true;
     clear_decode_gen_fifo();
     m_last_error.clear();
+    lock.unlock(); // Unlock before warm-up so inference methods can acquire session mutex
+
+    // Warm up ExecuTorch delegate (CoreML / XNNPACK) to pre-allocate memory and compile graph
+    try {
+        int warm_in_ch = std::max(1, m_in_channels);
+        int warm_out_ch = std::max(1, m_out_channels);
+        int warm_vec = (m_buffer_size > 0) ? m_buffer_size : ((m_higher_ratio > 1) ? m_higher_ratio : 2048);
+        std::vector<std::vector<float>> dummy_in(warm_in_ch, std::vector<float>(warm_vec, 0.0f));
+        std::vector<std::vector<float>> dummy_out(warm_out_ch, std::vector<float>(warm_vec, 0.0f));
+        std::vector<float*> in_ptrs(warm_in_ch);
+        std::vector<float*> out_ptrs(warm_out_ch);
+        for (int c = 0; c < warm_in_ch; ++c) in_ptrs[c] = dummy_in[c].data();
+        for (int c = 0; c < warm_out_ch; ++c) out_ptrs[c] = dummy_out[c].data();
+
+        perform_forward(in_ptrs, out_ptrs, 1, warm_out_ch, warm_vec, nullptr);
+        if (has_method("decode")) {
+            perform_decode_gen(out_ptrs, 1, warm_out_ch, warm_vec, nullptr);
+        }
+        clear_decode_gen_fifo();
+    } catch (...) {}
 
     std::cout << "[ExecuTorchBackend] Loaded " << path
               << " | Delegate: " << m_delegate
@@ -326,6 +346,23 @@ auto ExecuTorchBackend::perform(std::vector<float*>& in_buffer,
                                 std::string method,
                                 int n_batches, int n_out_channels, int n_vec) -> void {
     if (!m_loaded) return;
+
+    if (m_buffer_size > 0 && n_vec > m_buffer_size && (n_vec % m_buffer_size == 0) && (method == "forward" || method == "encode")) {
+        int chunks = n_vec / m_buffer_size;
+        for (int chk = 0; chk < chunks; ++chk) {
+            std::vector<float*> chunk_in(in_buffer.size());
+            for (size_t c = 0; c < in_buffer.size(); ++c) {
+                chunk_in[c] = in_buffer[c] ? in_buffer[c] + (chk * m_buffer_size) : nullptr;
+            }
+            std::vector<float*> chunk_out(out_buffer.size());
+            for (size_t c = 0; c < out_buffer.size(); ++c) {
+                chunk_out[c] = out_buffer[c] ? out_buffer[c] + (chk * m_buffer_size) : nullptr;
+            }
+            perform(chunk_in, chunk_out, method, n_batches, n_out_channels, m_buffer_size);
+        }
+        return;
+    }
+
     std::unique_lock<std::mutex> lock(m_session_mutex, std::try_to_lock);
     if (!lock.owns_lock()) return;
 
@@ -463,7 +500,7 @@ auto ExecuTorchBackend::perform_forward(std::vector<float*>& in_buffer,
                                         std::vector<float*>& out_buffer,
                                         int n_batches, int n_out_channels, int n_vec,
                                         LatentHook latent_hook) -> void {
-    if (latent_hook && has_autoencode()) {
+    if (has_autoencode()) {
 #if defined(NETBENDER_HAS_EXECUTORCH) && NETBENDER_HAS_EXECUTORCH
         int latent_steps = std::max(1, m_decode_latent_steps);
         std::vector<std::vector<float>> latent_storage(m_latent_dim, std::vector<float>(latent_steps, 0.0f));
@@ -477,8 +514,10 @@ auto ExecuTorchBackend::perform_forward(std::vector<float*>& in_buffer,
             std::memcpy(flat_latents.data() + (i * latent_steps), latent_storage[i].data(), latent_steps * sizeof(float));
         }
 
-        LatentBuffer buf{ flat_latents.data(), m_latent_dim, latent_steps };
-        latent_hook(buf);
+        if (latent_hook) {
+            LatentBuffer buf{ flat_latents.data(), m_latent_dim, latent_steps };
+            latent_hook(buf);
+        }
 
         std::vector<float*> decode_in_ptrs = { flat_latents.data() };
         perform(decode_in_ptrs, out_buffer, "decode", n_batches, n_out_channels, n_vec);
@@ -504,16 +543,20 @@ auto ExecuTorchBackend::perform_decode_gen(std::vector<float*>& out_buffer,
     size_t fifo_samples = (m_decode_gen_fifo.empty() || m_decode_gen_fifo[0].empty())
         ? 0 : (m_decode_gen_fifo[0].size() - m_decode_gen_fifo_read_idx);
 
-    const size_t kCrossfadeSamples = 256;
+    const size_t kCrossfadeSamples = 512;
     if (m_decode_gen_fifo_read_idx > 0 && fifo_samples < (size_t)(n_vec + kCrossfadeSamples)) {
-        for (auto& ch : m_decode_gen_fifo) {
-            if (m_decode_gen_fifo_read_idx < ch.size()) {
-                ch.erase(ch.begin(), ch.begin() + m_decode_gen_fifo_read_idx);
-            } else {
-                ch.clear();
+        size_t erase_count = (m_decode_gen_fifo_read_idx > kCrossfadeSamples)
+            ? (m_decode_gen_fifo_read_idx - kCrossfadeSamples) : 0;
+        if (erase_count > 0) {
+            for (auto& ch : m_decode_gen_fifo) {
+                if (erase_count < ch.size()) {
+                    ch.erase(ch.begin(), ch.begin() + erase_count);
+                } else {
+                    ch.clear();
+                }
             }
+            m_decode_gen_fifo_read_idx -= erase_count;
         }
-        m_decode_gen_fifo_read_idx = 0;
     }
 
     int latent_steps = std::max(1, m_decode_latent_steps);
@@ -560,9 +603,9 @@ auto ExecuTorchBackend::perform_decode_gen(std::vector<float*>& out_buffer,
             if (xfade > 0) {
                 size_t tail_start = fifo.size() - xfade;
                 for (size_t i = 0; i < xfade; ++i) {
-                    float t = (float)(i + 1) / (float)(xfade + 1);
-                    float w_in = 0.5f * (1.0f - std::cos(3.14159265358979323846f * t));
-                    float w_out = 1.0f - w_in;
+                    float t = (float)(i + 0.5f) / (float)xfade;
+                    float w_in = std::sin(1.57079632679f * t);
+                    float w_out = std::cos(1.57079632679f * t);
                     fifo[tail_start + i] = fifo[tail_start + i] * w_out + gen_out[c][i] * w_in;
                 }
                 fifo.insert(fifo.end(), gen_out[c].begin() + xfade, gen_out[c].end());

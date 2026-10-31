@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
+#include <sstream>
 
 int main(int argc, char** argv) {
     std::cout << "==========================================" << std::endl;
@@ -34,12 +35,23 @@ int main(int argc, char** argv) {
             "models/encodec_bendable.ts",
             "models/speech.ts",
             "models/stable_audio_1_vae.ts",
+            // Additional TS models if present
+            "models/voice_vocalset_b2048_r48000_z16.ts",
+            "models/sax_soprano_franziskaschroeder_b2048_r48000_z20.ts",
             // ONNX bendable models
             "models/darbouka_bendable.onnx",
             "models/encodec_bendable.onnx",
             "models/speech_bendable.onnx",
             "models/stable_audio_1_vae_bendable.onnx"
         };
+        // Filter out non-existent TS models
+        std::vector<std::string> existingModels;
+        for (const auto& m : testModels) {
+            std::ifstream f(m);
+            if (f.good()) existingModels.push_back(m);
+        }
+        testModels = std::move(existingModels);
+
         const std::vector<std::string> pteModels = useGpu
             ? std::vector<std::string>{
                 "models/darbouka_coreml.pte",
@@ -62,12 +74,23 @@ int main(int argc, char** argv) {
     }
 
     int failures = 0;
-    std::string reportPath = "test_report.md";
+    std::string reportPath = useGpu ? "test_report_gpu.md" : "test_report_cpu.md";
     std::ofstream report(reportPath);
 
     report << "# NetBender Audio Parity & Sentry Verification Report\n\n";
     auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     report << "**Timestamp**: " << std::ctime(&now) << "\n\n";
+
+    struct BenchmarkStats {
+        bool ran = false;
+        double minMs = 0.0;
+        double avgMs = 0.0;
+        double maxMs = 0.0;
+        double budgetMs = 0.0;
+        double rtf = 0.0;       // Compute time / Audio duration
+        double speedup = 0.0;   // Audio duration / Compute time (e.g. 5x real-time)
+        bool realTimeSafe = false;
+    };
 
     struct ModelTestResult {
         std::string path;
@@ -87,18 +110,21 @@ int main(int argc, char** argv) {
         float fwdRms = 0.0f;
         bool fwdFuseTripped = false;
         bool fwdHasNan = false;
+        BenchmarkStats fwdBench;
 
         std::string decStatus = "N/A";
         float decPeak = 0.0f;
         float decRms = 0.0f;
         bool decFuseTripped = false;
         bool decHasNan = false;
+        BenchmarkStats decBench;
 
         std::string priorStatus = "N/A";
         float priorPeak = 0.0f;
         float priorRms = 0.0f;
         bool priorFuseTripped = false;
         bool priorHasNan = false;
+        BenchmarkStats priorBench;
 
         std::string failureDetails;
     };
@@ -176,12 +202,29 @@ int main(int argc, char** argv) {
             }
         }
         int n_vec = 2048;
+        double budgetMs = (res.sr > 0.0) ? (n_vec / res.sr * 1000.0) : (2048.0 / 44100.0 * 1000.0);
+
+        auto computeBench = [](const std::vector<double>& times, double budget) -> BenchmarkStats {
+            BenchmarkStats stats;
+            if (times.empty()) return stats;
+            stats.ran = true;
+            stats.budgetMs = budget;
+            stats.minMs = *std::min_element(times.begin(), times.end());
+            stats.maxMs = *std::max_element(times.begin(), times.end());
+            double sum = 0.0;
+            for (double t : times) sum += t;
+            stats.avgMs = sum / times.size();
+            stats.rtf = (budget > 0.0) ? (stats.avgMs / budget) : 0.0;
+            stats.speedup = (stats.avgMs > 0.0) ? (budget / stats.avgMs) : 0.0;
+            stats.realTimeSafe = (stats.rtf < 1.0);
+            return stats;
+        };
 
         // -------------------------------------------------------------
-        // 1. STREAMING FORWARD TEST (8 consecutive blocks of test audio)
+        // 1. STREAMING FORWARD TEST & BENCHMARK
         // -------------------------------------------------------------
         int numFwdBlocks = (res.latentDim >= 8 && res.ratio >= 1024) ? 16 : 8;
-        std::cout << "  Testing perform_forward (" << numFwdBlocks << "-block audio stream, " << inCh << "->" << outCh << " ch)..." << std::endl;
+        std::cout << "  Testing perform_forward (" << numFwdBlocks << "-block stream, " << inCh << "->" << outCh << " ch)..." << std::endl;
         try {
             float maxPeak = 0.0f;
             double sumSq = 0.0;
@@ -191,6 +234,7 @@ int main(int argc, char** argv) {
 
             float maxFwdSeamJump = 0.0f;
             std::vector<float> prevLastSample(outCh, 0.0f);
+            std::vector<double> fwdTimes;
 
             for (int b = 0; b < numFwdBlocks; ++b) {
                 std::vector<std::vector<float>> inChannels(inCh, std::vector<float>(n_vec));
@@ -208,7 +252,13 @@ int main(int argc, char** argv) {
                 for (int c = 0; c < inCh; ++c) inPtrs[c] = inChannels[c].data();
                 for (int c = 0; c < outCh; ++c) outPtrs[c] = outChannels[c].data();
 
+                auto t0 = std::chrono::high_resolution_clock::now();
                 backend->perform_forward(inPtrs, outPtrs, 1, outCh, n_vec, nullptr);
+                auto t1 = std::chrono::high_resolution_clock::now();
+                double blockMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                if (b > 0) { // skip block 0 cold warm-up
+                    fwdTimes.push_back(blockMs);
+                }
 
                 for (int c = 0; c < outCh; ++c) {
                     int warmupBlocks = (res.latentDim >= 8 && res.ratio >= 1024) ? 14 : 1;
@@ -237,11 +287,19 @@ int main(int argc, char** argv) {
             res.fwdRms = totalSamples > 0 ? (float)std::sqrt(sumSq / totalSamples) : 0.0f;
             res.fwdHasNan = hadNan;
             res.fwdFuseTripped = fuseTripped;
+            res.fwdBench = computeBench(fwdTimes, budgetMs);
 
             std::cout << "    Forward: Peak=" << std::fixed << std::setprecision(4) << maxPeak
                       << " | RMS=" << res.fwdRms << " | NaN=" << (hadNan ? "YES" : "NO")
                       << " | MaxSeamJump=" << maxFwdSeamJump
                       << " | FuseCutoff(>2.0)=" << (fuseTripped ? "BLOWN" : "OK") << std::endl;
+            if (res.fwdBench.ran) {
+                std::cout << "      Benchmark: avg=" << std::setprecision(2) << res.fwdBench.avgMs
+                          << " ms (min=" << res.fwdBench.minMs << ", max=" << res.fwdBench.maxMs
+                          << ") | Budget=" << res.fwdBench.budgetMs << " ms | RTF=" << res.fwdBench.rtf
+                          << " (" << res.fwdBench.speedup << "x RT)"
+                          << (res.fwdBench.realTimeSafe ? " [RT SAFE]" : " [OVERRUN!]") << std::endl;
+            }
 
             if (hadNan) {
                 res.fwdStatus = "FAIL (NaN)";
@@ -266,10 +324,11 @@ int main(int argc, char** argv) {
         }
 
         // -------------------------------------------------------------
-        // 2. DECODE GEN TEST (4 blocks)
+        // 2. DECODE GEN TEST & BENCHMARK
         // -------------------------------------------------------------
         if (backend->has_method("decode")) {
-            std::cout << "  Testing perform_decode_gen (4 blocks)..." << std::endl;
+            int numDecBlocks = (res.latentDim >= 8 && res.ratio >= 1024) ? 20 : 10;
+            std::cout << "  Testing perform_decode_gen (" << numDecBlocks << " blocks)..." << std::endl;
             try {
                 float maxPeak = 0.0f;
                 double sumSq = 0.0;
@@ -279,13 +338,20 @@ int main(int argc, char** argv) {
 
                 float maxDecSeamJump = 0.0f;
                 std::vector<float> prevDecLastSample(outCh, 0.0f);
+                std::vector<double> decTimes;
 
-                for (int b = 0; b < 6; ++b) {
+                for (int b = 0; b < numDecBlocks; ++b) {
                     std::vector<std::vector<float>> outChannels(outCh, std::vector<float>(n_vec, 0.0f));
                     std::vector<float*> outPtrs(outCh);
                     for (int c = 0; c < outCh; ++c) outPtrs[c] = outChannels[c].data();
 
+                    auto t0 = std::chrono::high_resolution_clock::now();
                     backend->perform_decode_gen(outPtrs, 1, outCh, n_vec, nullptr);
+                    auto t1 = std::chrono::high_resolution_clock::now();
+                    double blockMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                    if (b > 0) {
+                        decTimes.push_back(blockMs);
+                    }
 
                     for (int c = 0; c < outCh; ++c) {
                         if (b > 1) { // evaluate after initial warm-up
@@ -313,11 +379,19 @@ int main(int argc, char** argv) {
                 res.decRms = totalSamples > 0 ? (float)std::sqrt(sumSq / totalSamples) : 0.0f;
                 res.decHasNan = hadNan;
                 res.decFuseTripped = fuseTripped;
+                res.decBench = computeBench(decTimes, budgetMs);
 
                 std::cout << "    Decode Gen: Peak=" << std::fixed << std::setprecision(4) << maxPeak
                           << " | RMS=" << res.decRms << " | NaN=" << (hadNan ? "YES" : "NO")
                           << " | MaxSeamJump=" << maxDecSeamJump
                           << " | FuseCutoff(>2.0)=" << (fuseTripped ? "BLOWN" : "OK") << std::endl;
+                if (res.decBench.ran) {
+                    std::cout << "      Benchmark: avg=" << std::setprecision(2) << res.decBench.avgMs
+                              << " ms (min=" << res.decBench.minMs << ", max=" << res.decBench.maxMs
+                              << ") | Budget=" << res.decBench.budgetMs << " ms | RTF=" << res.decBench.rtf
+                              << " (" << res.decBench.speedup << "x RT)"
+                              << (res.decBench.realTimeSafe ? " [RT SAFE]" : " [OVERRUN!]") << std::endl;
+                }
 
                 if (hadNan) {
                     res.decStatus = "FAIL (NaN)";
@@ -343,7 +417,7 @@ int main(int argc, char** argv) {
         }
 
         // -------------------------------------------------------------
-        // 3. PRIOR DECODE TEST (4 blocks)
+        // 3. PRIOR DECODE TEST & BENCHMARK
         // -------------------------------------------------------------
         if (backend->has_method("prior")) {
             std::cout << "  Testing perform_prior_decode (4 blocks)..." << std::endl;
@@ -353,13 +427,20 @@ int main(int argc, char** argv) {
                 size_t totalSamples = 0;
                 bool hadNan = false;
                 bool fuseTripped = false;
+                std::vector<double> priorTimes;
 
                 for (int b = 0; b < 4; ++b) {
                     std::vector<std::vector<float>> outChannels(outCh, std::vector<float>(n_vec, 0.0f));
                     std::vector<float*> outPtrs(outCh);
                     for (int c = 0; c < outCh; ++c) outPtrs[c] = outChannels[c].data();
 
+                    auto t0 = std::chrono::high_resolution_clock::now();
                     backend->perform_prior_decode(outPtrs, 1, outCh, n_vec);
+                    auto t1 = std::chrono::high_resolution_clock::now();
+                    double blockMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                    if (b > 0) {
+                        priorTimes.push_back(blockMs);
+                    }
 
                     for (int c = 0; c < outCh; ++c) {
                         for (int i = 0; i < n_vec; ++i) {
@@ -381,10 +462,18 @@ int main(int argc, char** argv) {
                 res.priorRms = totalSamples > 0 ? (float)std::sqrt(sumSq / totalSamples) : 0.0f;
                 res.priorHasNan = hadNan;
                 res.priorFuseTripped = fuseTripped;
+                res.priorBench = computeBench(priorTimes, budgetMs);
 
                 std::cout << "    Prior: Peak=" << std::fixed << std::setprecision(4) << maxPeak
                           << " | RMS=" << res.priorRms << " | NaN=" << (hadNan ? "YES" : "NO")
                           << " | FuseCutoff(>2.0)=" << (fuseTripped ? "BLOWN" : "OK") << std::endl;
+                if (res.priorBench.ran) {
+                    std::cout << "      Benchmark: avg=" << std::setprecision(2) << res.priorBench.avgMs
+                              << " ms (min=" << res.priorBench.minMs << ", max=" << res.priorBench.maxMs
+                              << ") | Budget=" << res.priorBench.budgetMs << " ms | RTF=" << res.priorBench.rtf
+                              << " (" << res.priorBench.speedup << "x RT)"
+                              << (res.priorBench.realTimeSafe ? " [RT SAFE]" : " [OVERRUN!]") << std::endl;
+                }
 
                 if (hadNan) {
                     res.priorStatus = "FAIL (NaN)";
@@ -432,6 +521,34 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Write Performance & Real-Time Benchmark Table
+    report << "\n## Performance & Real-Time Benchmark Summary\n\n";
+    report << "| Model Path | Engine | Mode | Compute Time (avg / min / max) | RT Budget (2048 smp) | RTF | Speedup | Real-Time Safe |\n";
+    report << "|---|---|---|---|---|---|---|---|\n";
+
+    for (const auto& r : results) {
+        if (!r.loadSuccess) continue;
+        auto writeBenchRow = [&](const std::string& mode, const BenchmarkStats& b) {
+            if (!b.ran) return;
+            std::ostringstream avgStr, minMaxStr, budgetStr, rtfStr, spdStr;
+            avgStr << std::fixed << std::setprecision(2) << b.avgMs << " ms";
+            minMaxStr << std::fixed << std::setprecision(2) << b.minMs << " / " << b.maxMs << " ms";
+            budgetStr << std::fixed << std::setprecision(2) << b.budgetMs << " ms";
+            rtfStr << std::fixed << std::setprecision(3) << b.rtf;
+            spdStr << std::fixed << std::setprecision(1) << b.speedup << "x";
+
+            report << "| `" << r.path << "` | " << r.backendType << " | " << mode << " | "
+                   << avgStr.str() << " (" << minMaxStr.str() << ") | "
+                   << budgetStr.str() << " | "
+                   << rtfStr.str() << " | "
+                   << spdStr.str() << " | "
+                   << (b.realTimeSafe ? "✅ SAFE" : "⚠️ OVERRUN") << " |\n";
+        };
+        writeBenchRow("Forward", r.fwdBench);
+        writeBenchRow("Decode Gen", r.decBench);
+        writeBenchRow("Prior", r.priorBench);
+    }
+
     // Write Detailed Per-Model Breakdown
     report << "\n## Detailed Model Diagnostics\n\n";
     for (const auto& r : results) {
@@ -444,13 +561,31 @@ int main(int argc, char** argv) {
 
         report << "- **Engine**: `" << r.backendType << "`\n";
         report << "- **Sample Rate**: " << r.sr << " Hz | **Ratio**: " << r.ratio << " | **Latent Dim**: " << r.latentDim << "\n";
-        report << "- **Forward Stream (8 blk)**: " << r.fwdStatus
-               << " (Max Peak: " << r.fwdPeak << ", RMS: " << r.fwdRms << ")\n";
-        report << "- **Decode Gen (4 blk)**: " << r.decStatus
-               << " (Max Peak: " << r.decPeak << ", RMS: " << r.decRms << ")\n";
+        report << "- **Forward Stream**: " << r.fwdStatus
+               << " (Peak: " << r.fwdPeak << ", RMS: " << r.fwdRms << ")\n";
+        if (r.fwdBench.ran) {
+            report << "  - Compute: " << r.fwdBench.avgMs << " ms (min: " << r.fwdBench.minMs
+                   << ", max: " << r.fwdBench.maxMs << ") | RTF: " << r.fwdBench.rtf
+                   << " (" << r.fwdBench.speedup << "x real-time) -> "
+                   << (r.fwdBench.realTimeSafe ? "✅ Real-time safe" : "⚠️ Overrun risk") << "\n";
+        }
+        report << "- **Decode Gen**: " << r.decStatus
+               << " (Peak: " << r.decPeak << ", RMS: " << r.decRms << ")\n";
+        if (r.decBench.ran) {
+            report << "  - Compute: " << r.decBench.avgMs << " ms (min: " << r.decBench.minMs
+                   << ", max: " << r.decBench.maxMs << ") | RTF: " << r.decBench.rtf
+                   << " (" << r.decBench.speedup << "x real-time) -> "
+                   << (r.decBench.realTimeSafe ? "✅ Real-time safe" : "⚠️ Overrun risk") << "\n";
+        }
         if (r.priorStatus != "N/A") {
-            report << "- **Prior Mode (4 blk)**: " << r.priorStatus
-                   << " (Max Peak: " << r.priorPeak << ", RMS: " << r.priorRms << ")\n";
+            report << "- **Prior Mode**: " << r.priorStatus
+                   << " (Peak: " << r.priorPeak << ", RMS: " << r.priorRms << ")\n";
+            if (r.priorBench.ran) {
+                report << "  - Compute: " << r.priorBench.avgMs << " ms (min: " << r.priorBench.minMs
+                       << ", max: " << r.priorBench.maxMs << ") | RTF: " << r.priorBench.rtf
+                       << " (" << r.priorBench.speedup << "x real-time) -> "
+                       << (r.priorBench.realTimeSafe ? "✅ Real-time safe" : "⚠️ Overrun risk") << "\n";
+            }
         }
 
         if (!r.failureDetails.empty()) {

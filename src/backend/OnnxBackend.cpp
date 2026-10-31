@@ -58,7 +58,7 @@ OnnxBackend::OnnxBackend()
 OnnxBackend::~OnnxBackend() = default;
 
 auto OnnxBackend::load(std::string path, double sample_rate, const std::string* target_method) -> int {
-    std::lock_guard<std::mutex> lock(m_session_mutex);
+    std::unique_lock<std::mutex> lock(m_session_mutex);
     m_loaded = false;
     m_path = path;
     m_sample_rate = sample_rate > 0.0 ? sample_rate : 44100.0;
@@ -68,9 +68,52 @@ auto OnnxBackend::load(std::string path, double sample_rate, const std::string* 
     try {
 #if defined(_WIN32)
         std::wstring wpath(path.begin(), path.end());
-        m_impl->session = std::make_unique<Ort::Session>(m_impl->env, wpath.c_str(), m_impl->session_options);
+        try {
+            m_impl->session = std::make_unique<Ort::Session>(m_impl->env, wpath.c_str(), m_impl->session_options);
+        } catch (const std::exception& e) {
+            if (m_use_gpu) {
+                std::cerr << "[OnnxBackend] GPU initialization failed: " << e.what() << ", falling back to CPU." << std::endl;
+                m_use_gpu = false;
+                m_impl->session_options = Ort::SessionOptions();
+                unsigned int hw_threads = std::thread::hardware_concurrency();
+                int intra_threads = std::max(1, (int)std::min(hw_threads, 4u));
+                m_impl->session_options.SetIntraOpNumThreads(intra_threads);
+                m_impl->session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+                m_impl->session = std::make_unique<Ort::Session>(m_impl->env, wpath.c_str(), m_impl->session_options);
+            } else {
+                throw;
+            }
+        }
 #else
-        m_impl->session = std::make_unique<Ort::Session>(m_impl->env, path.c_str(), m_impl->session_options);
+        try {
+            m_impl->session = std::make_unique<Ort::Session>(m_impl->env, path.c_str(), m_impl->session_options);
+        } catch (const std::exception& e) {
+            if (m_use_gpu) {
+                std::cerr << "[OnnxBackend] GPU initialization failed: " << e.what() << ", falling back to CPU." << std::endl;
+                m_use_gpu = false;
+                m_impl->session_options = Ort::SessionOptions();
+                unsigned int hw_threads = std::thread::hardware_concurrency();
+                int intra_threads = std::max(1, (int)std::min(hw_threads, 4u));
+                m_impl->session_options.SetIntraOpNumThreads(intra_threads);
+                m_impl->session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+                m_impl->session = std::make_unique<Ort::Session>(m_impl->env, path.c_str(), m_impl->session_options);
+            } else {
+                throw;
+            }
+        } catch (...) {
+            if (m_use_gpu) {
+                std::cerr << "[OnnxBackend] GPU initialization failed (non-std exception), falling back to CPU." << std::endl;
+                m_use_gpu = false;
+                m_impl->session_options = Ort::SessionOptions();
+                unsigned int hw_threads = std::thread::hardware_concurrency();
+                int intra_threads = std::max(1, (int)std::min(hw_threads, 4u));
+                m_impl->session_options.SetIntraOpNumThreads(intra_threads);
+                m_impl->session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+                m_impl->session = std::make_unique<Ort::Session>(m_impl->env, path.c_str(), m_impl->session_options);
+            } else {
+                throw;
+            }
+        }
 #endif
         introspect_graph();
 
@@ -89,9 +132,23 @@ auto OnnxBackend::load(std::string path, double sample_rate, const std::string* 
                     Impl::CompanionSession cs;
 #if defined(_WIN32)
                     std::wstring wcomp(companion_path.begin(), companion_path.end());
-                    cs.session = std::make_unique<Ort::Session>(m_impl->env, wcomp.c_str(), m_impl->session_options);
+                    try {
+                        cs.session = std::make_unique<Ort::Session>(m_impl->env, wcomp.c_str(), m_impl->session_options);
+                    } catch (...) {
+                        Ort::SessionOptions cpu_opts;
+                        cpu_opts.SetIntraOpNumThreads(2);
+                        cpu_opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+                        cs.session = std::make_unique<Ort::Session>(m_impl->env, wcomp.c_str(), cpu_opts);
+                    }
 #else
-                    cs.session = std::make_unique<Ort::Session>(m_impl->env, companion_path.c_str(), m_impl->session_options);
+                    try {
+                        cs.session = std::make_unique<Ort::Session>(m_impl->env, companion_path.c_str(), m_impl->session_options);
+                    } catch (...) {
+                        Ort::SessionOptions cpu_opts;
+                        cpu_opts.SetIntraOpNumThreads(2);
+                        cpu_opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+                        cs.session = std::make_unique<Ort::Session>(m_impl->env, companion_path.c_str(), cpu_opts);
+                    }
 #endif
                     size_t in_count = cs.session->GetInputCount();
                     for (size_t i = 0; i < in_count; ++i) {
@@ -229,14 +286,20 @@ auto OnnxBackend::load(std::string path, double sample_rate, const std::string* 
         
         // Backwards compatibility fallback if model does not contain explicit netbender.history_samples metadata
         if (m_history_samples == 0 && m_output_offset == 0) {
+            bool is_stable_audio = (m_path.find("stable_audio") != std::string::npos || m_path.find("oobleck") != std::string::npos);
             bool is_rave = false;
             for (const auto& pair : m_parameters) {
+                if (pair.first.find("oobleck") != std::string::npos) {
+                    is_stable_audio = true;
+                }
                 if (pair.first.find("rave") != std::string::npos || pair.first.find("_rave") != std::string::npos) {
                     is_rave = true;
-                    break;
                 }
             }
-            if (is_rave && m_higher_ratio >= 1024) {
+            if (is_stable_audio) {
+                m_history_samples = 4096;
+                m_output_offset = 2048;
+            } else if (is_rave && m_higher_ratio >= 1024) {
                 m_history_samples = (m_latent_dim >= 8) ? 28672 : 4096;
                 m_output_offset = m_history_samples;
             }
@@ -254,6 +317,27 @@ auto OnnxBackend::load(std::string path, double sample_rate, const std::string* 
         m_loaded = true;
         clear_decode_gen_fifo();
         m_last_error.clear();
+        lock.unlock(); // Unlock before warm-up so inference methods can acquire session mutex
+
+        // Warm up ONNX session(s) to compile execution provider kernels (CoreML / CPU)
+        try {
+            int warm_in_ch = std::max(1, m_in_channels);
+            int warm_out_ch = std::max(1, m_out_channels);
+            int warm_vec = 2048;
+            std::vector<std::vector<float>> dummy_in(warm_in_ch, std::vector<float>(warm_vec, 0.0f));
+            std::vector<std::vector<float>> dummy_out(warm_out_ch, std::vector<float>(warm_vec, 0.0f));
+            std::vector<float*> in_ptrs(warm_in_ch);
+            std::vector<float*> out_ptrs(warm_out_ch);
+            for (int c = 0; c < warm_in_ch; ++c) in_ptrs[c] = dummy_in[c].data();
+            for (int c = 0; c < warm_out_ch; ++c) out_ptrs[c] = dummy_out[c].data();
+
+            perform_forward(in_ptrs, out_ptrs, 1, warm_out_ch, warm_vec, nullptr);
+            if (has_method("decode")) {
+                perform_decode_gen(out_ptrs, 1, warm_out_ch, warm_vec, nullptr);
+            }
+            clear_decode_gen_fifo();
+        } catch (...) {}
+
         std::cout << "[OnnxBackend] Finished load() successfully for " << path << std::endl;
         std::cout << std::flush;
         return 0;
@@ -299,6 +383,7 @@ auto OnnxBackend::use_gpu(bool value) -> void {
         if (status != nullptr) {
             std::cerr << "[OnnxBackend] Warning: CoreML EP could not be enabled, falling back to CPU." << std::endl;
             Ort::GetApi().ReleaseStatus(status);
+            m_use_gpu = false;
         } else {
             std::cout << "[OnnxBackend] CoreML Execution Provider enabled." << std::endl;
         }
@@ -768,15 +853,24 @@ auto OnnxBackend::perform_forward(std::vector<float*>& in_buffer,
                 int in_ch = std::min((int)in_buffer.size(), m_in_channels);
                 if (in_ch <= 0 || n_vec <= 0) return;
 
-                std::vector<float> audio_in(in_ch * n_vec);
+                int stream_len = (m_history_samples > 0) ? ((int)m_history_samples + n_vec) : n_vec;
+                std::vector<float> audio_in((size_t)(in_ch * stream_len), 0.0f);
                 for (int c = 0; c < in_ch; ++c) {
-                    if (in_buffer[c]) {
-                        std::memcpy(audio_in.data() + (c * n_vec), in_buffer[c], n_vec * sizeof(float));
-                    } else {
-                        std::memset(audio_in.data() + (c * n_vec), 0, n_vec * sizeof(float));
+                    float* hist_data = (m_history_samples > 0 && c < (int)m_audio_history.size()) ? m_audio_history[c].data() : nullptr;
+                    float* in_data = (c < (int)in_buffer.size()) ? in_buffer[c] : nullptr;
+                    float* dest = audio_in.data() + (c * stream_len);
+                    if (m_history_samples > 0) {
+                        if (hist_data) {
+                            std::memcpy(dest, hist_data, m_history_samples * sizeof(float));
+                        }
+                        if (in_data) {
+                            std::memcpy(dest + m_history_samples, in_data, n_vec * sizeof(float));
+                        }
+                    } else if (in_data) {
+                        std::memcpy(dest, in_data, n_vec * sizeof(float));
                     }
                 }
-                std::vector<int64_t> in_shape = { 1, in_ch, (int64_t)n_vec };
+                std::vector<int64_t> in_shape = { 1, in_ch, (int64_t)stream_len };
                 std::vector<Ort::Value> enc_in_tensors;
                 enc_in_tensors.push_back(Ort::Value::CreateTensor<float>(
                     m_impl->memory_info,
@@ -805,39 +899,76 @@ auto OnnxBackend::perform_forward(std::vector<float*>& in_buffer,
                     LatentBuffer buf{ latent_ptr, lat_dim, lat_steps };
                     latent_hook(buf);
 
+                    std::vector<Ort::Value> dec_in_tensors;
+                    if (m_higher_ratio <= 640 && m_latent_dim >= 128 && lat_steps > 6) {
+                        // EnCodec decode graph requires frames <= 6 to prevent negative reflection padding
+                        std::vector<int64_t> dec_in_shape = { 1, lat_dim, 6 };
+                        std::vector<float> sliced_lat(lat_dim * 6);
+                        for (int c = 0; c < lat_dim; ++c) {
+                            std::memcpy(sliced_lat.data() + (c * 6), latent_ptr + (c * lat_steps), 6 * sizeof(float));
+                        }
+                        dec_in_tensors.push_back(Ort::Value::CreateTensor<float>(
+                            m_impl->memory_info,
+                            sliced_lat.data(),
+                            sliced_lat.size(),
+                            dec_in_shape.data(),
+                            dec_in_shape.size()
+                        ));
+                    } else {
+                        dec_in_tensors.push_back(std::move(enc_outputs[0]));
+                    }
+
                     auto dec_outputs = dec_comp.session->Run(
                         Ort::RunOptions{nullptr},
                         dec_comp.input_name_ptrs.data(),
-                        enc_outputs.data(),
-                        1,
+                        dec_in_tensors.data(),
+                        dec_in_tensors.size(),
                         dec_comp.output_name_ptrs.data(),
                         dec_comp.output_name_ptrs.size()
                     );
 
-                    if (!dec_outputs.empty()) {
-                        float* out_data = dec_outputs[0].GetTensorMutableData<float>();
-                        auto out_info = dec_outputs[0].GetTensorTypeAndShapeInfo();
-                        auto out_shape = out_info.GetShape();
-                        int num_channels = (out_shape.size() >= 2 && out_shape[1] > 0) ? (int)out_shape[1] : 1;
-                        int out_samples = (out_shape.size() >= 3 && out_shape[2] > 0) ? (int)out_shape[2] : n_vec;
-                        int copy_samples = std::min(n_vec, out_samples);
-                        int out_ch = std::min((int)out_buffer.size(), std::min(num_channels, (int)n_out_channels));
+                if (!dec_outputs.empty()) {
+                    float* out_data = dec_outputs[0].GetTensorMutableData<float>();
+                    auto out_info = dec_outputs[0].GetTensorTypeAndShapeInfo();
+                    auto out_shape = out_info.GetShape();
+                    int num_channels = (out_shape.size() >= 2 && out_shape[1] > 0) ? (int)out_shape[1] : 1;
+                    int out_samples = (out_shape.size() >= 3 && out_shape[2] > 0) ? (int)out_shape[2] : stream_len;
+                    int offset = (int)m_output_offset;
+                    if (offset >= out_samples) offset = 0;
+                    int copy_samples = std::min(n_vec, std::max(0, out_samples - offset));
+                    int out_ch = std::min((int)out_buffer.size(), std::min(num_channels, (int)n_out_channels));
 
-                        for (int c = 0; c < out_ch; ++c) {
-                            if (out_buffer[c]) {
-                                std::memcpy(out_buffer[c], out_data + (c * out_samples), copy_samples * sizeof(float));
-                                if (copy_samples < n_vec) {
-                                    std::memset(out_buffer[c] + copy_samples, 0, (n_vec - copy_samples) * sizeof(float));
+                    for (int c = 0; c < out_ch; ++c) {
+                        if (out_buffer[c]) {
+                            if (copy_samples > 0) {
+                                std::memcpy(out_buffer[c], out_data + (c * out_samples) + offset, copy_samples * sizeof(float));
+                            }
+                            if (copy_samples < n_vec) {
+                                std::memset(out_buffer[c] + copy_samples, 0, (n_vec - copy_samples) * sizeof(float));
+                            }
+                        }
+                    }
+
+                    if (m_history_samples > 0) {
+                        for (int c = 0; c < in_ch && c < (int)m_audio_history.size(); ++c) {
+                            if (in_buffer[c]) {
+                                if (n_vec >= (int)m_history_samples) {
+                                    std::memcpy(m_audio_history[c].data(), in_buffer[c] + (n_vec - m_history_samples), m_history_samples * sizeof(float));
+                                } else {
+                                    size_t shift = m_history_samples - n_vec;
+                                    std::memmove(m_audio_history[c].data(), m_audio_history[c].data() + n_vec, shift * sizeof(float));
+                                    std::memcpy(m_audio_history[c].data() + shift, in_buffer[c], n_vec * sizeof(float));
                                 }
                             }
                         }
-                        return;
                     }
+                    return;
                 }
-            } catch (const std::exception& e) {
-                std::cerr << "[OnnxBackend::perform_forward] Latent hook encode/decode error: " << e.what() << std::endl;
             }
+        } catch (const std::exception& e) {
+            std::cerr << "[OnnxBackend::perform_forward] Encode/decode execution error: " << e.what() << std::endl;
         }
+    }
     }
 
     perform(in_buffer, out_buffer, "forward", n_batches, n_out_channels, n_vec);
@@ -941,20 +1072,24 @@ auto OnnxBackend::perform_decode_gen(std::vector<float*>& out_buffer,
         ? 0 : (m_decode_gen_fifo[0].size() - m_decode_gen_fifo_read_idx);
 
     // If FIFO does not have enough samples to fulfill n_vec + crossfade cushion, synthesize another block
-    const size_t kCrossfadeSamples = 256;
+    const size_t kCrossfadeSamples = 1024;
     if (fifo_samples < (size_t)(n_vec + kCrossfadeSamples)) {
         std::unique_lock<std::mutex> lock(m_session_mutex);
 
-        // Compact FIFO by erasing already consumed samples
+        // Compact FIFO by erasing already consumed samples, preserving overlap tail for seamless blending
         if (m_decode_gen_fifo_read_idx > 0) {
-            for (auto& ch : m_decode_gen_fifo) {
-                if (m_decode_gen_fifo_read_idx < ch.size()) {
-                    ch.erase(ch.begin(), ch.begin() + m_decode_gen_fifo_read_idx);
-                } else {
-                    ch.clear();
+            size_t erase_count = (m_decode_gen_fifo_read_idx > kCrossfadeSamples)
+                ? (m_decode_gen_fifo_read_idx - kCrossfadeSamples) : 0;
+            if (erase_count > 0) {
+                for (auto& ch : m_decode_gen_fifo) {
+                    if (erase_count < ch.size()) {
+                        ch.erase(ch.begin(), ch.begin() + erase_count);
+                    } else {
+                        ch.clear();
+                    }
                 }
+                m_decode_gen_fifo_read_idx -= erase_count;
             }
-            m_decode_gen_fifo_read_idx = 0;
         }
 
         int min_frames = 8;
@@ -962,7 +1097,9 @@ auto OnnxBackend::perform_decode_gen(std::vector<float*>& out_buffer,
             min_frames = 16;
         }
         int latent_steps = std::max(min_frames, (n_vec + (int)kCrossfadeSamples) / ratio);
-        if (m_use_gpu && ratio > 0) {
+        if (m_latent_dim >= 128 && m_higher_ratio <= 640) {
+            latent_steps = std::min(latent_steps, 6); // EnCodec decode graph requires frames <= 6
+        } else if (m_use_gpu && ratio > 0) {
             // CoreML Execution Provider has a 16,384-sample dynamic sequence limit on 1D ConvTranspose layers
             int max_coreml_frames = std::max(1, 16384 / ratio);
             latent_steps = std::min(latent_steps, max_coreml_frames);
@@ -1039,7 +1176,7 @@ auto OnnxBackend::perform_decode_gen(std::vector<float*>& out_buffer,
                     m_decode_gen_fifo.resize(num_channels);
                 }
 
-                // Smoothly crossfade seam with previous unconsumed block in FIFO
+                // Smoothly crossfade seam with previous unconsumed block in FIFO using equal-power curve
                 size_t prev_available = m_decode_gen_fifo[0].size();
                 size_t overlap = std::min(kCrossfadeSamples, std::min(prev_available, (size_t)out_samples / 2));
 
@@ -1047,10 +1184,12 @@ auto OnnxBackend::perform_decode_gen(std::vector<float*>& out_buffer,
                     if (overlap > 0) {
                         size_t tail_idx = prev_available - overlap;
                         for (size_t i = 0; i < overlap; ++i) {
-                            float w = 0.5f - 0.5f * std::cos(3.14159265f * (float)(i + 0.5f) / (float)overlap);
+                            float t = (float)(i + 0.5f) / (float)overlap;
+                            float w_in = std::sin(1.57079632679f * t);
+                            float w_out = std::cos(1.57079632679f * t);
                             float old_s = m_decode_gen_fifo[c][tail_idx + i];
                             float new_s = out_data[c * out_samples + i];
-                            m_decode_gen_fifo[c][tail_idx + i] = old_s * (1.0f - w) + new_s * w;
+                            m_decode_gen_fifo[c][tail_idx + i] = old_s * w_out + new_s * w_in;
                         }
                         m_decode_gen_fifo[c].insert(m_decode_gen_fifo[c].end(),
                                                   out_data + (c * out_samples) + overlap,
@@ -1087,10 +1226,6 @@ auto OnnxBackend::perform_decode_gen(std::vector<float*>& out_buffer,
     }
 
     m_decode_gen_fifo_read_idx += copy_samples;
-    if (fifo_channels > 0 && m_decode_gen_fifo_read_idx >= m_decode_gen_fifo[0].size()) {
-        for (auto& ch : m_decode_gen_fifo) ch.clear();
-        m_decode_gen_fifo_read_idx = 0;
-    }
 }
 
 auto OnnxBackend::has_method(std::string method_name) -> bool {
@@ -1148,12 +1283,23 @@ auto OnnxBackend::get_higher_ratio() -> int {
     return m_higher_ratio;
 }
 
+auto OnnxBackend::get_preferred_buffer_size() -> int {
+    if (!m_audio_inputs.empty() && m_audio_inputs[0].shape.size() >= 3) {
+        int64_t fixed_len = m_audio_inputs[0].shape.back();
+        if (fixed_len > 0) {
+            return (int)fixed_len;
+        }
+    }
+    return 0;
+}
+
 // Parameter Introspection & Bending
 auto OnnxBackend::get_available_layers() -> std::vector<std::string> {
     return m_available_layers;
 }
 
 auto OnnxBackend::get_layer_weights(std::string layer_name) -> std::vector<float> {
+    std::lock_guard<std::mutex> lock(m_session_mutex);
     auto it = m_parameters.find(layer_name);
     if (it != m_parameters.end()) {
         return it->second.current_weights;
@@ -1162,6 +1308,7 @@ auto OnnxBackend::get_layer_weights(std::string layer_name) -> std::vector<float
 }
 
 auto OnnxBackend::get_original_layer_weights(std::string layer_name) -> std::vector<float> {
+    std::lock_guard<std::mutex> lock(m_session_mutex);
     auto it = m_parameters.find(layer_name);
     if (it != m_parameters.end()) {
         return it->second.original_weights;
@@ -1170,6 +1317,7 @@ auto OnnxBackend::get_original_layer_weights(std::string layer_name) -> std::vec
 }
 
 auto OnnxBackend::get_layer_shape(std::string layer_name) -> std::vector<int64_t> {
+    std::lock_guard<std::mutex> lock(m_session_mutex);
     auto it = m_parameters.find(layer_name);
     if (it != m_parameters.end()) {
         return it->second.shape;
@@ -1178,6 +1326,7 @@ auto OnnxBackend::get_layer_shape(std::string layer_name) -> std::vector<int64_t
 }
 
 auto OnnxBackend::set_layer_weights(std::string layer_name, const std::vector<float>& weights) -> void {
+    std::lock_guard<std::mutex> lock(m_session_mutex);
     auto it = m_parameters.find(layer_name);
     if (it != m_parameters.end()) {
         size_t count = std::min(it->second.current_weights.size(), weights.size());
@@ -1187,6 +1336,7 @@ auto OnnxBackend::set_layer_weights(std::string layer_name, const std::vector<fl
 }
 
 auto OnnxBackend::reset_layer_weights(std::string layer_name) -> void {
+    std::lock_guard<std::mutex> lock(m_session_mutex);
     auto it = m_parameters.find(layer_name);
     if (it != m_parameters.end()) {
         it->second.current_weights = it->second.original_weights;
@@ -1195,6 +1345,7 @@ auto OnnxBackend::reset_layer_weights(std::string layer_name) -> void {
 }
 
 auto OnnxBackend::reset_all_layer_weights() -> void {
+    std::lock_guard<std::mutex> lock(m_session_mutex);
     for (auto& pair : m_parameters) {
         pair.second.current_weights = pair.second.original_weights;
         pair.second.is_modified = false;

@@ -752,7 +752,10 @@ void nn_base<nn_name, op_type>::update_method(std::string method) {
       
       set_method(method); 
 
-      if (m_buffer_size == -1) {
+      int pref_size = m_model ? m_model->get_preferred_buffer_size() : 0;
+      if (pref_size > 0 && m_buffer_size <= 0) {
+        m_buffer_size = pref_size;
+      } else if (m_buffer_size == -1) {
         // NO THREAD MODE
         m_buffer_size = m_higher_ratio;
       }
@@ -848,7 +851,7 @@ void nn_base<nn_name, op_type>::init_buffers() {
   m_use_thread = false;
   #endif
   
-  if (m_in_buffer.get() != nullptr) { m_in_buffer.release(); }
+  m_in_buffer.reset();
   m_in_buffer = std::make_unique<circular_buffer<double, float>[]>(n_inlets);
   if (m_in_buffer.get()->max_size() < m_buffer_size) {
     for (int i = 0; i < n_inlets; i++) {
@@ -856,9 +859,9 @@ void nn_base<nn_name, op_type>::init_buffers() {
     }
   }
 
-  if (m_out_buffer.get() != nullptr) { m_out_buffer.release(); }
+  m_out_buffer.reset();
   m_out_buffer = std::make_unique<circular_buffer<float, double>[]>(n_outlets);
-if (m_out_buffer.get()->max_size() < m_buffer_size) {
+  if (m_out_buffer.get()->max_size() < m_buffer_size) {
     for (int i = 0; i < n_outlets; i++) {
       m_out_buffer[i].initialize(m_buffer_size);
     }

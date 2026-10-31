@@ -60,7 +60,7 @@ auto TorchBackend::perform(std::vector<float *> &in_buffer,
                       std::vector<float *> &out_buffer, 
                       std::string method, 
                       int n_batches, int n_out_channels, int n_vec) -> void {
-  c10::InferenceMode guard;
+  torch::NoGradGuard guard;
 
   auto params = get_method_params(method);
   if (!params.size())
@@ -134,7 +134,7 @@ auto TorchBackend::perform_forward(std::vector<float *> &in_buffer,
   // so latent bending and autoencoding are fully supported.
   bool has_enc_dec = has_method("encode") && has_method("decode");
   if (has_enc_dec) {
-    c10::InferenceMode guard;
+    torch::NoGradGuard guard;
     if (!m_loaded) return;
 
     auto encode_params = get_method_params("encode");
@@ -163,17 +163,18 @@ auto TorchBackend::perform_forward(std::vector<float *> &in_buffer,
 
     if (latent_hook) {
       try {
-        latent_tensor = latent_tensor.contiguous();
-        int64_t channels = latent_tensor.dim() > 1 ? latent_tensor.size(1) : 1;
-        int64_t length = latent_tensor.dim() > 2 ? latent_tensor.size(2) : latent_tensor.numel();
-        IBackend::LatentBuffer buf{ latent_tensor.data_ptr<float>(), channels, length };
+        auto cpu_latent = latent_tensor.to(CPU).contiguous();
+        int64_t channels = cpu_latent.dim() > 1 ? cpu_latent.size(1) : 1;
+        int64_t length = cpu_latent.dim() > 2 ? cpu_latent.size(2) : cpu_latent.numel();
+        IBackend::LatentBuffer buf{ cpu_latent.data_ptr<float>(), channels, length };
         latent_hook(buf);
+        latent_tensor = cpu_latent.to(m_device);
       } catch (const std::exception &e) {
         std::cerr << "Forward latent hook error: " << e.what() << '\n';
       }
     }
 
-    std::vector<torch::jit::IValue> decode_inputs = {latent_tensor};
+    std::vector<torch::jit::IValue> decode_inputs = {latent_tensor.to(m_device)};
     at::Tensor tensor_out;
     try {
       tensor_out = m_model.get_method("decode")(decode_inputs, kwargs).toTensor();
@@ -215,7 +216,7 @@ auto TorchBackend::perform_forward(std::vector<float *> &in_buffer,
 
 auto TorchBackend::perform_prior_decode(std::vector<float *> &out_buffer,
                                   int n_batches, int n_out_channels, int n_vec) -> void {
-  c10::InferenceMode guard;
+  torch::NoGradGuard guard;
   if (!m_loaded) return;
 
   std::string prior_method = has_method("prior") ? "prior" : (has_method("generate") ? "generate" : "");
@@ -293,7 +294,7 @@ auto TorchBackend::perform_prior_decode(std::vector<float *> &out_buffer,
 auto TorchBackend::perform_decode_gen(std::vector<float *> &out_buffer,
                                 int n_batches, int n_out_channels, int n_vec,
                                 IBackend::LatentHook latent_hook) -> void {
-  c10::InferenceMode guard;
+  torch::NoGradGuard guard;
   if (!m_loaded || !has_method("decode")) return;
 
   auto decode_params = get_method_params("decode");
@@ -308,18 +309,23 @@ auto TorchBackend::perform_decode_gen(std::vector<float *> &out_buffer,
   size_t fifo_samples = (m_decode_gen_fifo.empty() || m_decode_gen_fifo[0].empty())
       ? 0 : (m_decode_gen_fifo[0].size() - m_decode_gen_fifo_read_idx);
 
-  // If FIFO does not have enough samples to fulfill n_vec, synthesize another block
-  if (fifo_samples < (size_t)n_vec) {
-    // Compact FIFO by erasing already consumed samples
+  const size_t kCrossfadeSamples = 512;
+  // If FIFO does not have enough samples to fulfill n_vec + crossfade cushion, synthesize another block
+  if (fifo_samples < (size_t)(n_vec + kCrossfadeSamples)) {
+    // Compact FIFO by erasing already consumed samples, preserving overlap tail for seamless blending
     if (m_decode_gen_fifo_read_idx > 0) {
-      for (auto &ch : m_decode_gen_fifo) {
-        if (m_decode_gen_fifo_read_idx < ch.size()) {
-          ch.erase(ch.begin(), ch.begin() + m_decode_gen_fifo_read_idx);
-        } else {
-          ch.clear();
+      size_t erase_count = (m_decode_gen_fifo_read_idx > kCrossfadeSamples)
+          ? (m_decode_gen_fifo_read_idx - kCrossfadeSamples) : 0;
+      if (erase_count > 0) {
+        for (auto &ch : m_decode_gen_fifo) {
+          if (erase_count < ch.size()) {
+            ch.erase(ch.begin(), ch.begin() + erase_count);
+          } else {
+            ch.clear();
+          }
         }
+        m_decode_gen_fifo_read_idx -= erase_count;
       }
-      m_decode_gen_fifo_read_idx = 0;
     }
 
     int min_steps = (latent_ratio <= 640 && latent_dim >= 128) ? 8 : (latent_ratio >= 1024 && latent_dim >= 8 ? 16 : 4);
@@ -384,17 +390,18 @@ auto TorchBackend::perform_decode_gen(std::vector<float *> &out_buffer,
           if (b == 0) m_decode_gen_latent_state[c] = prev;
         }
       }
-      latent_tensor = cpu_latent.to(m_device);
+      latent_tensor = cpu_latent;
     }
 
-    // Apply latent hook (2D Latent Vector Pad, Drift, Harmonics, RFF Orbit)
+    // Apply latent hook (2D Latent Vector Pad, Drift, Harmonics, RFF Orbit) on CPU memory
     if (latent_hook) {
       try {
-        latent_tensor = latent_tensor.contiguous();
-        int64_t channels = latent_tensor.dim() > 1 ? latent_tensor.size(1) : 1;
-        int64_t length = latent_tensor.dim() > 2 ? latent_tensor.size(2) : latent_tensor.numel();
-        IBackend::LatentBuffer buf{ latent_tensor.data_ptr<float>(), channels, length };
+        auto cpu_latent = latent_tensor.to(CPU).contiguous();
+        int64_t channels = cpu_latent.dim() > 1 ? cpu_latent.size(1) : 1;
+        int64_t length = cpu_latent.dim() > 2 ? cpu_latent.size(2) : cpu_latent.numel();
+        IBackend::LatentBuffer buf{ cpu_latent.data_ptr<float>(), channels, length };
         latent_hook(buf);
+        latent_tensor = cpu_latent;
       } catch (const std::exception &e) {
         std::cerr << "Decode Gen latent hook error: " << e.what() << '\n';
       }
@@ -419,13 +426,29 @@ auto TorchBackend::perform_decode_gen(std::vector<float *> &out_buffer,
     tensor_out = tensor_out.contiguous().to(CPU);
     const float* out_data = tensor_out.data_ptr<float>();
 
-    // Append synthesized output into per-channel FIFO buffers
+    // Append synthesized output into per-channel FIFO buffers with equal-power crossfade
     if (m_decode_gen_fifo.size() < (size_t)model_out_ch) {
       m_decode_gen_fifo.resize(model_out_ch);
     }
+    size_t prev_available = m_decode_gen_fifo[0].size();
+    size_t overlap = std::min(kCrossfadeSamples, std::min(prev_available, (size_t)new_samples / 2));
+
     for (int c = 0; c < model_out_ch; ++c) {
       const float* src = out_data + c * new_samples;
-      m_decode_gen_fifo[c].insert(m_decode_gen_fifo[c].end(), src, src + new_samples);
+      if (overlap > 0) {
+        size_t tail_idx = prev_available - overlap;
+        for (size_t i = 0; i < overlap; ++i) {
+          float t = (float)(i + 0.5f) / (float)overlap;
+          float w_in = std::sin(1.57079632679f * t);
+          float w_out = std::cos(1.57079632679f * t);
+          float old_s = m_decode_gen_fifo[c][tail_idx + i];
+          float new_s = src[i];
+          m_decode_gen_fifo[c][tail_idx + i] = old_s * w_out + new_s * w_in;
+        }
+        m_decode_gen_fifo[c].insert(m_decode_gen_fifo[c].end(), src + overlap, src + new_samples);
+      } else {
+        m_decode_gen_fifo[c].insert(m_decode_gen_fifo[c].end(), src, src + new_samples);
+      }
     }
   }
 
@@ -553,17 +576,53 @@ auto TorchBackend::load(std::string path, double sample_rate, const std::string*
           t.data_ptr<float>(), t.data_ptr<float>() + t.numel());
     }
 
+    // Warm up model execution to pre-compile MPS / CPU kernels and prevent audio callback dropouts
+    try {
+      int warm_in_ch = 1;
+      int warm_out_ch = 1;
+      auto fwd_p = get_method_params("forward");
+      if (fwd_p.size() >= 3) {
+        warm_in_ch = std::max(1, fwd_p[0]);
+        warm_out_ch = std::max(1, fwd_p[2]);
+      } else {
+        auto enc_p = get_method_params("encode");
+        auto dec_p = get_method_params("decode");
+        if (!enc_p.empty()) warm_in_ch = std::max(1, enc_p[0]);
+        if (dec_p.size() >= 3) warm_out_ch = std::max(1, dec_p[2]);
+      }
+      int warm_vec = 2048;
+      std::vector<std::vector<float>> dummy_in(warm_in_ch, std::vector<float>(warm_vec, 0.0f));
+      std::vector<std::vector<float>> dummy_out(warm_out_ch, std::vector<float>(warm_vec, 0.0f));
+      std::vector<float *> in_ptrs(warm_in_ch);
+      std::vector<float *> out_ptrs(warm_out_ch);
+      for (int c = 0; c < warm_in_ch; ++c) in_ptrs[c] = dummy_in[c].data();
+      for (int c = 0; c < warm_out_ch; ++c) out_ptrs[c] = dummy_out[c].data();
+
+      if (has_method("forward") || (has_method("encode") && has_method("decode"))) {
+        perform_forward(in_ptrs, out_ptrs, 1, warm_out_ch, warm_vec, nullptr);
+      } else if (has_method("decode")) {
+        perform_decode_gen(out_ptrs, 1, warm_out_ch, warm_vec, nullptr);
+      }
+      clear_decode_gen_fifo();
+    } catch (...) {}
+
     m_last_error.clear();
     return 0;
   } catch (const std::exception &e) {
-    m_last_error = e.what();
-    throw "problem loading model " + path + ". Exception : " + e.what();
+    m_last_error = "problem loading model " + path + ". Exception : " + e.what();
+    std::cerr << "[TorchBackend] " << m_last_error << std::endl;
+    m_loaded = 0;
+    return -1;
   } catch (const std::string &s) {
     m_last_error = s;
-    throw;
+    std::cerr << "[TorchBackend] " << m_last_error << std::endl;
+    m_loaded = 0;
+    return -1;
   } catch (...) {
-    m_last_error = "Unknown error loading TorchScript model.";
-    throw;
+    m_last_error = "Unknown error loading TorchScript model: " + path;
+    std::cerr << "[TorchBackend] " << m_last_error << std::endl;
+    m_loaded = 0;
+    return -1;
   }
 }
 
@@ -621,6 +680,9 @@ auto TorchBackend::reload() -> int {
 auto TorchBackend::has_method(std::string method_name) -> bool {
   if (!is_loaded()){
     return false; 
+  }
+  if (!m_available_methods.empty()) {
+    return std::find(m_available_methods.begin(), m_available_methods.end(), method_name) != m_available_methods.end();
   }
   std::unique_lock<std::mutex> model_lock(m_model_mutex);
   for (const auto &m : m_model.get_methods()) {
@@ -948,7 +1010,45 @@ auto TorchBackend::use_gpu(bool value) -> void {
   } else {
     m_device = CPU;
   }
-  m_model.to(m_device);
+  if (m_loaded) {
+    try {
+      m_model.to(m_device);
+    } catch (const std::exception &e) {
+      std::cerr << "[TorchBackend] Failed to move model to device: " << e.what() << std::endl;
+    }
+  }
+  model_lock.unlock();
+
+  if (m_loaded) {
+    try {
+      int warm_in_ch = 1;
+      int warm_out_ch = 1;
+      auto fwd_p = get_method_params("forward");
+      if (fwd_p.size() >= 3) {
+        warm_in_ch = std::max(1, fwd_p[0]);
+        warm_out_ch = std::max(1, fwd_p[2]);
+      } else {
+        auto enc_p = get_method_params("encode");
+        auto dec_p = get_method_params("decode");
+        if (!enc_p.empty()) warm_in_ch = std::max(1, enc_p[0]);
+        if (dec_p.size() >= 3) warm_out_ch = std::max(1, dec_p[2]);
+      }
+      int warm_vec = 2048;
+      std::vector<std::vector<float>> dummy_in(warm_in_ch, std::vector<float>(warm_vec, 0.0f));
+      std::vector<std::vector<float>> dummy_out(warm_out_ch, std::vector<float>(warm_vec, 0.0f));
+      std::vector<float *> in_ptrs(warm_in_ch);
+      std::vector<float *> out_ptrs(warm_out_ch);
+      for (int c = 0; c < warm_in_ch; ++c) in_ptrs[c] = dummy_in[c].data();
+      for (int c = 0; c < warm_out_ch; ++c) out_ptrs[c] = dummy_out[c].data();
+
+      if (has_method("forward") || (has_method("encode") && has_method("decode"))) {
+        perform_forward(in_ptrs, out_ptrs, 1, warm_out_ch, warm_vec, nullptr);
+      } else if (has_method("decode")) {
+        perform_decode_gen(out_ptrs, 1, warm_out_ch, warm_vec, nullptr);
+      }
+      clear_decode_gen_fifo();
+    } catch (...) {}
+  }
 }
 
 auto TorchBackend::get_buffer_name(std::string attribute_name, int attribute_elt_idx) -> std::string {
@@ -989,9 +1089,9 @@ auto TorchBackend::retrieve_buffer_attributes() -> std::vector<std::string> {
         buffer_names.push_back(model_out[i].toStringRef());
       }
       model_lock.unlock();
-    } catch (std::exception& e) {
+    } catch (const std::exception& e) {
       model_lock.unlock();
-      throw e;
+      std::cerr << "[TorchBackend] Error retrieving buffer attributes: " << e.what() << std::endl;
     }
   } 
   return buffer_names;
@@ -1116,6 +1216,7 @@ auto TorchBackend::set_layer_weights(std::string layer_name,
   // O(1) parameter lookup using cached tensor references
   auto it = m_parameter_cache.find(layer_name);
   if (it != m_parameter_cache.end()) {
+    if ((int64_t)weights.size() < it->second.numel()) return;
     torch::NoGradGuard no_grad;
     it->second.copy_(torch::from_blob(const_cast<float*>(weights.data()), it->second.sizes()));
     return;
@@ -1124,6 +1225,7 @@ auto TorchBackend::set_layer_weights(std::string layer_name,
   // Fallback linear search in case cache was bypassed
   for (const auto &layer : m_model.named_parameters()) {
     if (layer.name == layer_name) {
+      if ((int64_t)weights.size() < layer.value.numel()) return;
       torch::NoGradGuard no_grad;
       layer.value.copy_(torch::from_blob(const_cast<float*>(weights.data()), layer.value.sizes()));
       m_parameter_cache[layer_name] = layer.value;
