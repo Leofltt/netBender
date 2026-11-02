@@ -1,4 +1,4 @@
-# NetBender — Multi-Backend Neural Audio Circuit-Bending Engine
+# NetBender: Multi-Backend Neural Audio Circuit-Bending Engine
 
 > [!TIP]
 > **Pre-built Installers & Nightly Binaries**:
