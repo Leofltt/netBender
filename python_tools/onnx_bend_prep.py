@@ -145,8 +145,15 @@ def promote_initializers_to_inputs(
     base_path, _ = os.path.splitext(output_path)
     sidecar_bin_path = f"{base_path}.bin"
     with open(sidecar_bin_path, "wb") as f:
-        # Magic header 'NBND' (NetBender) + version 1
-        f.write(b"NBND\x01\x00\x00\x00")
+        if extra_metadata:
+            # NBND v2: Includes embedded JSON metadata string
+            f.write(b"NBND\x02\x00\x00\x00")
+            json_bytes = json.dumps(extra_metadata).encode("utf-8")
+            f.write(struct.pack("<I", len(json_bytes)))
+            f.write(json_bytes)
+        else:
+            # NBND v1: Weights only
+            f.write(b"NBND\x01\x00\x00\x00")
         f.write(struct.pack("<I", len(initializers)))
         for init in initializers:
             arr = numpy_helper.to_array(init).astype("float32")

@@ -988,11 +988,16 @@ def migrate_ts_to_pte(
         history_samples = int(meta_props.get("netbender.history_samples", "0"))
         output_offset = int(meta_props.get("netbender.output_offset", str(history_samples)))
         is_rave_onnx = any(n.name.startswith("/_rave/") for n in onnx_mod.graph.node) or "rave" in ts_model_path.lower() or "darbouka" in ts_model_path.lower() or "speech" in ts_model_path.lower()
+        is_stable_audio = "stable_audio" in ts_model_path.lower()
         if is_rave_onnx and history_samples == 0 and ratio >= 1024:
-            history_samples = 28672 if latent_dim >= 8 else 4096
+            history_samples = 28672 if ("speech" in ts_model_path.lower() or latent_dim <= 8) else 4096
             output_offset = history_samples
+        elif is_stable_audio and history_samples == 0:
+            history_samples = 4096
+            output_offset = 2048
         seq_len = buffer_size or max(2048, ratio)
         decode_latent_steps = max(1, (history_samples + seq_len + ratio - 1) // max(1, ratio))
+        latent_scale = 5.0 if (latent_dim >= 128 and ratio <= 640) else (2.5 if ("speech" in ts_model_path.lower() or (latent_dim <= 8 and ratio >= 1024)) else 1.0)
         meta = {
             "sr": sr,
             "sample_rate": sr,
@@ -1008,6 +1013,7 @@ def migrate_ts_to_pte(
             "out_ratio": 1,
             "history_samples": history_samples,
             "output_offset": output_offset,
+            "latent_scale": latent_scale,
             "decode_latent_steps": decode_latent_steps,
             "methods": ["forward"],
         }
@@ -1044,7 +1050,16 @@ def migrate_ts_to_pte(
         seq_len = int(meta["buffer_size"])
         latent_dim = int(meta.get("encode_out_dim", meta.get("decode_in_dim", 16)))
         is_rave = hasattr(ts_mod, "_rave") or "rave" in ts_model_path.lower() or "darbouka" in ts_model_path.lower() or "speech" in ts_model_path.lower()
-        history_samples = (28672 if latent_dim >= 8 else 4096) if (is_rave and int(meta["higher_ratio"]) >= 1024) else 0
+        is_stable_audio = "stable_audio" in ts_model_path.lower()
+        if is_rave and int(meta["higher_ratio"]) >= 1024:
+            history_samples = 28672 if ("speech" in ts_model_path.lower() or latent_dim <= 8) else 4096
+            output_offset = history_samples
+        elif is_stable_audio:
+            history_samples = 4096
+            output_offset = 2048
+        else:
+            history_samples = 0
+            output_offset = 0
         ratio = int(meta["higher_ratio"])
         meta["sample_rate"] = meta["sr"]
         meta["ratio"] = ratio
@@ -1052,7 +1067,8 @@ def migrate_ts_to_pte(
         meta["in_channels"] = in_dim
         meta["out_channels"] = int(meta["out_dim"])
         meta["history_samples"] = history_samples
-        meta["output_offset"] = history_samples
+        meta["output_offset"] = output_offset
+        meta["latent_scale"] = 5.0 if (latent_dim >= 128 and ratio <= 640) else (2.5 if ("speech" in ts_model_path.lower() or (latent_dim <= 8 and ratio >= 1024)) else 1.0)
         meta["decode_latent_steps"] = max(1, (history_samples + seq_len + ratio - 1) // max(1, ratio))
         sample_input = torch.zeros(1, in_dim, history_samples + seq_len, dtype=torch.float32)
         target_module = eager_module

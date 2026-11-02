@@ -8,6 +8,7 @@
 #include <cstring>
 #include <random>
 #include <thread>
+#include <nlohmann/json.hpp>
 
 // Include official ONNX Runtime C++ API
 #include <onnxruntime_cxx_api.h>
@@ -234,6 +235,20 @@ auto OnnxBackend::load(std::string path, double sample_rate, const std::string* 
                         m_output_offset = (size_t)std::max(0, std::stoi(meta_offset));
                     }
                 } catch (...) {}
+
+                try {
+                    std::string meta_scale = lookup_meta("netbender.latent_scale");
+                    if (!meta_scale.empty()) {
+                        m_latent_scale = std::stof(meta_scale);
+                    }
+                } catch (...) {}
+
+                try {
+                    std::string meta_steps = lookup_meta("netbender.decode_latent_steps");
+                    if (!meta_steps.empty()) {
+                        m_decode_latent_steps = std::stoi(meta_steps);
+                    }
+                } catch (...) {}
             } catch (...) {
                 // Model metadata not present or unsupported
             }
@@ -284,22 +299,29 @@ auto OnnxBackend::load(std::string path, double sample_rate, const std::string* 
 
         m_audio_history.clear();
         
-        // Backwards compatibility fallback if model does not contain explicit netbender.history_samples metadata
-        if (m_history_samples == 0 && m_output_offset == 0) {
-            bool is_stable_audio = (m_path.find("stable_audio") != std::string::npos || m_path.find("oobleck") != std::string::npos);
-            bool is_rave = false;
+        // Receptive field history fallback for architectures requiring streaming overlap
+        bool is_stable_audio = (m_path.find("stable_audio") != std::string::npos || m_path.find("oobleck") != std::string::npos);
+        if (!is_stable_audio) {
             for (const auto& pair : m_parameters) {
                 if (pair.first.find("oobleck") != std::string::npos) {
                     is_stable_audio = true;
-                }
-                if (pair.first.find("rave") != std::string::npos || pair.first.find("_rave") != std::string::npos) {
-                    is_rave = true;
+                    break;
                 }
             }
-            if (is_stable_audio) {
-                m_history_samples = 4096;
-                m_output_offset = 2048;
-            } else if (is_rave && m_higher_ratio >= 1024) {
+        }
+
+        if (is_stable_audio && (m_history_samples == 0 || m_output_offset == 0)) {
+            m_history_samples = 4096;
+            m_output_offset = 2048;
+        } else if (m_history_samples == 0 && m_output_offset == 0) {
+            bool is_rave = false;
+            for (const auto& pair : m_parameters) {
+                if (pair.first.find("rave") != std::string::npos || pair.first.find("_rave") != std::string::npos) {
+                    is_rave = true;
+                    break;
+                }
+            }
+            if (is_rave && m_higher_ratio >= 1024) {
                 m_history_samples = (m_latent_dim >= 8) ? 28672 : 4096;
                 m_output_offset = m_history_samples;
             }
@@ -504,6 +526,60 @@ auto OnnxBackend::introspect_graph() -> void {
         if (std::memcmp(magic, "NBND", 4) == 0) {
             uint32_t version = 0;
             bin_file.read(reinterpret_cast<char*>(&version), sizeof(version));
+            if (version >= 2) {
+                uint32_t json_len = 0;
+                bin_file.read(reinterpret_cast<char*>(&json_len), sizeof(json_len));
+                if (json_len > 0) {
+                    std::string json_str(json_len, '\0');
+                    bin_file.read(&json_str[0], json_len);
+                    try {
+                        auto meta = nlohmann::json::parse(json_str);
+                        auto get_field = [&](const std::string& k1, const std::string& k2) -> std::string {
+                            if (meta.contains(k1)) {
+                                if (meta[k1].is_string()) return meta[k1].get<std::string>();
+                                return meta[k1].dump();
+                            }
+                            if (meta.contains(k2)) {
+                                if (meta[k2].is_string()) return meta[k2].get<std::string>();
+                                return meta[k2].dump();
+                            }
+                            return "";
+                        };
+
+                        std::string sr_s = get_field("sample_rate", "netbender.sample_rate");
+                        if (!sr_s.empty()) {
+                            double sr = std::stod(sr_s);
+                            if (sr > 0.0) { m_model_sample_rate = sr; m_sample_rate = sr; }
+                        }
+                        std::string r_s = get_field("ratio", "netbender.ratio");
+                        if (!r_s.empty()) {
+                            int r = std::stoi(r_s);
+                            if (r > 0) m_higher_ratio = r;
+                        }
+                        std::string ld_s = get_field("latent_dim", "netbender.latent_dim");
+                        if (!ld_s.empty()) {
+                            int ld = std::stoi(ld_s);
+                            if (ld > 0) m_latent_dim = ld;
+                        }
+                        std::string hist_s = get_field("history_samples", "netbender.history_samples");
+                        if (!hist_s.empty()) {
+                            m_history_samples = (size_t)std::max(0, std::stoi(hist_s));
+                        }
+                        std::string off_s = get_field("output_offset", "netbender.output_offset");
+                        if (!off_s.empty()) {
+                            m_output_offset = (size_t)std::max(0, std::stoi(off_s));
+                        }
+                        std::string ls_s = get_field("latent_scale", "netbender.latent_scale");
+                        if (!ls_s.empty()) {
+                            m_latent_scale = std::stof(ls_s);
+                        }
+                        std::string dls_s = get_field("decode_latent_steps", "netbender.decode_latent_steps");
+                        if (!dls_s.empty()) {
+                            m_decode_latent_steps = std::stoi(dls_s);
+                        }
+                    } catch (...) {}
+                }
+            }
             uint32_t num_tensors = 0;
             bin_file.read(reinterpret_cast<char*>(&num_tensors), sizeof(num_tensors));
 
@@ -595,12 +671,27 @@ auto OnnxBackend::perform(std::vector<float*>& in_buffer,
             std::vector<const char*> comp_in_names = comp.input_name_ptrs;
             std::vector<Ort::Value> comp_in_tensors;
 
-            // Bind input stream
+            // Bind input stream (pack multi-channel buffer contiguously for ONNX)
             int in_ch = std::min((int)in_buffer.size(), m_in_channels);
             if (method == "decode") in_ch = m_latent_dim;
             std::vector<int64_t> in_shape = { 1, in_ch, n_vec };
 
-            float* in_ptr = in_buffer.empty() ? nullptr : in_buffer[0];
+            std::vector<float> packed_in;
+            float* in_ptr = nullptr;
+            if (in_ch > 1) {
+                packed_in.resize(in_ch * n_vec);
+                for (int c = 0; c < in_ch; ++c) {
+                    if (c < (int)in_buffer.size() && in_buffer[c]) {
+                        std::memcpy(packed_in.data() + (c * n_vec), in_buffer[c], n_vec * sizeof(float));
+                    } else {
+                        std::memset(packed_in.data() + (c * n_vec), 0, n_vec * sizeof(float));
+                    }
+                }
+                in_ptr = packed_in.data();
+            } else if (!in_buffer.empty() && in_buffer[0]) {
+                in_ptr = in_buffer[0];
+            }
+
             if (in_ptr && !comp_in_names.empty()) {
                 comp_in_tensors.push_back(Ort::Value::CreateTensor<float>(
                     m_impl->memory_info,
@@ -653,7 +744,22 @@ auto OnnxBackend::perform(std::vector<float*>& in_buffer,
             try {
                 int in_ch = std::min((int)in_buffer.size(), m_in_channels);
                 std::vector<int64_t> in_shape = { 1, in_ch, n_vec };
-                float* in_ptr = in_buffer.empty() ? nullptr : in_buffer[0];
+
+                std::vector<float> packed_in;
+                float* in_ptr = nullptr;
+                if (in_ch > 1) {
+                    packed_in.resize(in_ch * n_vec);
+                    for (int c = 0; c < in_ch; ++c) {
+                        if (c < (int)in_buffer.size() && in_buffer[c]) {
+                            std::memcpy(packed_in.data() + (c * n_vec), in_buffer[c], n_vec * sizeof(float));
+                        } else {
+                            std::memset(packed_in.data() + (c * n_vec), 0, n_vec * sizeof(float));
+                        }
+                    }
+                    in_ptr = packed_in.data();
+                } else if (!in_buffer.empty() && in_buffer[0]) {
+                    in_ptr = in_buffer[0];
+                }
                 if (!in_ptr || enc.input_name_ptrs.empty()) return;
 
                 std::vector<Ort::Value> enc_in_tensors;
@@ -1071,8 +1177,8 @@ auto OnnxBackend::perform_decode_gen(std::vector<float*>& out_buffer,
     size_t fifo_samples = (m_decode_gen_fifo.empty() || m_decode_gen_fifo[0].empty()) 
         ? 0 : (m_decode_gen_fifo[0].size() - m_decode_gen_fifo_read_idx);
 
-    // If FIFO does not have enough samples to fulfill n_vec + crossfade cushion, synthesize another block
-    const size_t kCrossfadeSamples = 1024;
+    // If FIFO does not have enough samples to fulfill n_vec + crossfade cushion, synthesize blocks
+    const size_t kCrossfadeSamples = 512;
     if (fifo_samples < (size_t)(n_vec + kCrossfadeSamples)) {
         std::unique_lock<std::mutex> lock(m_session_mutex);
 
@@ -1092,26 +1198,15 @@ auto OnnxBackend::perform_decode_gen(std::vector<float*>& out_buffer,
             }
         }
 
-        int min_frames = 8;
-        if (m_higher_ratio >= 1024 && m_latent_dim >= 8 && m_history_samples > 4096) {
-            min_frames = 16;
-        }
-        int latent_steps = std::max(min_frames, (n_vec + (int)kCrossfadeSamples) / ratio);
-        if (m_latent_dim >= 128 && m_higher_ratio <= 640) {
-            latent_steps = std::min(latent_steps, 6); // EnCodec decode graph requires frames <= 6
-        } else if (m_use_gpu && ratio > 0) {
-            // CoreML Execution Provider has a 16,384-sample dynamic sequence limit on 1D ConvTranspose layers
-            int max_coreml_frames = std::max(1, 16384 / ratio);
-            latent_steps = std::min(latent_steps, max_coreml_frames);
-        }
         int latent_dim = std::max(1, m_latent_dim);
+        float latent_scale = (latent_dim >= 256 && m_latent_scale == 1.0f) ? 0.25f : m_latent_scale;
+        int latent_steps = (m_decode_latent_steps > 0)
+            ? m_decode_latent_steps
+            : std::max(4, (n_vec + (int)kCrossfadeSamples) / ratio);
 
-        float latent_scale = 1.0f;
-        if (m_latent_dim >= 128 && m_higher_ratio <= 640) {
-            latent_scale = 5.0f; // EnCodec SEANet calibrated (prevents tripping 2.0 fuse)
-        } else if (m_higher_ratio >= 1024) {
-            latent_scale = 1.0f; // VAEs (Stable Audio 64-dim, Speech RAVE 8/16-dim) standard unit normal latents
-        }
+        // Receptive field history frames to carry across callbacks to eliminate boundary transients
+        int hist_lat_steps = (m_output_offset > 0) ? (int)(m_output_offset / ratio) : 0;
+        int total_lat_steps = hist_lat_steps + latent_steps;
 
         // Continuous Ornstein-Uhlenbeck smooth latent random walk
         const float alpha = (ratio <= 640) ? 0.94f : 0.86f;
@@ -1127,82 +1222,133 @@ auto OnnxBackend::perform_decode_gen(std::vector<float*>& out_buffer,
             }
         }
 
-        std::vector<float> latent_data(latent_dim * latent_steps);
-        for (int c = 0; c < latent_dim; ++c) {
-            float prev = m_decode_gen_latent_state[c];
-            float* ch_ptr = latent_data.data() + (c * latent_steps);
-            for (int t = 0; t < latent_steps; ++t) {
-                float eps = norm_dist(rng_gen);
-                prev = alpha * prev + beta * eps;
-                ch_ptr[t] = prev;
-            }
-            m_decode_gen_latent_state[c] = prev;
-        }
-
-        // Apply latent hook directly on contiguous [latent_dim, latent_steps] buffer
-        if (latent_hook) {
-            IBackend::LatentBuffer buf{ latent_data.data(), (int64_t)latent_dim, (int64_t)latent_steps };
-            latent_hook(buf);
-        }
-
-        try {
-            std::vector<int64_t> in_shape = { 1, (int64_t)latent_dim, (int64_t)latent_steps };
-            std::vector<Ort::Value> comp_in_tensors;
-            comp_in_tensors.push_back(Ort::Value::CreateTensor<float>(
-                m_impl->memory_info,
-                latent_data.data(),
-                latent_data.size(),
-                in_shape.data(),
-                in_shape.size()
-            ));
-
-            auto comp_outputs = comp.session->Run(
-                Ort::RunOptions{nullptr},
-                comp.input_name_ptrs.data(),
-                comp_in_tensors.data(),
-                comp_in_tensors.size(),
-                comp.output_name_ptrs.data(),
-                comp.output_name_ptrs.size()
-            );
-
-            if (!comp_outputs.empty()) {
-                float* out_data = comp_outputs[0].GetTensorMutableData<float>();
-                auto out_info = comp_outputs[0].GetTensorTypeAndShapeInfo();
-                auto out_shape = out_info.GetShape();
-                int num_channels = (out_shape.size() >= 2) ? (int)out_shape[1] : 1;
-                int out_samples = (out_shape.size() >= 3 && out_shape[2] > 0) ? (int)out_shape[2] : (latent_steps * ratio);
-
-                if (m_decode_gen_fifo.size() < (size_t)num_channels) {
-                    m_decode_gen_fifo.resize(num_channels);
+        if (hist_lat_steps > 0 && m_decode_gen_latent_history.size() != (size_t)(latent_dim * hist_lat_steps)) {
+            m_decode_gen_latent_history.resize(latent_dim * hist_lat_steps);
+            for (int c = 0; c < latent_dim; ++c) {
+                float prev = m_decode_gen_latent_state[c];
+                for (int t = 0; t < hist_lat_steps; ++t) {
+                    prev = alpha * prev + beta * norm_dist(rng_gen);
+                    m_decode_gen_latent_history[c * hist_lat_steps + t] = prev;
                 }
+                m_decode_gen_latent_state[c] = prev;
+            }
+        }
 
-                // Smoothly crossfade seam with previous unconsumed block in FIFO using equal-power curve
-                size_t prev_available = m_decode_gen_fifo[0].size();
-                size_t overlap = std::min(kCrossfadeSamples, std::min(prev_available, (size_t)out_samples / 2));
+        // Loop synthesis passes until FIFO has enough samples to fulfill n_vec + kCrossfadeSamples
+        int synth_iterations = 0;
+        const int max_synth_iterations = 8;
+        while (fifo_samples < (size_t)(n_vec + kCrossfadeSamples) && synth_iterations < max_synth_iterations) {
+            synth_iterations++;
+            std::vector<float> latent_data((size_t)(latent_dim * total_lat_steps));
 
-                for (int c = 0; c < num_channels; ++c) {
-                    if (overlap > 0) {
-                        size_t tail_idx = prev_available - overlap;
-                        for (size_t i = 0; i < overlap; ++i) {
-                            float t = (float)(i + 0.5f) / (float)overlap;
-                            float w_in = std::sin(1.57079632679f * t);
-                            float w_out = std::cos(1.57079632679f * t);
-                            float old_s = m_decode_gen_fifo[c][tail_idx + i];
-                            float new_s = out_data[c * out_samples + i];
-                            m_decode_gen_fifo[c][tail_idx + i] = old_s * w_out + new_s * w_in;
+            // 1. Fill leading history steps from rolling history
+            if (hist_lat_steps > 0) {
+                for (int c = 0; c < latent_dim; ++c) {
+                    std::memcpy(latent_data.data() + (c * total_lat_steps),
+                                m_decode_gen_latent_history.data() + (c * hist_lat_steps),
+                                hist_lat_steps * sizeof(float));
+                }
+            }
+
+            // 2. Generate new latent steps via Ornstein-Uhlenbeck random walk
+            for (int c = 0; c < latent_dim; ++c) {
+                float prev = m_decode_gen_latent_state[c];
+                float* ch_ptr = latent_data.data() + (c * total_lat_steps) + hist_lat_steps;
+                for (int t = 0; t < latent_steps; ++t) {
+                    float eps = norm_dist(rng_gen);
+                    prev = alpha * prev + beta * eps;
+                    ch_ptr[t] = prev;
+                }
+                m_decode_gen_latent_state[c] = prev;
+            }
+
+            // 3. Update rolling history with the tail of newly synthesized latents
+            if (hist_lat_steps > 0) {
+                for (int c = 0; c < latent_dim; ++c) {
+                    const float* ch_end = latent_data.data() + (c * total_lat_steps) + (total_lat_steps - hist_lat_steps);
+                    std::memcpy(m_decode_gen_latent_history.data() + (c * hist_lat_steps),
+                                ch_end, hist_lat_steps * sizeof(float));
+                }
+            }
+
+            // Apply latent hook directly on contiguous new [latent_dim, latent_steps] buffer
+            if (latent_hook) {
+                for (int c = 0; c < latent_dim; ++c) {
+                    float* slice_ptr = latent_data.data() + (c * total_lat_steps) + hist_lat_steps;
+                    IBackend::LatentBuffer buf{ slice_ptr, 1, (int64_t)latent_steps };
+                    latent_hook(buf);
+                }
+            }
+
+            try {
+                std::vector<int64_t> in_shape = { 1, (int64_t)latent_dim, (int64_t)total_lat_steps };
+                std::vector<Ort::Value> comp_in_tensors;
+                comp_in_tensors.push_back(Ort::Value::CreateTensor<float>(
+                    m_impl->memory_info,
+                    latent_data.data(),
+                    latent_data.size(),
+                    in_shape.data(),
+                    in_shape.size()
+                ));
+
+                auto comp_outputs = comp.session->Run(
+                    Ort::RunOptions{nullptr},
+                    comp.input_name_ptrs.data(),
+                    comp_in_tensors.data(),
+                    comp_in_tensors.size(),
+                    comp.output_name_ptrs.data(),
+                    comp.output_name_ptrs.size()
+                );
+
+                if (!comp_outputs.empty()) {
+                    float* out_data = comp_outputs[0].GetTensorMutableData<float>();
+                    auto out_info = comp_outputs[0].GetTensorTypeAndShapeInfo();
+                    auto out_shape = out_info.GetShape();
+                    int num_channels = (out_shape.size() >= 2) ? (int)out_shape[1] : 1;
+                    int full_out_samples = (out_shape.size() >= 3 && out_shape[2] > 0) ? (int)out_shape[2] : (total_lat_steps * ratio);
+
+                    // Discard the initial transient / receptive field offset
+                    int offset = (hist_lat_steps > 0) ? (int)m_output_offset : 0;
+                    if (offset >= full_out_samples) offset = 0;
+                    int out_samples = std::max(0, full_out_samples - offset);
+
+                    if (m_decode_gen_fifo.size() < (size_t)num_channels) {
+                        m_decode_gen_fifo.resize(num_channels);
+                    }
+
+                    // Smoothly crossfade seam with previous unconsumed block in FIFO using equal-power curve
+                    size_t prev_available = m_decode_gen_fifo[0].size();
+                    size_t overlap = std::min(kCrossfadeSamples, std::min(prev_available, (size_t)out_samples / 2));
+
+                    for (int c = 0; c < num_channels; ++c) {
+                        const float* src = out_data + (c * full_out_samples) + offset;
+                        if (overlap > 0) {
+                            size_t tail_idx = prev_available - overlap;
+                            for (size_t i = 0; i < overlap; ++i) {
+                                float t = (float)(i + 0.5f) / (float)overlap;
+                                float w_in = std::sin(1.57079632679f * t);
+                                float w_out = std::cos(1.57079632679f * t);
+                                float old_s = m_decode_gen_fifo[c][tail_idx + i];
+                                float new_s = src[i];
+                                m_decode_gen_fifo[c][tail_idx + i] = old_s * w_out + new_s * w_in;
+                            }
+                            m_decode_gen_fifo[c].insert(m_decode_gen_fifo[c].end(),
+                                                      src + overlap,
+                                                      src + out_samples);
+                        } else {
+                            m_decode_gen_fifo[c].insert(m_decode_gen_fifo[c].end(),
+                                                      src,
+                                                      src + out_samples);
                         }
-                        m_decode_gen_fifo[c].insert(m_decode_gen_fifo[c].end(),
-                                                  out_data + (c * out_samples) + overlap,
-                                                  out_data + (c * out_samples) + out_samples);
-                    } else {
-                        m_decode_gen_fifo[c].insert(m_decode_gen_fifo[c].end(),
-                                                  out_data + (c * out_samples),
-                                                  out_data + (c * out_samples) + out_samples);
                     }
                 }
+            } catch (const std::exception& ce) {
+                std::cerr << "[OnnxBackend::perform_decode_gen] Error: " << ce.what() << std::endl;
+                break;
             }
-        } catch (const std::exception& ce) {
-            std::cerr << "[OnnxBackend::perform_decode_gen] Error: " << ce.what() << std::endl;
+
+            fifo_samples = (m_decode_gen_fifo.empty() || m_decode_gen_fifo[0].empty()) 
+                ? 0 : (m_decode_gen_fifo[0].size() - m_decode_gen_fifo_read_idx);
         }
     }
 
@@ -1226,6 +1372,15 @@ auto OnnxBackend::perform_decode_gen(std::vector<float*>& out_buffer,
     }
 
     m_decode_gen_fifo_read_idx += copy_samples;
+    if (fifo_channels > 0 && m_decode_gen_fifo_read_idx >= m_decode_gen_fifo[0].size()) {
+        for (auto& ch : m_decode_gen_fifo) ch.clear();
+        m_decode_gen_fifo_read_idx = 0;
+    }
+}
+
+auto OnnxBackend::clear_decode_gen_fifo() -> void {
+    IBackend::clear_decode_gen_fifo();
+    m_decode_gen_latent_history.clear();
 }
 
 auto OnnxBackend::has_method(std::string method_name) -> bool {

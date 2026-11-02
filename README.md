@@ -4,7 +4,7 @@
 > **Pre-built Installers & Nightly Binaries**:
 > Looking to quickly install the VST3, AU, or Standalone plugins without building from source? Download pre-built installers and packages from the latest completed run of the [Release Plugins GitHub Action Workflow](https://github.com/Leofltt/nn_tilde_bending/actions/workflows/release_plugins.yaml) (under the **Artifacts** section).
 
-**NetBender** (`nn_tilde_bending`) is a performative neural audio synthesis and live circuit-bending engine evolved from [IRCAM's `nn~`](https://github.com/acids-ircam/nn_tilde) and inspired by modern edge runtimes ([`neural_tilde`](https://github.com/jasper-zheng/neural_tilde)). It transforms deep learning audio models—such as [RAVE](https://github.com/acids-ircam/RAVE), [Stable Audio Open VAE](https://huggingface.co/stabilityai/stable-audio-open-1.0), and [Meta EnCodec](https://github.com/facebookresearch/encodec)—into expressive, tactile instruments via real-time weight mutation, layer-selective trace isolation, momentary short-circuiting, thermal drift, resonant cross-talk, latent space terrain navigation, and safety circuit breakers.
+**NetBender** (`nn_tilde_bending`) is a performative neural audio synthesis and live circuit-bending engine evolved from [IRCAM's `nn~`](https://github.com/acids-ircam/nn_tilde), started as a fork of [nn_tilde_bending](https://github.com/blazejkotowski/nn_tilde_bending) and inspired by modern runtimes such as ([`neural_tilde`](https://github.com/jasper-zheng/neural_tilde)). It transforms deep learning audio models such as [RAVE](https://github.com/acids-ircam/RAVE), [Stable Audio Open VAE](https://huggingface.co/stabilityai/stable-audio-open-1.0), and [Meta EnCodec](https://github.com/facebookresearch/encodec)—into expressive, tactile instruments via real-time weight mutation, layer-selective trace isolation, momentary short-circuiting, thermal drift, resonant cross-talk, latent space terrain navigation, and safety circuit breakers.
 
 ---
 
@@ -14,17 +14,58 @@ Because TorchScript (`torch.jit`) is deprecated in PyTorch 2.x+, NetBender uses 
 
 | Extension | Backend Class | Hardware Acceleration / Delegates | Weight-Bending Mechanism |
 | --- | --- | --- | --- |
-| **`.pte`** | `ExecuTorchBackend` | **CoreML** (Apple Neural Engine / GPU), **MPS** (Metal), **XNNPACK** (ARM NEON / x86 AVX), **Portable** | Input-Promoted Parameters (`torch.func.functional_call`) + `NBND` `.bin` sidecar & `.json` metadata |
-| **`.onnx`** | `OnnxBackend` | **CoreML Execution Provider** (macOS `@gpu 1` / GPU toggle), **CPU** multi-threaded | Promoted Graph Initializers (`onnx_bend_prep.py`) + zero-copy `Ort::Value` bindings & `NBND` `.bin` sidecar |
+| **`.pte`** | `ExecuTorchBackend` | **CoreML** (Apple Neural Engine / GPU), **MPS** (Metal), **XNNPACK** (ARM NEON / x86 AVX), **Portable** | Input-Promoted Parameters (`torch.func.functional_call`) + unified `NBND` v2 `.bin` sidecar |
+| **`.onnx`** | `OnnxBackend` | **CoreML Execution Provider** (macOS `@gpu 1` / GPU toggle), **CPU** multi-threaded | Promoted Graph Initializers (`onnx_bend_prep.py`) + zero-copy `Ort::Value` bindings & `NBND` v2 `.bin` sidecar |
 | **`.ts`** | `TorchBackend` | **MPS** (macOS), **CUDA** (Linux/Windows), **CPU** (LibTorch fallback) | Direct in-place `at::Tensor` parameter mutation + shadow baseline cloning |
 
-### The `NBND` Sidecar Format (`.bin` + `.json`)
+### The Unified `NBND` Sidecar Format (`.bin`)
 
-Compiled edge runtimes (ExecuTorch `.pte` and ONNX Runtime `.onnx`) achieve their speedups by freezing static weights inside hardware-compiled subgraphs. To preserve **zero-allocation, sample-accurate weight bending** without re-compiling sessions on the audio thread:
+Compiled edge runtimes (ExecuTorch `.pte` and ONNX Runtime `.onnx`) achieve their speedups by freezing static weights inside hardware-compiled subgraphs. To preserve **zero-allocation, sample-accurate weight bending** and eliminate sidecar file clutter, NetBender unifies all model configuration, ratios, latency offsets, and baseline weights into a single **`NBND` v2 binary sidecar (`<model>.bin`)**:
 
-1. Selected bendable parameters are promoted to explicit graph inputs during export (`pte_bend_prep.py` / `onnx_bend_prep.py`).
-2. Their baseline float32 weights and tensor shapes are written to a companion `<model>.bin` file (`NBND` binary header).
-3. At runtime, NetBender memory-maps the `NBND` sidecar into contiguous `float` buffers and binds them directly to the ExecuTorch or ONNX Runtime execution inputs with zero copies.
+1. **Embedded JSON Metadata**: The `.bin` file header embeds the model metadata (sample rate, compression ratio, channels, methods, `history_samples`, `output_offset`, `latent_scale`, and delegate settings), removing the need for separate `.json` sidecar files.
+2. **Contiguous Binary Tensors**: Promoted layer names, dimensions, and float32 weights are stored contiguously directly after the metadata header.
+3. **Instant Zero-Copy Mapping**: At runtime, NetBender reads the metadata and memory-maps the baseline weights with zero serialization overhead, binding them directly into ExecuTorch and ONNX Runtime execution inputs.
+4. **Backward Compatibility**: NetBender retains backward compatibility with legacy v1 `.bin` and standalone `.json` files if present.
+
+#### Binary Layout (`NBND` v2 Byte Specification)
+
+All multi-byte numeric fields are encoded in **little-endian** byte order:
+
+```text
++-----------------------+-----------------------+-----------------------+-----------------------+
+|  'N'   |  'B'  |  'N'  |  'D'  (0x4E 0x42 0x4E 0x44: Magic 4B)                                |
++-----------------------------------------------+-----------------------------------------------+
+|  Version: uint32 (e.g. 0x00000002)             |  JSON Length L: uint32                        |
++-----------------------------------------------+-----------------------------------------------+
+|  Embedded UTF-8 JSON Metadata String (L bytes) ...                                           |
++-----------------------------------------------+-----------------------------------------------+
+|  Number of Tensors T: uint32                  |                                               |
++-----------------------------------------------+-----------------------------------------------+
+|  [Tensor Record 0]:                                                                           |
+|    - Name Length K: uint32                                                                    |
+|    - Name: char[K] (UTF-8 / ASCII)                                                            |
+|    - Num Dimensions D: uint32                                                                 |
+|    - Shape: int64[D] (D * 8 bytes)                                                            |
+|    - Num Elements E: uint64 (8 bytes)                                                         |
+|    - Weights: float32[E] (E * 4 bytes)                                                        |
++-----------------------------------------------------------------------------------------------+
+|  [Tensor Record 1 ... T-1] (repeated contiguously)                                           |
++-----------------------------------------------------------------------------------------------+
+```
+
+| Section | Field | Type | Description |
+| :--- | :--- | :--- | :--- |
+| **Header** | `magic` | `char[4]` | Format identifier: `'N'`, `'B'`, `'N'`, `'D'` (`0x4E424E44`). |
+| | `version` | `uint32` | Container version (`2` = unified JSON metadata + tensor payloads; `1` = tensor payload only). |
+| | `json_len` | `uint32` | Byte length $L$ of embedded UTF-8 JSON metadata. |
+| | `json_payload` | `char[L]` | UTF-8 JSON string encoding `sample_rate`, `ratio`, `latent_dim`, `history_samples`, `output_offset`, `latent_scale`, `decode_latent_steps`, `delegate`, `methods`, etc. |
+| | `num_tensors` | `uint32` | Total count $T$ of promoted parameter tensors. |
+| **Tensor Records** | `name_len` | `uint32` | Length $K$ of parameter layer identifier name. |
+| *(Repeated $T$ times)* | `name` | `char[K]` | Layer identifier name (e.g. `"generator.conv_in.weight"`). |
+| | `num_dims` | `uint32` | Number of dimensions $D$ (tensor rank). |
+| | `shape` | `int64[D]` | Array of $D$ 64-bit signed integers defining tensor shape (e.g. `[128, 64, 7]`). |
+| | `num_elements`| `uint64` | Total number of elements $E = \prod \text{shape}$. |
+| | `weights` | `float32[E]`| IEEE 754 32-bit floating point tensor weights ($E \times 4$ bytes). |
 
 ---
 
@@ -67,7 +108,7 @@ ExecuTorch exports support two bend promotion modes (`--bend-mode`) and four har
   Exports a pure static `.pte` graph with no promoted weight inputs (maximum raw inference speed).
 
 ```bash
-# Convert all 4 reference models to CoreML-accelerated .pte files (GPU / Apple Neural Engine):
+# Example converts reference models to CoreML-accelerated .pte files (GPU / Apple Neural Engine):
 .venv/bin/python -m python_tools.migrate_ts_to_pte models/darbouka.ts \
     -o models/darbouka_coreml.pte --delegate coreml --bend-mode delegate
 .venv/bin/python -m python_tools.migrate_ts_to_pte models/speech.ts \
@@ -77,7 +118,7 @@ ExecuTorch exports support two bend promotion modes (`--bend-mode`) and four har
 .venv/bin/python -m python_tools.migrate_ts_to_pte models/stable_audio_1_vae.ts \
     -o models/stable_audio_1_vae_coreml.pte --delegate coreml --bend-mode delegate
 
-# Convert all 4 reference models to XNNPACK-accelerated .pte files (CPU SIMD):
+# Converts reference models to XNNPACK-accelerated .pte files (CPU SIMD):
 .venv/bin/python -m python_tools.migrate_ts_to_pte models/darbouka.ts \
     -o models/darbouka_xnnpack.pte --delegate xnnpack --bend-mode delegate
 .venv/bin/python -m python_tools.migrate_ts_to_pte models/speech.ts \
@@ -114,7 +155,7 @@ ExecuTorch exports support two bend promotion modes (`--bend-mode`) and four har
     -o models/speech_bendable.onnx \
     --buffer-size 2048
 
-# Convert Stable Audio Open / 1.0 VAE (.ts) or EnCodec (.ts) to bendable ONNX:
+# Convert Stable Audio Open 1.0 (v1 VAE) (.ts) or EnCodec (.ts) to bendable ONNX:
 .venv/bin/python -m python_tools.export_cli stable_audio_to_onnx \
     -i models/stable_audio_1_vae.ts \
     -o models/stable_audio_1_vae_bendable.onnx \
@@ -124,6 +165,11 @@ ExecuTorch exports support two bend promotion modes (`--bend-mode`) and four har
     -i models/encodec_bendable.ts \
     -o models/encodec_bendable.onnx \
     --buffer-size 2048 --channels 1
+
+# Export Stable Audio 3 SAME-S (v3) directly from safetensors to .ts and bendable .onnx:
+.venv/bin/python python_tools/exporters/same_s_exporter.py \
+    -i models/checkpoints/stable_audio_3_same_s.safetensors \
+    -o models/stable_audio_3_same_s.ts --format both
 
 # Export directly from Hugging Face or local checkpoints (Stable Audio, EnCodec, RAVE):
 .venv/bin/python -m python_tools.export_cli stable_audio --onnx -o models/sa_vae.onnx
@@ -272,15 +318,26 @@ cmake --build build --target all
 
 ### 3. Multi-Backend Verification & Sentry Suite (`test_backends`)
 
-The C++ test harness (`build/tests/test_backends`) verifies loading, streaming `forward` passes, `decode gen`, `prior` synthesis, NaN/Inf/fuse sentry protection, and real-time weight bending across `.ts`, `.onnx`, and `.pte` models, writing a summary report to `test_report.md`:
+The C++ test harness (`build/tests/test_backends`) verifies loading, streaming `forward` passes, `decode gen`, `prior` synthesis, NaN/Inf/fuse sentry protection, and real-time weight bending across `.ts`, `.onnx`, and `.pte` models:
 
 ```bash
-# Run the full CPU test suite (.ts CPU, .onnx CPU, and *_xnnpack.pte):
+# Run the full CPU test suite (.ts CPU, .onnx CPU, and *_xnnpack.pte) -> test_report_cpu.md:
 ./build/tests/test_backends
 
-# Run the full GPU / Apple Neural Engine test suite (.ts MPS, .onnx CoreML EP, and *_coreml.pte):
+# Run the full GPU / Apple Neural Engine test suite (.ts MPS, .onnx CoreML EP, and *_coreml.pte) -> test_report_gpu.md:
 ./build/tests/test_backends --gpu
 
 # Or test specific model files directly:
 ./build/tests/test_backends --gpu models/stable_audio_1_vae_coreml.pte models/encodec_coreml.pte
 ```
+
+### 4. Streaming Metadata Specification
+
+NetBender models configure their streaming buffer, receptive field discard, and latent generation parameters via unified `NBND` v2 `.bin` embedded metadata and ONNX model metadata properties (`netbender.*`):
+
+| Property | Default | Description |
+| --- | --- | --- |
+| `history_samples` | `0` | Number of past audio samples kept in the streaming rolling buffer to provide context for non-causal convolutions. Eliminates boundary jump clicks (e.g. 4096 for Stable Audio Open, 28672 for RAVE Speech, 16384 for SAME-S). |
+| `output_offset` | `0` | Initial transient / receptive-field latency samples discarded from synthesized output so the audio stream begins at steady state without silence gaps. |
+| `latent_scale` | `1.0` | Ornstein-Uhlenbeck random walk standard deviation scale for `decode gen` synthesis, matched to the decoder's expected latent variance (e.g. `5.0` for EnCodec SEANet, `2.5` for RAVE Speech, `1.0` for unit-normal VAEs). |
+| `decode_latent_steps` | `1` | Number of latent frames expected by the companion `decode` method. |

@@ -51,6 +51,7 @@ public:
     auto perform_decode_gen(std::vector<float*>& out_buffer,
                             int n_batches, int n_out_channels, int n_vec,
                             LatentHook latent_hook = nullptr) -> void override;
+    auto clear_decode_gen_fifo() -> void override;
 
     // Mode & Method Introspection
     auto has_method(std::string method_name) -> bool override;
@@ -122,10 +123,12 @@ private:
     int m_latent_dim { 64 };
     int m_buffer_size { 2048 };
     int m_decode_latent_steps { 1 };
+    float m_latent_scale { 1.0f };
 
     std::vector<std::vector<float>> m_audio_history;
     size_t m_history_samples { 0 };
     size_t m_output_offset { 0 };
+    std::vector<float> m_decode_gen_latent_history;
 
     std::vector<std::string> m_available_methods;
 

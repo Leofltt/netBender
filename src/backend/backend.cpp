@@ -360,7 +360,7 @@ auto TorchBackend::perform_decode_gen(std::vector<float *> &out_buffer,
     // Fallback: If no prior or prior failed, synthesize base latent buffer with continuous Ornstein-Uhlenbeck walk
     // EnCodec SEANet operates at sigma ~ 8.5 to 10.0; VAEs (Stable Audio, RAVE) operate at unit normal sigma ~ 1.0
     if (!latent_tensor.defined() || latent_tensor.numel() == 0) {
-      float latent_scale = (latent_dim >= 128 && latent_ratio <= 640) ? 8.5f : 1.0f;
+      float latent_scale = (latent_dim >= 128 && latent_ratio <= 640) ? 8.5f : ((latent_dim >= 256) ? 0.25f : 1.0f);
       const float alpha = (latent_ratio <= 640) ? 0.94f : 0.86f;
       const float beta = std::sqrt(1.0f - alpha * alpha);
 

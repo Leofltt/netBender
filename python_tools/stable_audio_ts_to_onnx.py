@@ -238,8 +238,10 @@ def convert_stable_audio_ts_to_onnx(
         "netbender.latent_dim": str(latent_dim),
         "netbender.in_channels": str(in_channels),
         "netbender.out_channels": str(out_channels),
-        "netbender.history_samples": "0",
-        "netbender.output_offset": "0",
+        "netbender.history_samples": "2048",
+        "netbender.output_offset": "2048",
+        "netbender.latent_scale": "1.0",
+        "netbender.decode_latent_steps": "2",
     }
 
     if promote_for_bending:
@@ -261,6 +263,37 @@ def convert_stable_audio_ts_to_onnx(
                 os.remove(std_onnx_path)
             except OSError:
                 pass
+    else:
+        if verbose:
+            print(f"[3/3] Preserving constant initializers (no-bending mode): {output_onnx_path}...")
+        import onnx
+        from python_tools.pte_bend_prep import write_nbnd_sidecar
+        m = onnx.load(std_onnx_path)
+        for k, v in extra_meta.items():
+            entry = m.metadata_props.add()
+            entry.key = k
+            entry.value = str(v)
+        onnx.save(m, output_onnx_path)
+        if std_onnx_path != output_onnx_path and os.path.exists(std_onnx_path):
+            try:
+                os.remove(std_onnx_path)
+            except OSError:
+                pass
+        bin_path = f"{base}.bin"
+        meta_dict = {
+            "sample_rate": sr,
+            "ratio": ratio,
+            "latent_dim": latent_dim,
+            "in_channels": in_channels,
+            "out_channels": out_channels,
+            "history_samples": 2048,
+            "output_offset": 2048,
+            "latent_scale": 1.0,
+            "decode_latent_steps": 2,
+            "methods": ["forward", "encode", "decode"],
+        }
+        meta_dict.update(extra_meta)
+        write_nbnd_sidecar(bin_path, [], [], metadata=meta_dict)
 
     if methods:
         candidate_methods = ["encode", "decode"]

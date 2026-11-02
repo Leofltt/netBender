@@ -29,14 +29,19 @@ class OobleckEncoderAdapter(nn.Module):
     Adapts AutoencoderOobleck / DAC encoder to pure tensor I/O:
     Input: [B, C, T] -> Output: [B, latent_dim, T // ratio]
     """
-    def __init__(self, encoder):
+    def __init__(self, encoder, latent_dim: int = 64):
         super().__init__()
         self.encoder = encoder
+        self.latent_dim = latent_dim
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.encoder(x)
         if isinstance(out, (tuple, list)):
-            return out[0]
+            out = out[0]
+        # AutoencoderOobleck encoder outputs [mean, logvar] (128 channels).
+        # Extract mean latent channels [0:latent_dim].
+        if out.shape[1] > self.latent_dim:
+            return out[:, :self.latent_dim, :]
         return out
 
 
@@ -72,12 +77,13 @@ class StableAudioVAEWrapper(AudioCodecWrapper):
 
         # 1. Check for diffusers AutoencoderOobleck
         if hasattr(autoencoder_or_vae, "encoder") and hasattr(autoencoder_or_vae, "decoder"):
-            encoder = OobleckEncoderAdapter(autoencoder_or_vae.encoder)
+            encoder = OobleckEncoderAdapter(autoencoder_or_vae.encoder, latent_dim=latent_dim)
             decoder = OobleckDecoderAdapter(autoencoder_or_vae.decoder)
         elif hasattr(autoencoder_or_vae, "model"):
             target = autoencoder_or_vae.model
             if hasattr(target, "encoder") and hasattr(target, "decoder"):
-                encoder = OobleckEncoderAdapter(target.encoder)
+                encoder = OobleckEncoderAdapter(target.encoder, latent_dim=latent_dim)
+                decoder = OobleckDecoderAdapter(target.decoder)
                 decoder = OobleckDecoderAdapter(target.decoder)
 
         if encoder is None or decoder is None:

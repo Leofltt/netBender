@@ -215,7 +215,9 @@ def convert_rave_ts_to_onnx(
     except Exception:
         pass
 
-    history_samples = 4096
+    history_samples = 28672 if ("speech" in ts_model_path.lower() or (latent_dim <= 8 and ratio >= 1024)) else 4096
+    latent_scale = 2.5 if ("speech" in ts_model_path.lower() or (latent_dim <= 8 and ratio >= 1024)) else 1.0
+    decode_latent_steps = max(1, (history_samples + buffer_size + ratio - 1) // max(1, ratio))
     extra_meta = {
         "netbender.architecture": "rave",
         "netbender.sample_rate": str(sr),
@@ -225,6 +227,8 @@ def convert_rave_ts_to_onnx(
         "netbender.out_channels": str(in_channels),
         "netbender.history_samples": str(history_samples),
         "netbender.output_offset": str(history_samples),
+        "netbender.latent_scale": str(latent_scale),
+        "netbender.decode_latent_steps": str(decode_latent_steps),
     }
 
     if promote_for_bending:

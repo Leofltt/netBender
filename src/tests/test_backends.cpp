@@ -35,6 +35,7 @@ int main(int argc, char** argv) {
             "models/encodec_bendable.ts",
             "models/speech.ts",
             "models/stable_audio_1_vae.ts",
+            "models/stable_audio_3_same_s.ts",
             // Additional TS models if present
             "models/voice_vocalset_b2048_r48000_z16.ts",
             "models/sax_soprano_franziskaschroeder_b2048_r48000_z20.ts",
@@ -42,7 +43,8 @@ int main(int argc, char** argv) {
             "models/darbouka_bendable.onnx",
             "models/encodec_bendable.onnx",
             "models/speech_bendable.onnx",
-            "models/stable_audio_1_vae_bendable.onnx"
+            "models/stable_audio_1_vae_bendable.onnx",
+            "models/stable_audio_3_same_s_bendable.onnx"
         };
         // Filter out non-existent TS models
         std::vector<std::string> existingModels;
@@ -57,13 +59,15 @@ int main(int argc, char** argv) {
                 "models/darbouka_coreml.pte",
                 "models/encodec_coreml.pte",
                 "models/speech_coreml.pte",
-                "models/stable_audio_1_vae_coreml.pte"
+                "models/stable_audio_1_vae_coreml.pte",
+                "models/stable_audio_3_same_s_coreml.pte"
             }
             : std::vector<std::string>{
                 "models/darbouka_xnnpack.pte",
                 "models/encodec_xnnpack.pte",
                 "models/speech_xnnpack.pte",
-                "models/stable_audio_1_vae_xnnpack.pte"
+                "models/stable_audio_1_vae_xnnpack.pte",
+                "models/stable_audio_3_same_s_xnnpack.pte"
             };
         for (const auto& pte : pteModels) {
             std::ifstream f(pte);
@@ -201,7 +205,8 @@ int main(int argc, char** argv) {
                 outCh = std::max(1, decParams[2]);
             }
         }
-        int n_vec = 2048;
+        int pref_buf = backend->get_preferred_buffer_size();
+        int n_vec = (pref_buf > 0) ? pref_buf : ((res.ratio >= 4096) ? 8192 : 2048);
         double budgetMs = (res.sr > 0.0) ? (n_vec / res.sr * 1000.0) : (2048.0 / 44100.0 * 1000.0);
 
         auto computeBench = [](const std::vector<double>& times, double budget) -> BenchmarkStats {

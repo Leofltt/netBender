@@ -196,11 +196,20 @@ def write_nbnd_sidecar(
     sidecar_bin_path: str,
     promoted_names: List[str],
     promoted_tensors: List[torch.Tensor],
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Writes the NetBender `NBND` v1 binary weights sidecar."""
+    """Writes the NetBender unified `NBND` v2 binary sidecar (JSON metadata + weights)."""
     os.makedirs(os.path.dirname(os.path.abspath(sidecar_bin_path)), exist_ok=True)
     with open(sidecar_bin_path, "wb") as f:
-        f.write(b"NBND\x01\x00\x00\x00")
+        if metadata is not None:
+            # NBND v2: Includes embedded JSON metadata string
+            f.write(b"NBND\x02\x00\x00\x00")
+            json_bytes = json.dumps(metadata).encode("utf-8")
+            f.write(struct.pack("<I", len(json_bytes)))
+            f.write(json_bytes)
+        else:
+            # NBND v1: Weights only
+            f.write(b"NBND\x01\x00\x00\x00")
         f.write(struct.pack("<I", len(promoted_names)))
         for name, tensor in zip(promoted_names, promoted_tensors):
             arr = tensor.detach().cpu().numpy().astype(np.float32)
@@ -232,7 +241,9 @@ def get_partitioner_for_delegate(delegate: str):
     if delegate == "coreml":
         try:
             from executorch.backends.apple.coreml.partition import CoreMLPartitioner
-            return [CoreMLPartitioner()]
+            from executorch.exir.backend.compile_spec_schema import CompileSpec
+            compile_specs = [CompileSpec("model_compute_precision", "float32".encode("utf-8"))]
+            return [CoreMLPartitioner(compile_specs=compile_specs)]
         except ImportError as e:
             raise ImportError(
                 f"ExecuTorch CoreML partitioner not available ({e}). Install coremltools and executorch CoreML backend."
@@ -398,12 +409,6 @@ def export_bendable_pte(
         with open(output_pte_path, "wb") as f:
             et_program.write_to_file(f)
 
-    if write_sidecar and len(master_display_names) > 0:
-        sidecar_bin_path = f"{base_path}.bin"
-        write_nbnd_sidecar(sidecar_bin_path, master_display_names, master_promoted_tensors)
-        if verbose:
-            print(f"[ExecuTorch] Saved NBND weights sidecar to: {sidecar_bin_path}")
-
     meta_dict: Dict[str, Any] = {
         "netbender.bendable": "1" if len(master_display_names) > 0 else "0",
         "netbender.delegate": delegate,
@@ -418,11 +423,10 @@ def export_bendable_pte(
     meta_dict["method_param_inputs"] = method_param_inputs
 
     if write_sidecar:
-        json_path = f"{base_path}.json"
-        with open(json_path, "w", encoding="utf-8") as jf:
-            json.dump(meta_dict, jf, indent=2)
+        sidecar_bin_path = f"{base_path}.bin"
+        write_nbnd_sidecar(sidecar_bin_path, master_display_names, master_promoted_tensors, metadata=meta_dict)
         if verbose:
-            print(f"[ExecuTorch] Saved metadata JSON to: {json_path}")
+            print(f"[ExecuTorch] Saved unified NBND v2 sidecar to: {sidecar_bin_path}")
 
     if verbose:
         print(f"[ExecuTorch] Saved .pte model to: {output_pte_path}")

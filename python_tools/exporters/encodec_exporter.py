@@ -155,6 +155,8 @@ def export_encodec(
                 "netbender.out_channels": str(channels),
                 "netbender.history_samples": "0",
                 "netbender.output_offset": "0",
+                "netbender.latent_scale": "5.0",
+                "netbender.decode_latent_steps": "6",
             }
             promote_initializers_to_inputs(raw_onnx, output_path, verbose=True, extra_metadata=extra_meta)
             if raw_onnx != output_path and os.path.exists(raw_onnx):

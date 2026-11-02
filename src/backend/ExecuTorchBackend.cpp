@@ -43,99 +43,90 @@ auto ExecuTorchBackend::load_metadata_and_sidecar(const std::string& base_path) 
     m_method_param_inputs.clear();
     m_available_methods.clear();
 
-    // 1. Read optional JSON metadata sidecar (<base>.json) exported by pte_bend_prep / migrate_ts_to_pte
-    std::string json_path = base_path + ".json";
-    std::ifstream json_file(json_path);
-    if (json_file.is_open()) {
-        try {
-            nlohmann::json meta;
-            json_file >> meta;
-
-            if (meta.contains("sample_rate") && meta["sample_rate"].is_number()) {
-                double sr = meta["sample_rate"].get<double>();
-                if (sr > 0.0) {
-                    m_model_sample_rate = sr;
-                    m_sample_rate = sr;
-                }
-            } else if (meta.contains("sr") && meta["sr"].is_number()) {
-                double sr = meta["sr"].get<double>();
-                if (sr > 0.0) {
-                    m_model_sample_rate = sr;
-                    m_sample_rate = sr;
-                }
-            }
-            if (meta.contains("ratio") && meta["ratio"].is_number_integer()) {
-                m_higher_ratio = std::max(1, meta["ratio"].get<int>());
-            } else if (meta.contains("higher_ratio") && meta["higher_ratio"].is_number_integer()) {
-                m_higher_ratio = std::max(1, meta["higher_ratio"].get<int>());
-            }
-            if (meta.contains("latent_dim") && meta["latent_dim"].is_number_integer()) {
-                m_latent_dim = std::max(1, meta["latent_dim"].get<int>());
-            } else if (meta.contains("encode_out_dim") && meta["encode_out_dim"].is_number_integer()) {
-                m_latent_dim = std::max(1, meta["encode_out_dim"].get<int>());
-            } else if (meta.contains("decode_in_dim") && meta["decode_in_dim"].is_number_integer()) {
-                m_latent_dim = std::max(1, meta["decode_in_dim"].get<int>());
-            }
-            if (meta.contains("in_channels") && meta["in_channels"].is_number_integer()) {
-                m_in_channels = std::max(1, meta["in_channels"].get<int>());
-            } else if (meta.contains("in_dim") && meta["in_dim"].is_number_integer()) {
-                m_in_channels = std::max(1, meta["in_dim"].get<int>());
-            }
-            if (meta.contains("out_channels") && meta["out_channels"].is_number_integer()) {
-                m_out_channels = std::max(1, meta["out_channels"].get<int>());
-            } else if (meta.contains("out_dim") && meta["out_dim"].is_number_integer()) {
-                m_out_channels = std::max(1, meta["out_dim"].get<int>());
-            }
-            if (meta.contains("history_samples") && meta["history_samples"].is_number_integer()) {
-                m_history_samples = (size_t)std::max(0, meta["history_samples"].get<int>());
-            }
-            if (meta.contains("output_offset") && meta["output_offset"].is_number_integer()) {
-                m_output_offset = (size_t)std::max(0, meta["output_offset"].get<int>());
-            }
-            if (meta.contains("buffer_size") && meta["buffer_size"].is_number_integer()) {
-                m_buffer_size = std::max(1, meta["buffer_size"].get<int>());
-            }
-            if (meta.contains("decode_latent_steps") && meta["decode_latent_steps"].is_number_integer()) {
-                m_decode_latent_steps = std::max(1, meta["decode_latent_steps"].get<int>());
-            } else {
-                int ratio = std::max(1, m_higher_ratio);
-                m_decode_latent_steps = std::max(1, ((int)m_history_samples + m_buffer_size + ratio - 1) / ratio);
-            }
-            if (meta.contains("delegate") && meta["delegate"].is_string()) {
-                m_delegate = meta["delegate"].get<std::string>();
-            } else if (meta.contains("netbender.delegate") && meta["netbender.delegate"].is_string()) {
-                m_delegate = meta["netbender.delegate"].get<std::string>();
-            }
-            if (meta.contains("methods") && meta["methods"].is_array()) {
-                for (const auto& m : meta["methods"]) {
-                    if (m.is_string()) {
-                        m_available_methods.push_back(m.get<std::string>());
-                    }
-                }
-            }
-            if (meta.contains("method_param_inputs") && meta["method_param_inputs"].is_object()) {
-                for (auto it = meta["method_param_inputs"].begin(); it != meta["method_param_inputs"].end(); ++it) {
-                    if (it.value().is_array()) {
-                        std::vector<std::string> names;
-                        for (const auto& item : it.value()) {
-                            if (item.is_string()) names.push_back(item.get<std::string>());
-                        }
-                        m_method_param_inputs[it.key()] = std::move(names);
-                    }
-                }
-            } else if (meta.contains("promoted_inputs") && meta["promoted_inputs"].is_array()) {
-                std::vector<std::string> names;
-                for (const auto& item : meta["promoted_inputs"]) {
-                    if (item.is_string()) names.push_back(item.get<std::string>());
-                }
-                m_method_param_inputs["forward"] = std::move(names);
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "[ExecuTorchBackend] Warning parsing metadata " << json_path << ": " << e.what() << std::endl;
+    auto apply_json_meta = [this](const nlohmann::json& meta) {
+        if (meta.contains("sample_rate") && meta["sample_rate"].is_number()) {
+            double sr = meta["sample_rate"].get<double>();
+            if (sr > 0.0) { m_model_sample_rate = sr; m_sample_rate = sr; }
+        } else if (meta.contains("sr") && meta["sr"].is_number()) {
+            double sr = meta["sr"].get<double>();
+            if (sr > 0.0) { m_model_sample_rate = sr; m_sample_rate = sr; }
         }
-    }
+        if (meta.contains("ratio") && meta["ratio"].is_number_integer()) {
+            m_higher_ratio = std::max(1, meta["ratio"].get<int>());
+        } else if (meta.contains("higher_ratio") && meta["higher_ratio"].is_number_integer()) {
+            m_higher_ratio = std::max(1, meta["higher_ratio"].get<int>());
+        }
+        if (meta.contains("latent_dim") && meta["latent_dim"].is_number_integer()) {
+            m_latent_dim = std::max(1, meta["latent_dim"].get<int>());
+        } else if (meta.contains("encode_out_dim") && meta["encode_out_dim"].is_number_integer()) {
+            m_latent_dim = std::max(1, meta["encode_out_dim"].get<int>());
+        } else if (meta.contains("decode_in_dim") && meta["decode_in_dim"].is_number_integer()) {
+            m_latent_dim = std::max(1, meta["decode_in_dim"].get<int>());
+        }
+        if (meta.contains("in_channels") && meta["in_channels"].is_number_integer()) {
+            m_in_channels = std::max(1, meta["in_channels"].get<int>());
+        } else if (meta.contains("in_dim") && meta["in_dim"].is_number_integer()) {
+            m_in_channels = std::max(1, meta["in_dim"].get<int>());
+        }
+        if (meta.contains("out_channels") && meta["out_channels"].is_number_integer()) {
+            m_out_channels = std::max(1, meta["out_channels"].get<int>());
+        } else if (meta.contains("out_dim") && meta["out_dim"].is_number_integer()) {
+            m_out_channels = std::max(1, meta["out_dim"].get<int>());
+        }
+        if (meta.contains("history_samples") && meta["history_samples"].is_number_integer()) {
+            m_history_samples = (size_t)std::max(0, meta["history_samples"].get<int>());
+        }
+        if (meta.contains("output_offset") && meta["output_offset"].is_number_integer()) {
+            m_output_offset = (size_t)std::max(0, meta["output_offset"].get<int>());
+        }
+        if (meta.contains("buffer_size") && meta["buffer_size"].is_number_integer()) {
+            m_buffer_size = std::max(1, meta["buffer_size"].get<int>());
+        }
+        if (meta.contains("decode_latent_steps") && meta["decode_latent_steps"].is_number_integer()) {
+            m_decode_latent_steps = std::max(1, meta["decode_latent_steps"].get<int>());
+        } else {
+            int ratio = std::max(1, m_higher_ratio);
+            m_decode_latent_steps = std::max(1, ((int)m_history_samples + m_buffer_size + ratio - 1) / ratio);
+        }
+        if (meta.contains("latent_scale") && meta["latent_scale"].is_number()) {
+            m_latent_scale = meta["latent_scale"].get<float>();
+        } else if (meta.contains("netbender.latent_scale") && meta["netbender.latent_scale"].is_number()) {
+            m_latent_scale = meta["netbender.latent_scale"].get<float>();
+        }
+        if (meta.contains("delegate") && meta["delegate"].is_string()) {
+            m_delegate = meta["delegate"].get<std::string>();
+        } else if (meta.contains("netbender.delegate") && meta["netbender.delegate"].is_string()) {
+            m_delegate = meta["netbender.delegate"].get<std::string>();
+        }
+        if (meta.contains("methods") && meta["methods"].is_array()) {
+            for (const auto& m : meta["methods"]) {
+                if (m.is_string()) {
+                    m_available_methods.push_back(m.get<std::string>());
+                }
+            }
+        }
+        if (meta.contains("method_param_inputs") && meta["method_param_inputs"].is_object()) {
+            for (auto it = meta["method_param_inputs"].begin(); it != meta["method_param_inputs"].end(); ++it) {
+                if (it.value().is_array()) {
+                    std::vector<std::string> names;
+                    for (const auto& item : it.value()) {
+                        if (item.is_string()) names.push_back(item.get<std::string>());
+                    }
+                    m_method_param_inputs[it.key()] = std::move(names);
+                }
+            }
+        } else if (meta.contains("promoted_inputs") && meta["promoted_inputs"].is_array()) {
+            std::vector<std::string> names;
+            for (const auto& item : meta["promoted_inputs"]) {
+                if (item.is_string()) names.push_back(item.get<std::string>());
+            }
+            m_method_param_inputs["forward"] = std::move(names);
+        }
+    };
 
-    // 2. Read initial baseline weights from high-speed binary sidecar (<base>.bin)
+    bool metadata_loaded = false;
+
+    // 1. Read initial baseline weights and optional embedded JSON metadata from unified sidecar (<base>.bin)
     std::string sidecar_path = base_path + ".bin";
     std::ifstream bin_file(sidecar_path, std::ios::binary);
     if (bin_file.is_open()) {
@@ -144,6 +135,24 @@ auto ExecuTorchBackend::load_metadata_and_sidecar(const std::string& base_path) 
         if (bin_file.good() && std::memcmp(magic, "NBND", 4) == 0) {
             uint32_t version = 0;
             bin_file.read(reinterpret_cast<char*>(&version), sizeof(version));
+
+            // Version 2+ embeds JSON metadata directly in the binary sidecar
+            if (version >= 2) {
+                uint32_t json_len = 0;
+                bin_file.read(reinterpret_cast<char*>(&json_len), sizeof(json_len));
+                if (json_len > 0) {
+                    std::string json_str(json_len, '\0');
+                    bin_file.read(&json_str[0], json_len);
+                    try {
+                        auto meta = nlohmann::json::parse(json_str);
+                        apply_json_meta(meta);
+                        metadata_loaded = true;
+                    } catch (const std::exception& e) {
+                        std::cerr << "[ExecuTorchBackend] Error parsing embedded NBND JSON: " << e.what() << std::endl;
+                    }
+                }
+            }
+
             uint32_t num_tensors = 0;
             bin_file.read(reinterpret_cast<char*>(&num_tensors), sizeof(num_tensors));
 
@@ -179,7 +188,22 @@ auto ExecuTorchBackend::load_metadata_and_sidecar(const std::string& base_path) 
                 m_available_layers.push_back(t_name);
             }
             std::cout << "[ExecuTorchBackend] Loaded " << m_available_layers.size()
-                      << " bendable layers from " << sidecar_path << std::endl;
+                      << " bendable layers from unified sidecar " << sidecar_path << std::endl;
+        }
+    }
+
+    // 2. Fallback to separate legacy <base>.json file if metadata was not inside .bin
+    if (!metadata_loaded) {
+        std::string json_path = base_path + ".json";
+        std::ifstream json_file(json_path);
+        if (json_file.is_open()) {
+            try {
+                nlohmann::json meta;
+                json_file >> meta;
+                apply_json_meta(meta);
+            } catch (const std::exception& e) {
+                std::cerr << "[ExecuTorchBackend] Warning parsing metadata " << json_path << ": " << e.what() << std::endl;
+            }
         }
     }
 
@@ -280,6 +304,44 @@ auto ExecuTorchBackend::load(std::string path, double sample_rate, const std::st
     if (m_available_methods.empty()) {
         m_available_methods.push_back("forward");
     }
+
+#if NETBENDER_HAS_EXECUTORCH
+    if (m_impl->module) {
+        try {
+            auto meta_res = m_impl->module->method_meta("forward");
+            if (meta_res.ok()) {
+                auto meta = meta_res.get();
+                auto in0_res = meta.input_tensor_meta(0);
+                if (in0_res.ok()) {
+                    auto sizes = in0_res.get().sizes();
+                    if (sizes.size() >= 3) {
+                        int compiled_len = sizes[2];
+                        if (compiled_len > 0 && (int)(m_history_samples + m_buffer_size) != compiled_len) {
+                            if (compiled_len == m_buffer_size || compiled_len == 2048) {
+                                m_history_samples = 0;
+                                m_output_offset = 0;
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (...) {}
+    }
+    if (m_impl->companions.find("decode") != m_impl->companions.end()) {
+        try {
+            auto dec_meta_res = m_impl->companions["decode"]->method_meta("forward");
+            if (dec_meta_res.ok()) {
+                auto dec_in0 = dec_meta_res.get().input_tensor_meta(0);
+                if (dec_in0.ok()) {
+                    auto sizes = dec_in0.get().sizes();
+                    if (sizes.size() >= 3 && sizes[2] > 0) {
+                        m_decode_latent_steps = sizes[2];
+                    }
+                }
+            }
+        } catch (...) {}
+    }
+#endif
 
     m_audio_history.clear();
     if (m_history_samples > 0) {
@@ -565,7 +627,7 @@ auto ExecuTorchBackend::perform_decode_gen(std::vector<float*>& out_buffer,
 
     const float alpha = (ratio <= 640) ? 0.94f : 0.86f;
     const float beta = std::sqrt(1.0f - alpha * alpha);
-    const float latent_scale = (latent_dim >= 128) ? 5.0f : 1.0f;
+    const float latent_scale = (m_latent_scale > 0.0f) ? m_latent_scale : ((latent_dim >= 128) ? 5.0f : 1.0f);
     if ((int)m_decode_gen_latent_state.size() != latent_dim) {
         m_decode_gen_latent_state.assign(latent_dim, 0.0f);
     }
@@ -632,6 +694,11 @@ auto ExecuTorchBackend::perform_decode_gen(std::vector<float*>& out_buffer,
         }
     }
     m_decode_gen_fifo_read_idx += to_copy;
+}
+
+auto ExecuTorchBackend::clear_decode_gen_fifo() -> void {
+    IBackend::clear_decode_gen_fifo();
+    m_decode_gen_latent_history.clear();
 }
 
 auto ExecuTorchBackend::has_method(std::string method_name) -> bool {
@@ -772,8 +839,32 @@ auto ExecuTorchBackend::save_model(std::string path) -> int {
         if (!bin_out.good()) return -1;
 
         bin_out.write("NBND", 4);
-        uint32_t version = 1;
+        uint32_t version = 2;
         bin_out.write(reinterpret_cast<const char*>(&version), sizeof(version));
+
+        nlohmann::json meta;
+        meta["sample_rate"] = m_sample_rate;
+        meta["ratio"] = m_higher_ratio;
+        meta["latent_dim"] = m_latent_dim;
+        meta["in_channels"] = m_in_channels;
+        meta["out_channels"] = m_out_channels;
+        meta["history_samples"] = (int)m_history_samples;
+        meta["output_offset"] = (int)m_output_offset;
+        meta["buffer_size"] = m_buffer_size;
+        meta["decode_latent_steps"] = m_decode_latent_steps;
+        meta["latent_scale"] = m_latent_scale;
+        meta["delegate"] = m_delegate;
+        meta["methods"] = m_available_methods;
+        meta["promoted_inputs"] = m_available_layers;
+        meta["method_param_inputs"] = m_method_param_inputs;
+
+        std::string json_str = meta.dump();
+        uint32_t json_len = (uint32_t)json_str.size();
+        bin_out.write(reinterpret_cast<const char*>(&json_len), sizeof(json_len));
+        if (json_len > 0) {
+            bin_out.write(json_str.data(), json_len);
+        }
+
         uint32_t num_tensors = (uint32_t)m_available_layers.size();
         bin_out.write(reinterpret_cast<const char*>(&num_tensors), sizeof(num_tensors));
 
