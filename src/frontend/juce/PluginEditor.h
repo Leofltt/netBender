@@ -1,8 +1,12 @@
 #pragma once
 #include "PluginProcessor.h"
 #include <JuceHeader.h>
-#include "WeightBendingComponent.h"
-#include "LatentTerrainComponent.h"
+#include "ui/FlatLookAndFeel.h"
+#include "ui/HeaderComponent.h"
+#include "ui/LayerBarComponent.h"
+#include "ui/SidePanelComponent.h"
+#include "ui/WeightBendingComponent.h"
+#include "ui/LatentTerrainComponent.h"
 #include <vector>
 
 class NNBendingAudioProcessorEditor  : public juce::AudioProcessorEditor,
@@ -22,35 +26,91 @@ public:
     void sliderValueChanged (juce::Slider* slider) override;
     void buttonClicked (juce::Button* button) override;
 
-    enum class ViewMode { Weights, Latent };
-    enum class SideTab { Mutate, Harmonics, Bridge };
+    using ViewMode = SidePanelComponent::ViewMode;
+    using SideTab = SidePanelComponent::SideTab;
 
-    struct FlatTabLookAndFeel : public juce::LookAndFeel_V4
-    {
-        void drawButtonBackground (juce::Graphics& g, juce::Button& button,
-                                    const juce::Colour& backgroundColour,
-                                    bool shouldDrawButtonAsHighlighted,
-                                    bool shouldDrawButtonAsDown) override
-        {
-            auto bounds = button.getLocalBounds().toFloat();
-            g.setColour (backgroundColour);
-            g.fillRect (bounds);
+    FlatLookAndFeel flatLf;
 
-            if (shouldDrawButtonAsDown)
-            {
-                g.setColour (juce::Colours::white.withAlpha (0.12f));
-                g.fillRect (bounds);
-            }
-            else if (shouldDrawButtonAsHighlighted)
-            {
-                g.setColour (juce::Colours::white.withAlpha (0.06f));
-                g.fillRect (bounds);
-            }
+    HeaderComponent headerBar;
+    LayerBarComponent layerBar;
+    SidePanelComponent sidePanel;
+    WeightBendingComponent weightCanvas;
+    LatentTerrainComponent latentPad;
 
-            g.setColour (backgroundColour.brighter (0.18f).withAlpha (0.45f));
-            g.drawRect (bounds, 1.0f);
-        }
-    };
+    // Direct references to UI widgets for full compatibility
+    juce::Label& titleLabel { headerBar.titleLabel };
+    juce::TextButton& loadButton { headerBar.loadButton };
+    juce::Label& statusLabel { headerBar.statusLabel };
+    juce::Label& methodLabel { headerBar.methodLabel };
+    juce::ComboBox& methodCombo { headerBar.methodCombo };
+    juce::Label& bufferLabel { headerBar.bufferLabel };
+    juce::Label& bufferStatusLabel { headerBar.bufferStatusLabel };
+    juce::TextButton& gpuButton { headerBar.gpuButton };
+    juce::Label& dryWetLabel { headerBar.dryWetLabel };
+    juce::Slider& dryWetSlider { headerBar.dryWetSlider };
+    juce::TextButton& saveModelButton { headerBar.saveModelButton };
+    juce::TextButton& fuseButton { headerBar.fuseButton };
+    juce::TextButton& shortCircuitButton { headerBar.shortCircuitButton };
+    juce::Label& triggerModeLabel { headerBar.triggerModeLabel };
+    juce::ComboBox& triggerModeCombo { headerBar.triggerModeCombo };
+
+    juce::TextButton& viewWeightsButton { layerBar.viewWeightsButton };
+    juce::TextButton& viewLatentButton { layerBar.viewLatentButton };
+    juce::TextButton& displayCurveButton { layerBar.displayCurveButton };
+    juce::TextButton& displayMatrixButton { layerBar.displayMatrixButton };
+    juce::Label& categoryLabel { layerBar.categoryLabel };
+    juce::ComboBox& categoryCombo { layerBar.categoryCombo };
+    juce::Label& layerLabel { layerBar.layerLabel };
+    juce::ComboBox& layerCombo { layerBar.layerCombo };
+    juce::TextButton& resetLayerButton { layerBar.resetLayerButton };
+    juce::TextButton& resetAllButton { layerBar.resetAllButton };
+
+    juce::TextButton& tabMutateButton { sidePanel.tabMutateButton };
+    juce::TextButton& tabHarmonicsButton { sidePanel.tabHarmonicsButton };
+    juce::TextButton& tabBridgeButton { sidePanel.tabBridgeButton };
+    FlatTabLookAndFeel& flatTabLf { flatLf };
+
+    juce::ToggleButton& mutateEnableToggle { sidePanel.mutatePanel.mutateEnableToggle };
+    juce::Label& scaleLabel { sidePanel.mutatePanel.scaleLabel };
+    juce::Slider& scaleSlider { sidePanel.mutatePanel.scaleSlider };
+    juce::Label& offsetLabel { sidePanel.mutatePanel.offsetLabel };
+    juce::Slider& offsetSlider { sidePanel.mutatePanel.offsetSlider };
+
+    juce::ToggleButton& driftEnableToggle { sidePanel.mutatePanel.driftEnableToggle };
+    juce::Label& heatLabel { sidePanel.mutatePanel.heatLabel };
+    juce::Slider& heatSlider { sidePanel.mutatePanel.heatSlider };
+    juce::Label& memoryLabel { sidePanel.mutatePanel.memoryLabel };
+    juce::Slider& memorySlider { sidePanel.mutatePanel.memorySlider };
+    juce::Label& driftModeLabel { sidePanel.mutatePanel.driftModeLabel };
+    juce::ComboBox& driftModeCombo { sidePanel.mutatePanel.driftModeCombo };
+    juce::ToggleButton& freezeButton { sidePanel.mutatePanel.freezeButton };
+
+    juce::ToggleButton& harmonicEnableToggle { sidePanel.harmonicsPanel.harmonicEnableToggle };
+    juce::Label& harmonicFreqLabel { sidePanel.harmonicsPanel.harmonicFreqLabel };
+    juce::Slider& harmonicFreqSlider { sidePanel.harmonicsPanel.harmonicFreqSlider };
+    juce::Label& harmonicPartialsLabel { sidePanel.harmonicsPanel.harmonicPartialsLabel };
+    juce::Slider& harmonicPartialsSlider { sidePanel.harmonicsPanel.harmonicPartialsSlider };
+    juce::Label& harmonicMorphLabel { sidePanel.harmonicsPanel.harmonicMorphLabel };
+    juce::Slider& harmonicMorphSlider { sidePanel.harmonicsPanel.harmonicMorphSlider };
+    juce::Label& harmonicDepthLabel { sidePanel.harmonicsPanel.harmonicDepthLabel };
+    juce::Slider& harmonicDepthSlider { sidePanel.harmonicsPanel.harmonicDepthSlider };
+    juce::Label& harmonicModeLabel { sidePanel.harmonicsPanel.harmonicModeLabel };
+    juce::ComboBox& harmonicModeCombo { sidePanel.harmonicsPanel.harmonicModeCombo };
+    juce::TextButton& harmonicApplyButton { sidePanel.harmonicsPanel.harmonicApplyButton };
+
+    juce::ToggleButton& bridgeEnableToggle { sidePanel.bridgePanel.bridgeEnableToggle };
+    juce::Label& bridgeLabel { sidePanel.bridgePanel.bridgeLabel };
+    juce::ComboBox& bridgeCombo { sidePanel.bridgePanel.bridgeCombo };
+    juce::Label& bridgeDepthLabel { sidePanel.bridgePanel.bridgeDepthLabel };
+    juce::Slider& bridgeDepthSlider { sidePanel.bridgePanel.bridgeDepthSlider };
+
+    juce::ToggleButton& latentEnableButton { sidePanel.latentPanel.latentEnableButton };
+    juce::Label& latentDepthLabel { sidePanel.latentPanel.latentDepthLabel };
+    juce::Slider& latentDepthSlider { sidePanel.latentPanel.latentDepthSlider };
+    juce::Label& latentModeLabel { sidePanel.latentPanel.latentModeLabel };
+    juce::ComboBox& latentModeCombo { sidePanel.latentPanel.latentModeCombo };
+    juce::Label& latentSlewLabel { sidePanel.latentPanel.latentSlewLabel };
+    juce::Slider& latentSlewSlider { sidePanel.latentPanel.latentSlewSlider };
 
 private:
     void timerCallback() override;
@@ -66,94 +126,10 @@ private:
 
     NNBendingAudioProcessor& audioProcessor;
 
-    juce::Label titleLabel;
-    juce::TextButton loadButton { "Load Model" };
-    juce::Label statusLabel;
-    
-    juce::Label methodLabel { {}, "Mode:" };
-    juce::ComboBox methodCombo;
-    
-    juce::Label bufferLabel { {}, "Buffer:" };
-    juce::Label bufferStatusLabel;
-    juce::TextButton gpuButton { "CPU" };
-
-    juce::Label dryWetLabel { {}, "Dry/Wet:" };
-    juce::Slider dryWetSlider;
-
-    juce::TextButton saveModelButton { "Save Model" };
     ViewMode currentViewMode { ViewMode::Weights };
-    juce::TextButton viewWeightsButton { "weights" };
-    juce::TextButton viewLatentButton { "latent" };
+    SideTab currentSideTab { SideTab::Mutate };
 
     juce::GroupComponent bendingGroup { "Bending", "Interactive Weight Bending" };
-    
-    juce::Label layerLabel { {}, "Layer:" };
-    juce::ComboBox layerCombo;
-    
-    juce::TextButton resetLayerButton { "Reset Layer" };
-    juce::TextButton resetAllButton { "Reset All Layers" };
-
-    WeightBendingComponent weightCanvas;
-    LatentTerrainComponent latentPad;
-
-    juce::TextButton displayCurveButton { "1D" };
-    juce::TextButton displayMatrixButton { "2D" };
-
-    juce::Label categoryLabel { {}, "Trace:" };
-    juce::ComboBox categoryCombo;
-
-    juce::TextButton fuseButton { "FUSE: OK" };
-
-    juce::TextButton shortCircuitButton { "SHORT [!]" };
-    juce::Label triggerModeLabel { {}, "Trigger:" };
-    juce::ComboBox triggerModeCombo;
-    SideTab currentSideTab { SideTab::Mutate };
-    juce::TextButton tabMutateButton { "Mutate" };
-    juce::TextButton tabHarmonicsButton { "Harmonics" };
-    juce::TextButton tabBridgeButton { "Bridge" };
-    FlatTabLookAndFeel flatTabLf;
-
-    juce::ToggleButton mutateEnableToggle { "Enable Transform" };
-    juce::Label scaleLabel { {}, "Scale" };
-    juce::Slider scaleSlider;
-    juce::Label offsetLabel { {}, "Offset" };
-    juce::Slider offsetSlider;
-
-    juce::ToggleButton driftEnableToggle { "Enable Thermal Drift" };
-    juce::Label heatLabel { {}, "Heat" };
-    juce::Slider heatSlider;
-    juce::Label memoryLabel { {}, "Memory" };
-    juce::Slider memorySlider;
-    juce::Label driftModeLabel { {}, "Drift Algorithm:" };
-    juce::ComboBox driftModeCombo;
-    juce::ToggleButton freezeButton { "Freeze Drift" };
-
-    juce::ToggleButton harmonicEnableToggle { "Enable Harmonics" };
-    juce::Label harmonicFreqLabel { {}, "Frequency" };
-    juce::Slider harmonicFreqSlider;
-    juce::Label harmonicPartialsLabel { {}, "Partials" };
-    juce::Slider harmonicPartialsSlider;
-    juce::Label harmonicMorphLabel { {}, "Morph" };
-    juce::Slider harmonicMorphSlider;
-    juce::Label harmonicDepthLabel { {}, "Gain" };
-    juce::Slider harmonicDepthSlider;
-    juce::Label harmonicModeLabel { {}, "Combine Mode:" };
-    juce::ComboBox harmonicModeCombo;
-    juce::TextButton harmonicApplyButton { "Stamp Wave" };
-
-    juce::ToggleButton bridgeEnableToggle { "Enable Cross-Talk" };
-    juce::Label bridgeLabel { {}, "Bridge Wire Source:" };
-    juce::ComboBox bridgeCombo;
-    juce::Label bridgeDepthLabel { {}, "Cross-Talk Depth" };
-    juce::Slider bridgeDepthSlider;
-
-    juce::ToggleButton latentEnableButton { "Enable Latent Hook" };
-    juce::Label latentDepthLabel { {}, "Latent Depth" };
-    juce::Slider latentDepthSlider;
-    juce::Label latentModeLabel { {}, "Orbit Mode:" };
-    juce::ComboBox latentModeCombo;
-    juce::Label latentSlewLabel { {}, "Slew Speed" };
-    juce::Slider latentSlewSlider;
 
     void updateLatentControlsVisibility();
     void updateHarmonicGhostPreview();

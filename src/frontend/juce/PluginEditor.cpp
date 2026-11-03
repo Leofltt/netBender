@@ -5,121 +5,52 @@
 NNBendingAudioProcessorEditor::NNBendingAudioProcessorEditor (NNBendingAudioProcessor& p)
     : AudioProcessorEditor (&p), audioProcessor (p)
 {
-    titleLabel.setText ("NetBender", juce::dontSendNotification);
-    titleLabel.setFont (juce::FontOptions (18.0f, juce::Font::bold));
-    titleLabel.setJustificationType (juce::Justification::centredLeft);
-    titleLabel.setColour (juce::Label::textColourId, juce::Colours::lightcyan);
-    addAndMakeVisible (titleLabel);
+    setLookAndFeel (&flatLf);
 
-    loadButton.setButtonText ("Load Model");
+    // =========================================================================
+    // Header Toolbar Listeners & Synchronization
+    // =========================================================================
     loadButton.addListener (this);
-    loadButton.setColour (juce::TextButton::buttonColourId, juce::Colour::fromString ("#ff581c87"));
-    loadButton.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
-    addAndMakeVisible (loadButton);
-
-    statusLabel.setText ("No model loaded.", juce::dontSendNotification);
-    statusLabel.setJustificationType (juce::Justification::centredLeft);
-    statusLabel.setColour (juce::Label::textColourId, juce::Colours::darkgrey);
-    addAndMakeVisible (statusLabel);
-
-    methodLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
-    addAndMakeVisible (methodLabel);
+    gpuButton.addListener (this);
     methodCombo.addListener (this);
-    addAndMakeVisible (methodCombo);
+    dryWetSlider.addListener (this);
+    saveModelButton.addListener (this);
+    fuseButton.addListener (this);
+    shortCircuitButton.addListener (this);
+    triggerModeCombo.addListener (this);
 
-    bufferLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
-    addAndMakeVisible (bufferLabel);
     bufferStatusLabel.setText (juce::String (audioProcessor.getBufferSize()), juce::dontSendNotification);
-    bufferStatusLabel.setJustificationType (juce::Justification::centred);
-    bufferStatusLabel.setColour (juce::Label::backgroundColourId, juce::Colour::fromString ("#ff1c1926"));
-    bufferStatusLabel.setColour (juce::Label::outlineColourId, juce::Colour::fromString ("#ff3d3554"));
-    bufferStatusLabel.setColour (juce::Label::textColourId, juce::Colours::cyan);
-    addAndMakeVisible (bufferStatusLabel);
-
     gpuButton.setButtonText (audioProcessor.isUsingGpu() ? "GPU" : "CPU");
     gpuButton.setColour (juce::TextButton::buttonColourId,
                          audioProcessor.isUsingGpu() ? juce::Colour::fromString ("#ff0e7490") : juce::Colour::fromString ("#ff1c1926"));
     gpuButton.setColour (juce::TextButton::textColourOffId,
                          audioProcessor.isUsingGpu() ? juce::Colours::lightcyan : juce::Colours::lightgrey);
-    gpuButton.addListener (this);
-    addAndMakeVisible (gpuButton);
-
-    dryWetLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
-    addAndMakeVisible (dryWetLabel);
-
-    dryWetSlider.setRange (0.0, 1.0, 0.01);
     dryWetSlider.setValue (audioProcessor.getDryWet());
-    dryWetSlider.setSliderStyle (juce::Slider::LinearBar);
-    dryWetSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 45, 18);
-    dryWetSlider.setColour (juce::Slider::trackColourId, juce::Colour::fromString ("#ff7c3aed"));
-    dryWetSlider.addListener (this);
-    addAndMakeVisible (dryWetSlider);
-
-    saveModelButton.addListener (this);
-    saveModelButton.setColour (juce::TextButton::buttonColourId, juce::Colour::fromString ("#ff1e3a5f"));
-    saveModelButton.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
-    addAndMakeVisible (saveModelButton);
-
-    fuseButton.setButtonText ("FUSE: OK");
-    fuseButton.setColour (juce::TextButton::buttonColourId, juce::Colour::fromString ("#ff1b3a2a"));
-    fuseButton.setColour (juce::TextButton::textColourOffId, juce::Colours::lightgreen);
-    fuseButton.addListener (this);
-    addAndMakeVisible (fuseButton);
-
-    shortCircuitButton.setButtonText ("SHORT [!]");
-    shortCircuitButton.setColour (juce::TextButton::buttonColourId, juce::Colour::fromString ("#ff8b2500"));
-    shortCircuitButton.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
-    shortCircuitButton.addListener (this);
-    addAndMakeVisible (shortCircuitButton);
-
-    triggerModeLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
-    addAndMakeVisible (triggerModeLabel);
-    triggerModeCombo.addItem ("Continuous", 1);
-    triggerModeCombo.addItem ("Momentary", 2);
-    triggerModeCombo.addItem ("Transient", 3);
     triggerModeCombo.setSelectedId ((int)audioProcessor.getTriggerMode() + 1, juce::dontSendNotification);
-    triggerModeCombo.addListener (this);
-    addAndMakeVisible (triggerModeCombo);
     shortCircuitButton.setVisible (audioProcessor.getTriggerMode() == NNBendingAudioProcessor::TriggerMode::Momentary);
 
+    addAndMakeVisible (headerBar);
+
+    // =========================================================================
+    // Bending Canvas & Layer Management
+    // =========================================================================
     addAndMakeVisible (bendingGroup);
 
-    categoryLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
-    addAndMakeVisible (categoryLabel);
-    categoryCombo.addItem ("All Traces", 1);
-    categoryCombo.addItem ("Norm / Dynamics", 2);
-    categoryCombo.addItem ("Conv Kernels", 3);
-    categoryCombo.addItem ("Attention", 4);
-    categoryCombo.addItem ("Linear / Dense", 5);
-    categoryCombo.addItem ("Activation (Snake)", 6);
-    categoryCombo.addItem ("Recurrent (LSTM)", 7);
-    categoryCombo.addItem ("Biases", 8);
-    categoryCombo.setSelectedId (1, juce::dontSendNotification);
-    categoryCombo.addListener (this);
-    addAndMakeVisible (categoryCombo);
+    layerBar.viewWeightsButton.addListener (this);
+    layerBar.viewLatentButton.addListener (this);
+    layerBar.displayCurveButton.addListener (this);
+    layerBar.displayMatrixButton.addListener (this);
+    layerBar.categoryCombo.addListener (this);
+    layerBar.layerCombo.addListener (this);
+    layerBar.resetLayerButton.addListener (this);
+    layerBar.resetAllButton.addListener (this);
+    bendingGroup.addAndMakeVisible (layerBar);
 
-    layerLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
-    addAndMakeVisible (layerLabel);
-    layerCombo.addListener (this);
-    addAndMakeVisible (layerCombo);
-
-    resetLayerButton.addListener (this);
-    resetLayerButton.setColour (juce::TextButton::buttonColourId, juce::Colour::fromString ("#ff801e2a"));
-    resetLayerButton.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
-    addAndMakeVisible (resetLayerButton);
-
-    resetAllButton.addListener (this);
-    resetAllButton.setColour (juce::TextButton::buttonColourId, juce::Colour::fromString ("#ff5a1018"));
-    resetAllButton.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
-    addAndMakeVisible (resetAllButton);
-
-    addAndMakeVisible (weightCanvas);
+    bendingGroup.addAndMakeVisible (weightCanvas);
     weightCanvas.onWeightsModified = [this] (const std::vector<float>& modifiedWeights)
     {
         if (currentBendingLayer.isNotEmpty() && !modifiedWeights.empty())
         {
-            // The drawn weights are stored as the layer's target drawn curve (drawnWeights)
-            // Normalized inverse against scale/offset so subsequent knob tweaks scale from the drawn shape:
             float scale = (float)scaleSlider.getValue();
             float offset = (float)offsetSlider.getValue();
 
@@ -139,292 +70,18 @@ NNBendingAudioProcessorEditor::NNBendingAudioProcessorEditor (NNBendingAudioProc
             auto mode = audioProcessor.getTriggerMode();
             if (mode == NNBendingAudioProcessor::TriggerMode::Continuous)
             {
-                // In continuous mode, drawn weights apply directly to real-time model weights
                 currentWeights = modifiedWeights;
                 audioProcessor.getBackend().set_layer_weights (currentBendingLayer.toStdString(), currentWeights);
                 weightCanvas.setTargetBentWeights ({});
             }
             else
             {
-                // In momentary / midi / transient modes:
-                // Keep live model at whatever backend is currently playing, update target preview
                 weightCanvas.setTargetBentWeights (modifiedWeights);
             }
         }
     };
 
-    tabMutateButton.addListener (this);
-    tabHarmonicsButton.addListener (this);
-    tabBridgeButton.addListener (this);
-    tabMutateButton.setLookAndFeel (&flatTabLf);
-    tabHarmonicsButton.setLookAndFeel (&flatTabLf);
-    tabBridgeButton.setLookAndFeel (&flatTabLf);
-    addAndMakeVisible (tabMutateButton);
-    addAndMakeVisible (tabHarmonicsButton);
-    addAndMakeVisible (tabBridgeButton);
-
-    // =========================================================================
-    // Tab: Mutate Controls
-    // =========================================================================
-    mutateEnableToggle.setToggleState (true, juce::dontSendNotification);
-    mutateEnableToggle.setColour (juce::ToggleButton::textColourId, juce::Colour::fromString ("#ffc084fc"));
-    mutateEnableToggle.setColour (juce::ToggleButton::tickColourId, juce::Colour::fromString ("#ffc084fc"));
-    mutateEnableToggle.addListener (this);
-    addAndMakeVisible (mutateEnableToggle);
-
-    scaleLabel.setText ("Scale", juce::dontSendNotification);
-    scaleLabel.setJustificationType (juce::Justification::centredLeft);
-    scaleLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
-    addAndMakeVisible (scaleLabel);
-
-    scaleSlider.setRange (0.0, 5.0, 0.01);
-    scaleSlider.setValue (1.0);
-    scaleSlider.setSliderStyle (juce::Slider::LinearBar);
-    scaleSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 55, 18);
-    scaleSlider.setColour (juce::Slider::trackColourId, juce::Colour::fromString ("#ff7c3aed")); // Vibrant violet
-    scaleSlider.addListener (this);
-    addAndMakeVisible (scaleSlider);
-
-    offsetLabel.setText ("Offset", juce::dontSendNotification);
-    offsetLabel.setJustificationType (juce::Justification::centredLeft);
-    offsetLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
-    addAndMakeVisible (offsetLabel);
-
-    offsetSlider.setRange (-2.0, 2.0, 0.001);
-    offsetSlider.setValue (0.0);
-    offsetSlider.setSliderStyle (juce::Slider::LinearBar);
-    offsetSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 55, 18);
-    offsetSlider.setColour (juce::Slider::trackColourId, juce::Colour::fromString ("#ff06b6d4")); // Bright cyan
-    offsetSlider.addListener (this);
-    addAndMakeVisible (offsetSlider);
-
-    driftEnableToggle.setToggleState (false, juce::dontSendNotification);
-    driftEnableToggle.setColour (juce::ToggleButton::textColourId, juce::Colour::fromString ("#ffff9933"));
-    driftEnableToggle.setColour (juce::ToggleButton::tickColourId, juce::Colour::fromString ("#ffff9933"));
-    driftEnableToggle.addListener (this);
-    addAndMakeVisible (driftEnableToggle);
-
-    heatLabel.setText ("Heat (Jitter)", juce::dontSendNotification);
-    heatLabel.setJustificationType (juce::Justification::centredLeft);
-    heatLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
-    addAndMakeVisible (heatLabel);
-
-    heatSlider.setRange (0.0, 1.0, 0.001);
-    heatSlider.setValue (0.0);
-    heatSlider.setSliderStyle (juce::Slider::LinearBar);
-    heatSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 55, 18);
-    heatSlider.setColour (juce::Slider::trackColourId, juce::Colour::fromString ("#ffea580c")); // Flame orange
-    heatSlider.addListener (this);
-    addAndMakeVisible (heatSlider);
-
-    memoryLabel.setText ("Memory (Drag)", juce::dontSendNotification);
-    memoryLabel.setJustificationType (juce::Justification::centredLeft);
-    memoryLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
-    addAndMakeVisible (memoryLabel);
-
-    memorySlider.setRange (0.0, 1.0, 0.001);
-    memorySlider.setValue (0.8);
-    memorySlider.setSliderStyle (juce::Slider::LinearBar);
-    memorySlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 55, 18);
-    memorySlider.setColour (juce::Slider::trackColourId, juce::Colour::fromString ("#ff0284c7")); // Deep sky blue
-    memorySlider.addListener (this);
-    addAndMakeVisible (memorySlider);
-
-    driftModeLabel.setText ("Drift Algorithm:", juce::dontSendNotification);
-    driftModeLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
-    addAndMakeVisible (driftModeLabel);
-
-    driftModeCombo.addItem ("Thermal OU", 1);
-    driftModeCombo.addItem ("Random Walk", 2);
-    driftModeCombo.addItem ("Glitch Noise", 3);
-    driftModeCombo.setSelectedId (1, juce::dontSendNotification);
-    driftModeCombo.addListener (this);
-    addAndMakeVisible (driftModeCombo);
-
-    freezeButton.setButtonText ("Freeze Drift");
-    freezeButton.setColour (juce::ToggleButton::textColourId, juce::Colours::lightgrey);
-    freezeButton.setColour (juce::ToggleButton::tickColourId, juce::Colour::fromString ("#ffff9933"));
-    freezeButton.addListener (this);
-    addAndMakeVisible (freezeButton);
-
-    // =========================================================================
-    // Tab: Harmonics Controls
-    // =========================================================================
-    harmonicEnableToggle.setToggleState (false, juce::dontSendNotification);
-    harmonicEnableToggle.setColour (juce::ToggleButton::textColourId, juce::Colour::fromString ("#fffbbf24"));
-    harmonicEnableToggle.setColour (juce::ToggleButton::tickColourId, juce::Colour::fromString ("#fffbbf24"));
-    harmonicEnableToggle.addListener (this);
-    addAndMakeVisible (harmonicEnableToggle);
-
-    harmonicFreqLabel.setText ("Frequency", juce::dontSendNotification);
-    harmonicFreqLabel.setJustificationType (juce::Justification::centredLeft);
-    harmonicFreqLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
-    addAndMakeVisible (harmonicFreqLabel);
-
-    harmonicFreqSlider.setRange (0.5, 32.0, 0.1);
-    harmonicFreqSlider.setValue (2.0);
-    harmonicFreqSlider.setSliderStyle (juce::Slider::LinearBar);
-    harmonicFreqSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 55, 18);
-    harmonicFreqSlider.setColour (juce::Slider::trackColourId, juce::Colour::fromString ("#ffd97706")); // Warm amber
-    harmonicFreqSlider.addListener (this);
-    addAndMakeVisible (harmonicFreqSlider);
-
-    harmonicPartialsLabel.setText ("Partials", juce::dontSendNotification);
-    harmonicPartialsLabel.setJustificationType (juce::Justification::centredLeft);
-    harmonicPartialsLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
-    addAndMakeVisible (harmonicPartialsLabel);
-
-    harmonicPartialsSlider.setRange (1.0, 8.0, 1.0);
-    harmonicPartialsSlider.setValue (1.0);
-    harmonicPartialsSlider.setSliderStyle (juce::Slider::LinearBar);
-    harmonicPartialsSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 55, 18);
-    harmonicPartialsSlider.setColour (juce::Slider::trackColourId, juce::Colour::fromString ("#ffd97706"));
-    harmonicPartialsSlider.addListener (this);
-    addAndMakeVisible (harmonicPartialsSlider);
-
-    harmonicMorphLabel.setText ("Morph Phase", juce::dontSendNotification);
-    harmonicMorphLabel.setJustificationType (juce::Justification::centredLeft);
-    harmonicMorphLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
-    addAndMakeVisible (harmonicMorphLabel);
-
-    harmonicMorphSlider.setRange (0.0, 6.2831853, 0.01);
-    harmonicMorphSlider.setValue (0.0);
-    harmonicMorphSlider.setSliderStyle (juce::Slider::LinearBar);
-    harmonicMorphSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 55, 18);
-    harmonicMorphSlider.setColour (juce::Slider::trackColourId, juce::Colour::fromString ("#ffd97706"));
-    harmonicMorphSlider.addListener (this);
-    addAndMakeVisible (harmonicMorphSlider);
-
-    harmonicDepthLabel.setText ("Wave Gain", juce::dontSendNotification);
-    harmonicDepthLabel.setJustificationType (juce::Justification::centredLeft);
-    harmonicDepthLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
-    addAndMakeVisible (harmonicDepthLabel);
-
-    harmonicDepthSlider.setRange (0.0, 2.0, 0.01);
-    harmonicDepthSlider.setValue (0.5);
-    harmonicDepthSlider.setSliderStyle (juce::Slider::LinearBar);
-    harmonicDepthSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 55, 18);
-    harmonicDepthSlider.setColour (juce::Slider::trackColourId, juce::Colour::fromString ("#ffd97706"));
-    harmonicDepthSlider.addListener (this);
-    addAndMakeVisible (harmonicDepthSlider);
-
-    harmonicModeLabel.setText ("Combine Mode:", juce::dontSendNotification);
-    harmonicModeLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
-    addAndMakeVisible (harmonicModeLabel);
-
-    harmonicModeCombo.addItem ("Add (+)", 1);
-    harmonicModeCombo.addItem ("Ring (*)", 2);
-    harmonicModeCombo.addItem ("Replace", 3);
-    harmonicModeCombo.setSelectedId (1, juce::dontSendNotification);
-    harmonicModeCombo.addListener (this);
-    addAndMakeVisible (harmonicModeCombo);
-
-    harmonicApplyButton.setButtonText ("Stamp Wave");
-    harmonicApplyButton.setColour (juce::TextButton::buttonColourId, juce::Colour::fromString ("#ff4a3712"));
-    harmonicApplyButton.setColour (juce::TextButton::textColourOffId, juce::Colour::fromString ("#fffde047"));
-    harmonicApplyButton.addListener (this);
-    addAndMakeVisible (harmonicApplyButton);
-
-    // =========================================================================
-    // Tab: Trace Bridging Controls
-    // =========================================================================
-    bridgeEnableToggle.setToggleState (false, juce::dontSendNotification);
-    bridgeEnableToggle.setColour (juce::ToggleButton::textColourId, juce::Colour::fromString ("#ffc26a38"));
-    bridgeEnableToggle.setColour (juce::ToggleButton::tickColourId, juce::Colour::fromString ("#ffc26a38"));
-    bridgeEnableToggle.addListener (this);
-    addAndMakeVisible (bridgeEnableToggle);
-
-    bridgeLabel.setText ("Bridge Wire Source:", juce::dontSendNotification);
-    bridgeLabel.setJustificationType (juce::Justification::centredLeft);
-    bridgeLabel.setColour (juce::Label::textColourId, juce::Colour::fromString ("#ffc26a38")); // Warm copper
-    addAndMakeVisible (bridgeLabel);
-
-    bridgeCombo.addListener (this);
-    addAndMakeVisible (bridgeCombo);
-
-    bridgeDepthLabel.setText ("Cross-Talk Depth", juce::dontSendNotification);
-    bridgeDepthLabel.setJustificationType (juce::Justification::centredLeft);
-    bridgeDepthLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
-    addAndMakeVisible (bridgeDepthLabel);
-
-    bridgeDepthSlider.setRange (0.0, 1.0, 0.01);
-    bridgeDepthSlider.setValue (0.0);
-    bridgeDepthSlider.setSliderStyle (juce::Slider::LinearBar);
-    bridgeDepthSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 55, 18);
-    bridgeDepthSlider.setColour (juce::Slider::trackColourId, juce::Colour::fromString ("#ffd99b26")); // Warm golden ochre
-    bridgeDepthSlider.addListener (this);
-    addAndMakeVisible (bridgeDepthSlider);
-
-    // =========================================================================
-    // Tab: Latent Hook Parameter Controls
-    // =========================================================================
-    latentEnableButton.setButtonText ("Enable Latent Hook");
-    latentEnableButton.setToggleState (true, juce::dontSendNotification);
-    latentEnableButton.setColour (juce::ToggleButton::textColourId, juce::Colour::fromString ("#ffd946ef"));
-    latentEnableButton.setColour (juce::ToggleButton::tickColourId, juce::Colour::fromString ("#ffd946ef"));
-    latentEnableButton.addListener (this);
-    addAndMakeVisible (latentEnableButton);
-
-    latentDepthLabel.setText ("Latent Depth", juce::dontSendNotification);
-    latentDepthLabel.setJustificationType (juce::Justification::centredLeft);
-    latentDepthLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
-    addAndMakeVisible (latentDepthLabel);
-
-    latentDepthSlider.setRange (0.0, 2.0, 0.01);
-    latentDepthSlider.setValue (audioProcessor.getLatentDepth());
-    latentDepthSlider.setSliderStyle (juce::Slider::LinearBar);
-    latentDepthSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 55, 18);
-    latentDepthSlider.setColour (juce::Slider::trackColourId, juce::Colour::fromString ("#ffd946ef"));
-    latentDepthSlider.addListener (this);
-    addAndMakeVisible (latentDepthSlider);
-
-    latentModeLabel.setText ("Orbit Mode:", juce::dontSendNotification);
-    latentModeLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
-    addAndMakeVisible (latentModeLabel);
-
-    latentModeCombo.addItem ("Fourier Orbit", 1);
-    latentModeCombo.addItem ("Latent Slew", 2);
-    latentModeCombo.addItem ("Quantize", 3);
-    latentModeCombo.setSelectedId ((int)audioProcessor.getLatentMode() + 1, juce::dontSendNotification);
-    latentModeCombo.addListener (this);
-    addAndMakeVisible (latentModeCombo);
-
-    latentSlewLabel.setText ("Slew Speed", juce::dontSendNotification);
-    latentSlewLabel.setJustificationType (juce::Justification::centredLeft);
-    latentSlewLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
-    addAndMakeVisible (latentSlewLabel);
-
-    latentSlewSlider.setRange (0.001, 1.0, 0.001);
-    latentSlewSlider.setValue (audioProcessor.getLatentSlew());
-    latentSlewSlider.setSliderStyle (juce::Slider::LinearBar);
-    latentSlewSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 55, 18);
-    latentSlewSlider.setColour (juce::Slider::trackColourId, juce::Colour::fromString ("#ff38bdf8"));
-    latentSlewSlider.addListener (this);
-    addAndMakeVisible (latentSlewSlider);
-
-    setSideTab (SideTab::Mutate);
-
-    // View Switcher Buttons: "weights" and "latent"
-    viewWeightsButton.addListener (this);
-    viewLatentButton.addListener (this);
-    viewWeightsButton.setLookAndFeel (&flatTabLf);
-    viewLatentButton.setLookAndFeel (&flatTabLf);
-    addAndMakeVisible (viewWeightsButton);
-    addAndMakeVisible (viewLatentButton);
-
-    // Weight Canvas Display Mode Switcher (1D Curve vs 2D Matrix)
-    displayCurveButton.setColour (juce::TextButton::buttonColourId, juce::Colour::fromString ("#ff4a1d72"));
-    displayCurveButton.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
-    displayCurveButton.addListener (this);
-    displayCurveButton.setLookAndFeel (&flatTabLf);
-    displayMatrixButton.setColour (juce::TextButton::buttonColourId, juce::Colour::fromString ("#ff1c1926"));
-    displayMatrixButton.setColour (juce::TextButton::textColourOffId, juce::Colours::darkgrey);
-    displayMatrixButton.addListener (this);
-    displayMatrixButton.setLookAndFeel (&flatTabLf);
-    addAndMakeVisible (displayCurveButton);
-    addAndMakeVisible (displayMatrixButton);
-
-    addChildComponent (latentPad);
+    bendingGroup.addChildComponent (latentPad);
     latentPad.onCoordsChanged = [this] (float x, float y)
     {
         audioProcessor.setLatentCoords (x, y);
@@ -434,12 +91,54 @@ NNBendingAudioProcessorEditor::NNBendingAudioProcessorEditor (NNBendingAudioProc
             py->setValueNotifyingHost (py->convertTo0to1 (y));
     };
 
-    setViewMode (ViewMode::Weights);
+    // =========================================================================
+    // Side Panel & Control Tabs Listeners
+    // =========================================================================
+    sidePanel.tabMutateButton.addListener (this);
+    sidePanel.tabHarmonicsButton.addListener (this);
+    sidePanel.tabBridgeButton.addListener (this);
 
+    mutateEnableToggle.addListener (this);
+    scaleSlider.addListener (this);
+    offsetSlider.addListener (this);
+    driftEnableToggle.addListener (this);
+    heatSlider.addListener (this);
+    memorySlider.addListener (this);
+    driftModeCombo.addListener (this);
+    freezeButton.addListener (this);
+
+    harmonicEnableToggle.addListener (this);
+    harmonicFreqSlider.addListener (this);
+    harmonicPartialsSlider.addListener (this);
+    harmonicMorphSlider.addListener (this);
+    harmonicDepthSlider.addListener (this);
+    harmonicModeCombo.addListener (this);
+    harmonicApplyButton.addListener (this);
+
+    bridgeEnableToggle.addListener (this);
+    bridgeCombo.addListener (this);
+    bridgeDepthSlider.addListener (this);
+
+    latentEnableButton.addListener (this);
+    latentDepthSlider.setValue (audioProcessor.getLatentDepth());
+    latentDepthSlider.addListener (this);
+    latentModeCombo.setSelectedId ((int)audioProcessor.getLatentMode() + 1, juce::dontSendNotification);
+    latentModeCombo.addListener (this);
+    latentSlewSlider.setValue (audioProcessor.getLatentSlew());
+    latentSlewSlider.addListener (this);
+
+    bendingGroup.addAndMakeVisible (sidePanel);
+
+    // =========================================================================
+    // Status Bar & Initialization
+    // =========================================================================
     infoBendingLabel.setText ("Select a layer to bend weights.", juce::dontSendNotification);
     infoBendingLabel.setJustificationType (juce::Justification::centredLeft);
     infoBendingLabel.setColour (juce::Label::textColourId, juce::Colours::silver);
-    addAndMakeVisible (infoBendingLabel);
+    bendingGroup.addAndMakeVisible (infoBendingLabel);
+
+    setViewMode (ViewMode::Weights);
+    setSideTab (SideTab::Mutate);
 
     setSize (1100, 640);
     setResizable (true, true);
@@ -452,13 +151,7 @@ NNBendingAudioProcessorEditor::NNBendingAudioProcessorEditor (NNBendingAudioProc
 NNBendingAudioProcessorEditor::~NNBendingAudioProcessorEditor()
 {
     stopTimer();
-    tabMutateButton.setLookAndFeel (nullptr);
-    tabHarmonicsButton.setLookAndFeel (nullptr);
-    tabBridgeButton.setLookAndFeel (nullptr);
-    viewWeightsButton.setLookAndFeel (nullptr);
-    viewLatentButton.setLookAndFeel (nullptr);
-    displayCurveButton.setLookAndFeel (nullptr);
-    displayMatrixButton.setLookAndFeel (nullptr);
+    setLookAndFeel (nullptr);
 }
 
 //==============================================================================
@@ -478,80 +171,18 @@ void NNBendingAudioProcessorEditor::resized()
 {
     auto area = getLocalBounds().reduced (12);
 
-    auto headerRow = area.removeFromTop (34);
-
-    saveModelButton.setBounds (headerRow.removeFromRight (125));
-    headerRow.removeFromRight (10);
-
-    fuseButton.setBounds (headerRow.removeFromRight (88));
-    headerRow.removeFromRight (8);
-
-    if (shortCircuitButton.isVisible())
-    {
-        shortCircuitButton.setBounds (headerRow.removeFromRight (82));
-        headerRow.removeFromRight (8);
-    }
-
-    triggerModeCombo.setBounds (headerRow.removeFromRight (90));
-    triggerModeLabel.setBounds (headerRow.removeFromRight (48));
-    headerRow.removeFromRight (8);
-
-    dryWetSlider.setBounds (headerRow.removeFromRight (85));
-    dryWetLabel.setBounds (headerRow.removeFromRight (50));
-    headerRow.removeFromRight (10);
-
-    bufferStatusLabel.setBounds (headerRow.removeFromRight (44));
-    bufferLabel.setBounds (headerRow.removeFromRight (40));
-    headerRow.removeFromRight (8);
-
-    gpuButton.setBounds (headerRow.removeFromRight (48));
-    headerRow.removeFromRight (8);
-
-    loadButton.setBounds (headerRow.removeFromLeft (90));
-    headerRow.removeFromLeft (8);
-
-    methodLabel.setBounds (headerRow.removeFromLeft (40));
-    methodCombo.setBounds (headerRow.removeFromLeft (90));
-    headerRow.removeFromLeft (8);
-
-    statusLabel.setBounds (headerRow);
-
+    headerBar.setBounds (area.removeFromTop (34));
     area.removeFromTop (10);
 
     bendingGroup.setBounds (area);
-    auto groupArea = bendingGroup.getBounds().reduced (14);
+    auto groupArea = bendingGroup.getLocalBounds().reduced (14);
     groupArea.removeFromTop (12);
 
-    auto layerRow = groupArea.removeFromTop (32);
-
-    viewWeightsButton.setBounds (layerRow.removeFromLeft (68));
-    layerRow.removeFromLeft (4);
-    viewLatentButton.setBounds (layerRow.removeFromLeft (64));
-    layerRow.removeFromLeft (8);
-
-    displayCurveButton.setBounds (layerRow.removeFromLeft (44));
-    layerRow.removeFromLeft (3);
-    displayMatrixButton.setBounds (layerRow.removeFromLeft (44));
-    layerRow.removeFromLeft (10);
-
-    categoryLabel.setBounds (layerRow.removeFromLeft (40));
-    categoryCombo.setBounds (layerRow.removeFromLeft (110));
-    layerRow.removeFromLeft (8);
-
-    layerLabel.setBounds (layerRow.removeFromLeft (40));
-    
-    resetAllButton.setBounds (layerRow.removeFromRight (125));
-    layerRow.removeFromRight (6);
-    resetLayerButton.setBounds (layerRow.removeFromRight (105));
-    layerRow.removeFromRight (8);
-    
-    layerCombo.setBounds (layerRow);
-
+    layerBar.setBounds (groupArea.removeFromTop (32));
     groupArea.removeFromTop (8);
 
     auto bottomRow = groupArea.removeFromBottom (20);
     infoBendingLabel.setBounds (bottomRow);
-
     groupArea.removeFromBottom (6);
 
     auto controlsWidth = 240;
@@ -561,110 +192,7 @@ void NNBendingAudioProcessorEditor::resized()
     weightCanvas.setBounds (groupArea);
     latentPad.setBounds (groupArea);
 
-    auto tabHeader = sideArea.removeFromTop (26);
-    int tabW = (sideArea.getWidth() - 6) / 3;
-    tabMutateButton.setBounds (tabHeader.removeFromLeft (tabW));
-    tabHeader.removeFromLeft (3);
-    tabHarmonicsButton.setBounds (tabHeader.removeFromLeft (tabW));
-    tabHeader.removeFromLeft (3);
-    tabBridgeButton.setBounds (tabHeader);
-
-    sideArea.removeFromTop (10);
-
-    {
-        auto area1 = sideArea;
-        mutateEnableToggle.setBounds (area1.removeFromTop (24));
-        area1.removeFromTop (6);
-
-        scaleLabel.setBounds (area1.removeFromTop (16));
-        scaleSlider.setBounds (area1.removeFromTop (24));
-        area1.removeFromTop (8);
-
-        offsetLabel.setBounds (area1.removeFromTop (16));
-        offsetSlider.setBounds (area1.removeFromTop (24));
-        area1.removeFromTop (14);
-
-        driftEnableToggle.setBounds (area1.removeFromTop (24));
-        area1.removeFromTop (6);
-
-        heatLabel.setBounds (area1.removeFromTop (16));
-        heatSlider.setBounds (area1.removeFromTop (24));
-        area1.removeFromTop (8);
-
-        memoryLabel.setBounds (area1.removeFromTop (16));
-        memorySlider.setBounds (area1.removeFromTop (24));
-        area1.removeFromTop (8);
-
-        driftModeLabel.setBounds (area1.removeFromTop (16));
-        driftModeCombo.setBounds (area1.removeFromTop (24));
-        area1.removeFromTop (10);
-
-        freezeButton.setBounds (area1.removeFromTop (24));
-    }
-
-    {
-        auto area2 = sideArea;
-        harmonicEnableToggle.setBounds (area2.removeFromTop (24));
-        area2.removeFromTop (6);
-
-        harmonicFreqLabel.setBounds (area2.removeFromTop (16));
-        harmonicFreqSlider.setBounds (area2.removeFromTop (24));
-        area2.removeFromTop (8);
-
-        harmonicPartialsLabel.setBounds (area2.removeFromTop (16));
-        harmonicPartialsSlider.setBounds (area2.removeFromTop (24));
-        area2.removeFromTop (8);
-
-        harmonicMorphLabel.setBounds (area2.removeFromTop (16));
-        harmonicMorphSlider.setBounds (area2.removeFromTop (24));
-        area2.removeFromTop (8);
-
-        harmonicDepthLabel.setBounds (area2.removeFromTop (16));
-        harmonicDepthSlider.setBounds (area2.removeFromTop (24));
-        area2.removeFromTop (12);
-
-        harmonicModeLabel.setBounds (area2.removeFromTop (16));
-        harmonicModeCombo.setBounds (area2.removeFromTop (24));
-        area2.removeFromTop (14);
-
-        harmonicApplyButton.setBounds (area2.removeFromTop (28));
-    }
-
-    {
-        auto area3 = sideArea;
-        bridgeEnableToggle.setBounds (area3.removeFromTop (24));
-        area3.removeFromTop (8);
-
-        bridgeLabel.setBounds (area3.removeFromTop (16));
-        bridgeCombo.setBounds (area3.removeFromTop (26));
-        area3.removeFromTop (12);
-
-        bridgeDepthLabel.setBounds (area3.removeFromTop (16));
-        bridgeDepthSlider.setBounds (area3.removeFromTop (24));
-    }
-
-    {
-        auto area4 = sideArea;
-        latentEnableButton.setBounds (area4.removeFromTop (24));
-        area4.removeFromTop (10);
-
-        latentModeLabel.setBounds (area4.removeFromTop (16));
-        latentModeCombo.setBounds (area4.removeFromTop (26));
-        area4.removeFromTop (12);
-
-        int modeId = latentModeCombo.getSelectedId(); // 1 = Fourier Orbit, 2 = Latent Slew, 3 = Quantize
-
-        if (modeId == 2) // Latent Slew mode
-        {
-            latentSlewLabel.setBounds (area4.removeFromTop (16));
-            latentSlewSlider.setBounds (area4.removeFromTop (24));
-        }
-        else // Fourier Orbit or Quantize mode
-        {
-            latentDepthLabel.setBounds (area4.removeFromTop (16));
-            latentDepthSlider.setBounds (area4.removeFromTop (24));
-        }
-    }
+    sidePanel.setBounds (sideArea);
 }
 
 //==============================================================================
@@ -1808,59 +1336,7 @@ void NNBendingAudioProcessorEditor::applyHarmonicWeights()
 void NNBendingAudioProcessorEditor::setSideTab (SideTab newTab)
 {
     currentSideTab = newTab;
-
-    bool isWeights = (currentViewMode == ViewMode::Weights);
-    bool isMutate = isWeights && (currentSideTab == SideTab::Mutate);
-    bool isHarmonics = isWeights && (currentSideTab == SideTab::Harmonics);
-    bool isBridge = isWeights && (currentSideTab == SideTab::Bridge);
-
-    juce::Colour activeBg = juce::Colour::fromString ("#ff4a1d72"); // Vivid violet
-    juce::Colour inactiveBg = juce::Colour::fromString ("#ff1c1926"); // Dark charcoal
-    juce::Colour activeText = juce::Colours::white;
-    juce::Colour inactiveText = juce::Colours::darkgrey;
-
-    tabMutateButton.setColour (juce::TextButton::buttonColourId, isMutate ? activeBg : inactiveBg);
-    tabMutateButton.setColour (juce::TextButton::textColourOffId, isMutate ? activeText : inactiveText);
-
-    tabHarmonicsButton.setColour (juce::TextButton::buttonColourId, isHarmonics ? activeBg : inactiveBg);
-    tabHarmonicsButton.setColour (juce::TextButton::textColourOffId, isHarmonics ? activeText : inactiveText);
-
-    tabBridgeButton.setColour (juce::TextButton::buttonColourId, isBridge ? activeBg : inactiveBg);
-    tabBridgeButton.setColour (juce::TextButton::textColourOffId, isBridge ? activeText : inactiveText);
-
-    mutateEnableToggle.setVisible (isMutate);
-    scaleLabel.setVisible (isMutate);
-    scaleSlider.setVisible (isMutate);
-    offsetLabel.setVisible (isMutate);
-    offsetSlider.setVisible (isMutate);
-    driftEnableToggle.setVisible (isMutate);
-    heatLabel.setVisible (isMutate);
-    heatSlider.setVisible (isMutate);
-    memoryLabel.setVisible (isMutate);
-    memorySlider.setVisible (isMutate);
-    driftModeLabel.setVisible (isMutate);
-    driftModeCombo.setVisible (isMutate);
-    freezeButton.setVisible (isMutate);
-
-    harmonicEnableToggle.setVisible (isHarmonics);
-    harmonicFreqLabel.setVisible (isHarmonics);
-    harmonicFreqSlider.setVisible (isHarmonics);
-    harmonicPartialsLabel.setVisible (isHarmonics);
-    harmonicPartialsSlider.setVisible (isHarmonics);
-    harmonicMorphLabel.setVisible (isHarmonics);
-    harmonicMorphSlider.setVisible (isHarmonics);
-    harmonicDepthLabel.setVisible (isHarmonics);
-    harmonicDepthSlider.setVisible (isHarmonics);
-    harmonicModeLabel.setVisible (isHarmonics);
-    harmonicModeCombo.setVisible (isHarmonics);
-    harmonicApplyButton.setVisible (isHarmonics);
-
-    bridgeEnableToggle.setVisible (isBridge);
-    bridgeLabel.setVisible (isBridge);
-    bridgeCombo.setVisible (isBridge);
-    bridgeDepthLabel.setVisible (isBridge);
-    bridgeDepthSlider.setVisible (isBridge);
-
+    sidePanel.setSideTab (newTab);
     repaint();
 }
 
@@ -1894,17 +1370,7 @@ void NNBendingAudioProcessorEditor::setViewMode (ViewMode newMode)
     displayCurveButton.setVisible (isWeights);
     displayMatrixButton.setVisible (isWeights);
 
-    tabMutateButton.setVisible (isWeights);
-    tabHarmonicsButton.setVisible (isWeights);
-    tabBridgeButton.setVisible (isWeights);
-
-    latentEnableButton.setVisible (isLatent);
-    latentModeLabel.setVisible (isLatent);
-    latentModeCombo.setVisible (isLatent);
-
-    updateLatentControlsVisibility();
-
-    setSideTab (currentSideTab);
+    sidePanel.setViewMode (newMode);
 
     if (isLatent)
     {
@@ -1923,40 +1389,6 @@ void NNBendingAudioProcessorEditor::setViewMode (ViewMode newMode)
 
 void NNBendingAudioProcessorEditor::updateLatentControlsVisibility()
 {
-    bool isLatent = (currentViewMode == ViewMode::Latent);
-    if (!isLatent)
-    {
-        latentDepthLabel.setVisible (false);
-        latentDepthSlider.setVisible (false);
-        latentSlewLabel.setVisible (false);
-        latentSlewSlider.setVisible (false);
-        return;
-    }
-
-    int modeId = latentModeCombo.getSelectedId(); // 1 = Fourier Orbit, 2 = Latent Slew, 3 = Quantize
-
-    if (modeId == 2) // Latent Slew
-    {
-        latentDepthLabel.setVisible (false);
-        latentDepthSlider.setVisible (false);
-        latentSlewLabel.setVisible (true);
-        latentSlewSlider.setVisible (true);
-    }
-    else if (modeId == 3) // Quantize
-    {
-        latentDepthLabel.setText ("Quantize Step", juce::dontSendNotification);
-        latentDepthLabel.setVisible (true);
-        latentDepthSlider.setVisible (true);
-        latentSlewLabel.setVisible (false);
-        latentSlewSlider.setVisible (false);
-    }
-    else // Fourier Orbit
-    {
-        latentDepthLabel.setText ("Latent Depth", juce::dontSendNotification);
-        latentDepthLabel.setVisible (true);
-        latentDepthSlider.setVisible (true);
-        latentSlewLabel.setVisible (false);
-        latentSlewSlider.setVisible (false);
-    }
+    sidePanel.latentPanel.resized();
 }
 

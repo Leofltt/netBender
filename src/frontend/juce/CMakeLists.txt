@@ -16,6 +16,7 @@ function(configure_nn_bending_target target_name)
     # Include directories
     target_include_directories(${target_name} PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ui"
         "${CMAKE_SOURCE_DIR}/backend"
         "${CMAKE_SOURCE_DIR}/shared"
         "${CMAKE_BINARY_DIR}/_deps"
