@@ -142,7 +142,7 @@ int main(int argc, char** argv) {
         ModelTestResult res;
         res.path = path;
 
-        auto backend = BackendFactory::createForFile(path);
+        auto backend = BackendFactory::create_for_file(path);
         if (!backend) {
             res.loadSuccess = false;
             res.loadError = "Failed to allocate backend from BackendFactory.";

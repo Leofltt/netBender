@@ -1,7 +1,7 @@
 #pragma once
 #include "c74_min.h"
 #include <nlohmann/json.hpp>
-#include "../../../backend/backend.h"
+#include "../../../backend/IBackend.h"
 
 namespace nn_tools {
 

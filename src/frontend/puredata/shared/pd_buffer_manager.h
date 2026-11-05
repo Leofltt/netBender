@@ -1,6 +1,6 @@
 #pragma once
 #include "m_pd.h"
-#include "../../../backend/backend.h"
+#include "../../../backend/IBackend.h"
 #include "../../../shared/static_buffer.h"
 
 #ifndef CHECK_BUFFERS_INTERVAL
