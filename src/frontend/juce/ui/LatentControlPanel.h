@@ -16,14 +16,5 @@ public:
     juce::Label latent_slew_label{{}, "Slew Speed"};
     juce::Slider latent_slew_slider;
 
-    // Compatibility references
-    juce::ToggleButton& latentEnableButton{latent_enable_button};
-    juce::Label& latentDepthLabel{latent_depth_label};
-    juce::Slider& latentDepthSlider{latent_depth_slider};
-    juce::Label& latentModeLabel{latent_mode_label};
-    juce::ComboBox& latentModeCombo{latent_mode_combo};
-    juce::Label& latentSlewLabel{latent_slew_label};
-    juce::Slider& latentSlewSlider{latent_slew_slider};
-
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LatentControlPanel)
 };

@@ -36,19 +36,6 @@ public:
     // Applies Random Fourier Feature projection, slew filter, or quantization to latent tensor buffer
     auto apply_hook(IBackend::LatentBuffer& buf, float override_x = -999.0f, float override_y = -999.0f, float override_depth = -999.0f) -> void;
 
-    // Backward-compatible camelCase aliases
-    auto setLatentMode(LatentMode mode) -> void { set_mode(mode); }
-    [[nodiscard]] auto getLatentMode() const -> LatentMode { return get_mode(); }
-    auto setLatentEnabled(bool enabled) -> void { set_enabled(enabled); }
-    [[nodiscard]] auto isLatentEnabled() const -> bool { return is_enabled(); }
-    auto setLatentCoords(float x, float y) -> void { set_coords(x, y); }
-    [[nodiscard]] auto getLatentX() const -> float { return get_x(); }
-    [[nodiscard]] auto getLatentY() const -> float { return get_y(); }
-    auto setLatentDepth(float depth) -> void { set_depth(depth); }
-    [[nodiscard]] auto getLatentDepth() const -> float { return get_depth(); }
-    auto setLatentSlew(float slew) -> void { set_slew(slew); }
-    [[nodiscard]] auto getLatentSlew() const -> float { return get_slew(); }
-
 private:
     std::atomic<bool>       m_enabled { false };
     std::atomic<LatentMode> m_mode { LatentMode::FourierOrbit };

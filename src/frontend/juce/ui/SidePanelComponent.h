@@ -19,12 +19,6 @@ public:
     auto get_current_side_tab() const noexcept -> SideTab { return m_current_side_tab; }
     auto get_current_view_mode() const noexcept -> ViewMode { return m_current_view_mode; }
 
-    // Compatibility aliases
-    auto setSideTab(SideTab new_tab) -> void { set_side_tab(new_tab); }
-    auto setViewMode(ViewMode new_mode) -> void { set_view_mode(new_mode); }
-    auto getCurrentSideTab() const noexcept -> SideTab { return get_current_side_tab(); }
-    auto getCurrentViewMode() const noexcept -> ViewMode { return get_current_view_mode(); }
-
     auto resized() -> void override;
 
     juce::TextButton tab_mutate_button{"Mutate"};
@@ -35,15 +29,6 @@ public:
     HarmonicsPanel harmonics_panel;
     BridgePanel bridge_panel;
     LatentControlPanel latent_panel;
-
-    // Compatibility references
-    juce::TextButton& tabMutateButton{tab_mutate_button};
-    juce::TextButton& tabHarmonicsButton{tab_harmonics_button};
-    juce::TextButton& tabBridgeButton{tab_bridge_button};
-    MutatePanel& mutatePanel{mutate_panel};
-    HarmonicsPanel& harmonicsPanel{harmonics_panel};
-    BridgePanel& bridgePanel{bridge_panel};
-    LatentControlPanel& latentPanel{latent_panel};
 
 private:
     SideTab m_current_side_tab{SideTab::Mutate};

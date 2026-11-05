@@ -23,17 +23,5 @@ public:
     juce::TextButton reset_layer_button{"Reset Layer"};
     juce::TextButton reset_all_button{"Reset All Layers"};
 
-    // Compatibility references
-    juce::TextButton& viewWeightsButton{view_weights_button};
-    juce::TextButton& viewLatentButton{view_latent_button};
-    juce::TextButton& displayCurveButton{display_curve_button};
-    juce::TextButton& displayMatrixButton{display_matrix_button};
-    juce::Label& categoryLabel{category_label};
-    juce::ComboBox& categoryCombo{category_combo};
-    juce::Label& layerLabel{layer_label};
-    juce::ComboBox& layerCombo{layer_combo};
-    juce::TextButton& resetLayerButton{reset_layer_button};
-    juce::TextButton& resetAllButton{reset_all_button};
-
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LayerBarComponent)
 };

@@ -59,7 +59,6 @@ public:
     BendingManager() = default;
 
     static auto classify_layer(const std::string& name) -> LayerCategory;
-    static auto classifyLayer(const std::string& name) -> LayerCategory { return classify_layer(name); }
 
     // Layer state accessors
     auto get_layer_state(const std::string& layer_name) const -> LayerBendingState;
@@ -112,36 +111,6 @@ public:
         float param_memory,
         bool param_short_active
     ) -> void;
-
-    // Backward-compatible camelCase aliases
-    auto getLayerState(const std::string& name) const -> LayerBendingState { return get_layer_state(name); }
-    auto setLayerState(const std::string& name, const LayerBendingState& s) -> void { set_layer_state(name, s); }
-    auto setLayerScale(const std::string& name, float s) -> void { set_layer_scale(name, s); }
-    auto setLayerOffset(const std::string& name, float o) -> void { set_layer_offset(name, o); }
-    auto setLayerHeat(const std::string& name, float h) -> void { set_layer_heat(name, h); }
-    auto setLayerJitter(const std::string& name, float j) -> void { set_layer_jitter(name, j); }
-    auto setLayerMemory(const std::string& name, float m) -> void { set_layer_memory(name, m); }
-    auto setLayerDriftMode(const std::string& name, DriftMode m) -> void { set_layer_drift_mode(name, m); }
-    auto setLayerFrozen(const std::string& name, bool f) -> void { set_layer_frozen(name, f); }
-    auto setLayerBridgeSource(const std::string& name, const std::string& s) -> void { set_layer_bridge_source(name, s); }
-    auto setLayerBridgeDepth(const std::string& name, float d) -> void { set_layer_bridge_depth(name, d); }
-    auto setLayerDrawnWeights(const std::string& name, const std::vector<float>& w) -> void { set_layer_drawn_weights(name, w); }
-    auto setLayerBaseWeights(const std::string& name, const std::vector<float>& w) -> void { set_layer_base_weights(name, w); }
-    auto setLayerOriginalWeights(const std::string& name, const std::vector<float>& w) -> void { set_layer_original_weights(name, w); }
-    auto clearLayerBending(const std::string& name) -> void { clear_layer_bending(name); }
-    auto clearAllLayerBending() -> void { clear_all_layer_bending(); }
-    [[nodiscard]] auto hasActiveBending() const -> bool { return has_active_bending(); }
-    auto triggerShortCircuit(bool active) -> void { trigger_short_circuit(active); }
-    [[nodiscard]] auto isShortCircuitActive() const -> bool { return is_short_circuit_active(); }
-    [[nodiscard]] auto getMomentaryEnvelope() const -> float { return get_momentary_envelope(); }
-    auto setTriggerMode(TriggerMode mode) -> void { set_trigger_mode(mode); }
-    [[nodiscard]] auto getTriggerMode() const -> TriggerMode { return get_trigger_mode(); }
-    auto setEnvelopeAttack(float att) -> void { set_envelope_attack(att); }
-    [[nodiscard]] auto getEnvelopeAttack() const -> float { return get_envelope_attack(); }
-    auto setEnvelopeRelease(float rel) -> void { set_envelope_release(rel); }
-    [[nodiscard]] auto getEnvelopeRelease() const -> float { return get_envelope_release(); }
-    auto setTransientThreshold(float th) -> void { set_transient_threshold(th); }
-    [[nodiscard]] auto getTransientThreshold() const -> float { return get_transient_threshold(); }
 
 private:
     std::unordered_map<std::string, LayerBendingState> m_layer_states;

@@ -11,24 +11,24 @@ NNBendingAudioProcessorEditor::NNBendingAudioProcessorEditor (NNBendingAudioProc
     // =========================================================================
     // Header Toolbar Listeners & Synchronization
     // =========================================================================
-    loadButton.addListener (this);
-    gpuButton.addListener (this);
-    methodCombo.addListener (this);
-    dryWetSlider.addListener (this);
-    saveModelButton.addListener (this);
-    fuseButton.addListener (this);
-    shortCircuitButton.addListener (this);
-    triggerModeCombo.addListener (this);
+    load_button.addListener (this);
+    gpu_button.addListener (this);
+    method_combo.addListener (this);
+    dry_wet_slider.addListener (this);
+    save_model_button.addListener (this);
+    fuse_button.addListener (this);
+    short_circuit_button.addListener (this);
+    trigger_mode_combo.addListener (this);
 
-    bufferStatusLabel.setText (juce::String (audioProcessor.getBufferSize()), juce::dontSendNotification);
-    gpuButton.setButtonText (audioProcessor.isUsingGpu() ? "GPU" : "CPU");
-    gpuButton.setColour (juce::TextButton::buttonColourId,
+    buffer_status_label.setText (juce::String (audioProcessor.getBufferSize()), juce::dontSendNotification);
+    gpu_button.setButtonText (audioProcessor.isUsingGpu() ? "GPU" : "CPU");
+    gpu_button.setColour (juce::TextButton::buttonColourId,
                          audioProcessor.isUsingGpu() ? UIConstants::Colors::dark_cyan : UIConstants::Colors::button_secondary_bg);
-    gpuButton.setColour (juce::TextButton::textColourOffId,
+    gpu_button.setColour (juce::TextButton::textColourOffId,
                          audioProcessor.isUsingGpu() ? juce::Colours::lightcyan : UIConstants::Colors::text_light);
-    dryWetSlider.setValue (audioProcessor.getDryWet());
-    triggerModeCombo.setSelectedId ((int)audioProcessor.getTriggerMode() + 1, juce::dontSendNotification);
-    shortCircuitButton.setVisible (audioProcessor.getTriggerMode() == NNBendingAudioProcessor::TriggerMode::Momentary);
+    dry_wet_slider.setValue (audioProcessor.getDryWet());
+    trigger_mode_combo.setSelectedId ((int)audioProcessor.getTriggerMode() + 1, juce::dontSendNotification);
+    short_circuit_button.setVisible (audioProcessor.getTriggerMode() == NNBendingAudioProcessor::TriggerMode::Momentary);
 
     addAndMakeVisible (headerBar);
 
@@ -37,14 +37,14 @@ NNBendingAudioProcessorEditor::NNBendingAudioProcessorEditor (NNBendingAudioProc
     // =========================================================================
     addAndMakeVisible (bendingGroup);
 
-    layerBar.viewWeightsButton.addListener (this);
-    layerBar.viewLatentButton.addListener (this);
-    layerBar.displayCurveButton.addListener (this);
-    layerBar.displayMatrixButton.addListener (this);
-    layerBar.categoryCombo.addListener (this);
-    layerBar.layerCombo.addListener (this);
-    layerBar.resetLayerButton.addListener (this);
-    layerBar.resetAllButton.addListener (this);
+    layerBar.view_weights_button.addListener (this);
+    layerBar.view_latent_button.addListener (this);
+    layerBar.display_curve_button.addListener (this);
+    layerBar.display_matrix_button.addListener (this);
+    layerBar.category_combo.addListener (this);
+    layerBar.layer_combo.addListener (this);
+    layerBar.reset_layer_button.addListener (this);
+    layerBar.reset_all_button.addListener (this);
     bendingGroup.addAndMakeVisible (layerBar);
 
     bendingGroup.addAndMakeVisible (weightCanvas);
@@ -52,8 +52,8 @@ NNBendingAudioProcessorEditor::NNBendingAudioProcessorEditor (NNBendingAudioProc
     {
         if (currentBendingLayer.isNotEmpty() && !modifiedWeights.empty())
         {
-            float scale = (float)scaleSlider.getValue();
-            float offset = (float)offsetSlider.getValue();
+            float scale = (float)scale_slider.getValue();
+            float offset = (float)offset_slider.getValue();
 
             baseDrawnWeights.resize (modifiedWeights.size());
             if (std::abs (scale) > 0.00001f)
@@ -95,38 +95,38 @@ NNBendingAudioProcessorEditor::NNBendingAudioProcessorEditor (NNBendingAudioProc
     // =========================================================================
     // Side Panel & Control Tabs Listeners
     // =========================================================================
-    sidePanel.tabMutateButton.addListener (this);
-    sidePanel.tabHarmonicsButton.addListener (this);
-    sidePanel.tabBridgeButton.addListener (this);
+    sidePanel.tab_mutate_button.addListener (this);
+    sidePanel.tab_harmonics_button.addListener (this);
+    sidePanel.tab_bridge_button.addListener (this);
 
-    mutateEnableToggle.addListener (this);
-    scaleSlider.addListener (this);
-    offsetSlider.addListener (this);
-    driftEnableToggle.addListener (this);
-    heatSlider.addListener (this);
-    memorySlider.addListener (this);
-    driftModeCombo.addListener (this);
-    freezeButton.addListener (this);
+    mutate_enable_toggle.addListener (this);
+    scale_slider.addListener (this);
+    offset_slider.addListener (this);
+    drift_enable_toggle.addListener (this);
+    heat_slider.addListener (this);
+    memory_slider.addListener (this);
+    drift_mode_combo.addListener (this);
+    freeze_button.addListener (this);
 
-    harmonicEnableToggle.addListener (this);
-    harmonicFreqSlider.addListener (this);
-    harmonicPartialsSlider.addListener (this);
-    harmonicMorphSlider.addListener (this);
-    harmonicDepthSlider.addListener (this);
-    harmonicModeCombo.addListener (this);
-    harmonicApplyButton.addListener (this);
+    harmonic_enable_toggle.addListener (this);
+    harmonic_freq_slider.addListener (this);
+    harmonic_partials_slider.addListener (this);
+    harmonic_morph_slider.addListener (this);
+    harmonic_depth_slider.addListener (this);
+    harmonic_mode_combo.addListener (this);
+    harmonic_apply_button.addListener (this);
 
-    bridgeEnableToggle.addListener (this);
-    bridgeCombo.addListener (this);
-    bridgeDepthSlider.addListener (this);
+    bridge_enable_toggle.addListener (this);
+    bridge_combo.addListener (this);
+    bridge_depth_slider.addListener (this);
 
-    latentEnableButton.addListener (this);
-    latentDepthSlider.setValue (audioProcessor.getLatentDepth());
-    latentDepthSlider.addListener (this);
-    latentModeCombo.setSelectedId ((int)audioProcessor.getLatentMode() + 1, juce::dontSendNotification);
-    latentModeCombo.addListener (this);
-    latentSlewSlider.setValue (audioProcessor.getLatentSlew());
-    latentSlewSlider.addListener (this);
+    latent_enable_button.addListener (this);
+    latent_depth_slider.setValue (audioProcessor.getLatentDepth());
+    latent_depth_slider.addListener (this);
+    latent_mode_combo.setSelectedId ((int)audioProcessor.getLatentMode() + 1, juce::dontSendNotification);
+    latent_mode_combo.addListener (this);
+    latent_slew_slider.setValue (audioProcessor.getLatentSlew());
+    latent_slew_slider.addListener (this);
 
     bendingGroup.addAndMakeVisible (sidePanel);
 
@@ -138,15 +138,15 @@ NNBendingAudioProcessorEditor::NNBendingAudioProcessorEditor (NNBendingAudioProc
     infoBendingLabel.setColour (juce::Label::textColourId, juce::Colours::silver);
     bendingGroup.addAndMakeVisible (infoBendingLabel);
 
-    setViewMode (ViewMode::Weights);
-    setSideTab (SideTab::Mutate);
+    set_view_mode (ViewMode::Weights);
+    set_side_tab (SideTab::Mutate);
 
     setSize (UIConstants::Layout::window_default_width, UIConstants::Layout::window_default_height);
     setResizable (true, true);
     setResizeLimits (UIConstants::Layout::window_min_width, UIConstants::Layout::window_min_height,
                      UIConstants::Layout::window_max_width, UIConstants::Layout::window_max_height);
 
-    updateModelInfo();
+    update_model_info();
     startTimerHz (UIConstants::Layout::editor_timer_hz);
 }
 
@@ -197,19 +197,19 @@ auto NNBendingAudioProcessorEditor::resized() -> void {
 
 //==============================================================================
 auto NNBendingAudioProcessorEditor::comboBoxChanged(juce::ComboBox* comboBoxThatHasChanged) -> void {
-    if (comboBoxThatHasChanged == &methodCombo)
+    if (comboBoxThatHasChanged == &method_combo)
     {
-        audioProcessor.setCurrentMethod (methodCombo.getText());
-        updateModelInfo();
+        audioProcessor.setCurrentMethod (method_combo.getText());
+        update_model_info();
     }
-    else if (comboBoxThatHasChanged == &layerCombo)
+    else if (comboBoxThatHasChanged == &layer_combo)
     {
-        selectLayer (layerCombo.getText());
+        select_layer (layer_combo.getText());
     }
-    else if (comboBoxThatHasChanged == &categoryCombo)
+    else if (comboBoxThatHasChanged == &category_combo)
     {
-        int catId = categoryCombo.getSelectedId();
-        layerCombo.clear (juce::dontSendNotification);
+        int catId = category_combo.getSelectedId();
+        layer_combo.clear (juce::dontSendNotification);
         auto layers = audioProcessor.getBackend().get_available_layers();
         int id = 1;
         for (const auto& l : layers)
@@ -226,47 +226,47 @@ auto NNBendingAudioProcessorEditor::comboBoxChanged(juce::ComboBox* comboBoxThat
             else if (catId == 8 && cat == NNBendingAudioProcessor::LayerCategory::Bias) include = true;
 
             if (include)
-                layerCombo.addItem (l, id++);
+                layer_combo.addItem (l, id++);
         }
-        if (layerCombo.getNumItems() > 0)
+        if (layer_combo.getNumItems() > 0)
         {
-            layerCombo.setSelectedId (1);
-            selectLayer (layerCombo.getText());
+            layer_combo.setSelectedId (1);
+            select_layer (layer_combo.getText());
         }
     }
-    else if (comboBoxThatHasChanged == &triggerModeCombo)
+    else if (comboBoxThatHasChanged == &trigger_mode_combo)
     {
-        int modeIdx = triggerModeCombo.getSelectedId() - 1;
+        int modeIdx = trigger_mode_combo.getSelectedId() - 1;
         auto mode = (NNBendingAudioProcessor::TriggerMode)modeIdx;
         audioProcessor.setTriggerMode (mode);
-        shortCircuitButton.setVisible (mode == NNBendingAudioProcessor::TriggerMode::Momentary);
+        short_circuit_button.setVisible (mode == NNBendingAudioProcessor::TriggerMode::Momentary);
         resized();
 
         if (currentBendingLayer.isNotEmpty())
-            applyKnobBending();
+            apply_knob_bending();
     }
-    else if (comboBoxThatHasChanged == &driftModeCombo)
+    else if (comboBoxThatHasChanged == &drift_mode_combo)
     {
-        int modeIdx = driftModeCombo.getSelectedId() - 1;
+        int modeIdx = drift_mode_combo.getSelectedId() - 1;
         if (currentBendingLayer.isNotEmpty())
             audioProcessor.setLayerDriftMode (currentBendingLayer.toStdString(), (NNBendingAudioProcessor::DriftMode)modeIdx);
     }
-    else if (comboBoxThatHasChanged == &bridgeCombo)
+    else if (comboBoxThatHasChanged == &bridge_combo)
     {
         if (currentBendingLayer.isNotEmpty())
         {
-            juce::String src = (bridgeCombo.getSelectedId() > 1) ? bridgeCombo.getText() : "";
+            juce::String src = (bridge_combo.getSelectedId() > 1) ? bridge_combo.getText() : "";
             audioProcessor.setLayerBridgeSource (currentBendingLayer.toStdString(), src.toStdString());
-            applyKnobBending();
+            apply_knob_bending();
         }
     }
-    else if (comboBoxThatHasChanged == &harmonicModeCombo)
+    else if (comboBoxThatHasChanged == &harmonic_mode_combo)
     {
         updateHarmonicGhostPreview();
     }
-    else if (comboBoxThatHasChanged == &latentModeCombo)
+    else if (comboBoxThatHasChanged == &latent_mode_combo)
     {
-        int modeIdx = latentModeCombo.getSelectedId() - 1;
+        int modeIdx = latent_mode_combo.getSelectedId() - 1;
         audioProcessor.setLatentMode ((NNBendingAudioProcessor::LatentMode)modeIdx);
         updateLatentControlsVisibility();
         resized();
@@ -274,116 +274,116 @@ auto NNBendingAudioProcessorEditor::comboBoxChanged(juce::ComboBox* comboBoxThat
 }
 
 auto NNBendingAudioProcessorEditor::sliderValueChanged(juce::Slider* slider) -> void {
-    if (slider == &harmonicFreqSlider || slider == &harmonicPartialsSlider
-        || slider == &harmonicMorphSlider || slider == &harmonicDepthSlider)
+    if (slider == &harmonic_freq_slider || slider == &harmonic_partials_slider
+        || slider == &harmonic_morph_slider || slider == &harmonic_depth_slider)
     {
         updateHarmonicGhostPreview();
     }
-    else if (slider == &dryWetSlider)
+    else if (slider == &dry_wet_slider)
     {
-        float val = (float)dryWetSlider.getValue();
+        float val = (float)dry_wet_slider.getValue();
         audioProcessor.setDryWet (val);
         lastKnownDryWet = val;
     }
-    else if (slider == &heatSlider)
+    else if (slider == &heat_slider)
     {
-        float val = (float)heatSlider.getValue();
+        float val = (float)heat_slider.getValue();
         if (currentBendingLayer.isNotEmpty())
             audioProcessor.setLayerHeat (currentBendingLayer.toStdString(), val);
         if (auto* param = audioProcessor.getHeatParam())
             param->setValueNotifyingHost (param->convertTo0to1 (val));
         lastKnownHeat = val;
     }
-    else if (slider == &memorySlider)
+    else if (slider == &memory_slider)
     {
-        float val = (float)memorySlider.getValue();
+        float val = (float)memory_slider.getValue();
         if (currentBendingLayer.isNotEmpty())
             audioProcessor.setLayerMemory (currentBendingLayer.toStdString(), val);
         if (auto* param = audioProcessor.getMemoryParam())
             param->setValueNotifyingHost (param->convertTo0to1 (val));
         lastKnownMemory = val;
     }
-    else if (slider == &scaleSlider)
+    else if (slider == &scale_slider)
     {
-        float val = (float)scaleSlider.getValue();
+        float val = (float)scale_slider.getValue();
         if (auto* param = audioProcessor.getScaleParam())
             param->setValueNotifyingHost (param->convertTo0to1 (val));
         lastKnownScale = val;
-        applyKnobBending();
+        apply_knob_bending();
     }
-    else if (slider == &offsetSlider)
+    else if (slider == &offset_slider)
     {
-        float val = (float)offsetSlider.getValue();
+        float val = (float)offset_slider.getValue();
         if (auto* param = audioProcessor.getOffsetParam())
             param->setValueNotifyingHost (param->convertTo0to1 (val));
         lastKnownOffset = val;
-        applyKnobBending();
+        apply_knob_bending();
     }
-    else if (slider == &bridgeDepthSlider)
+    else if (slider == &bridge_depth_slider)
     {
-        float val = (float)bridgeDepthSlider.getValue();
+        float val = (float)bridge_depth_slider.getValue();
         if (currentBendingLayer.isNotEmpty())
         {
             audioProcessor.setLayerBridgeDepth (currentBendingLayer.toStdString(), val);
-            applyKnobBending();
+            apply_knob_bending();
         }
     }
-    else if (slider == &latentDepthSlider)
+    else if (slider == &latent_depth_slider)
     {
-        float val = (float)latentDepthSlider.getValue();
+        float val = (float)latent_depth_slider.getValue();
         audioProcessor.setLatentDepth (val);
         if (auto* param = audioProcessor.getLatentDepthParam())
             param->setValueNotifyingHost (param->convertTo0to1 (val));
     }
-    else if (slider == &latentSlewSlider)
+    else if (slider == &latent_slew_slider)
     {
-        float val = (float)latentSlewSlider.getValue();
+        float val = (float)latent_slew_slider.getValue();
         audioProcessor.setLatentSlew (val);
     }
     else
     {
-        applyKnobBending();
+        apply_knob_bending();
     }
 }
 
 auto NNBendingAudioProcessorEditor::buttonClicked(juce::Button* button) -> void {
-    if (button == &fuseButton)
+    if (button == &fuse_button)
     {
         audioProcessor.resetFuse();
-        fuseButton.setButtonText ("FUSE: OK");
-        fuseButton.setColour (juce::TextButton::buttonColourId, UIConstants::Colors::forest_green);
-        fuseButton.setColour (juce::TextButton::textColourOffId, juce::Colours::lightgreen);
+        fuse_button.setButtonText ("FUSE: OK");
+        fuse_button.setColour (juce::TextButton::buttonColourId, UIConstants::Colors::forest_green);
+        fuse_button.setColour (juce::TextButton::textColourOffId, juce::Colours::lightgreen);
         if (currentBendingLayer.isNotEmpty())
-            selectLayer (currentBendingLayer);
+            select_layer (currentBendingLayer);
     }
-    else if (button == &gpuButton)
+    else if (button == &gpu_button)
     {
         bool nextGpu = !audioProcessor.isUsingGpu();
         audioProcessor.setUseGpu (nextGpu);
-        updateModelInfo();
+        update_model_info();
     }
-    else if (button == &shortCircuitButton)
+    else if (button == &short_circuit_button)
     {
         // Toggle or pulse momentary short-circuit gate
         bool active = !audioProcessor.isShortCircuitActive();
         audioProcessor.triggerShortCircuit (active);
-        shortCircuitButton.setColour (juce::TextButton::buttonColourId,
+        short_circuit_button.setColour (juce::TextButton::buttonColourId,
                                       active ? UIConstants::Colors::short_circuit_active : UIConstants::Colors::crimson);
     }
-    else if (button == &freezeButton)
+    else if (button == &freeze_button)
     {
-        bool frozen = freezeButton.getToggleState();
+        bool frozen = freeze_button.getToggleState();
         if (currentBendingLayer.isNotEmpty())
             audioProcessor.setLayerFrozen (currentBendingLayer.toStdString(), frozen);
 
         if (frozen)
         {
-            freezeButton.setColour (juce::ToggleButton::textColourId, UIConstants::Colors::drift_orange);
+            freeze_button.setColour (juce::ToggleButton::textColourId, UIConstants::Colors::drift_orange);
             if (currentBendingLayer.isNotEmpty())
             {
                 currentWeights = audioProcessor.getBackend().get_layer_weights (currentBendingLayer.toStdString());
-                float scale = (float)scaleSlider.getValue();
-                float offset = (float)offsetSlider.getValue();
+                float scale = (float)scale_slider.getValue();
+                float offset = (float)offset_slider.getValue();
                 baseDrawnWeights.resize (currentWeights.size());
                 if (std::abs (scale) > 0.00001f)
                 {
@@ -400,10 +400,10 @@ auto NNBendingAudioProcessorEditor::buttonClicked(juce::Button* button) -> void 
         }
         else
         {
-            freezeButton.setColour (juce::ToggleButton::textColourId, juce::Colours::lightgrey);
+            freeze_button.setColour (juce::ToggleButton::textColourId, juce::Colours::lightgrey);
         }
     }
-    else if (button == &loadButton)
+    else if (button == &load_button)
     {
         fileChooser = std::make_unique<juce::FileChooser> (
             "Select a Neural Audio Model (.pte, .onnx, .ts)...",
@@ -420,136 +420,136 @@ auto NNBendingAudioProcessorEditor::buttonClicked(juce::Button* button) -> void 
                 currentBendingLayer = "";
                 if (audioProcessor.loadModel (file))
                 {
-                    updateModelInfo();
+                    update_model_info();
                 }
                 else
                 {
-                    statusLabel.setText ("Error: Failed to load " + file.getFileName(), juce::dontSendNotification);
-                    statusLabel.setColour (juce::Label::textColourId, juce::Colours::orangered);
+                    status_label.setText ("Error: Failed to load " + file.getFileName(), juce::dontSendNotification);
+                    status_label.setColour (juce::Label::textColourId, juce::Colours::orangered);
                 }
             }
         });
     }
-    else if (button == &resetLayerButton)
+    else if (button == &reset_layer_button)
     {
-        resetLayerWeights();
+        reset_layer_weights();
     }
-    else if (button == &resetAllButton)
+    else if (button == &reset_all_button)
     {
-        resetAllLayerWeights();
+        reset_all_layer_weights();
     }
-    else if (button == &saveModelButton)
+    else if (button == &save_model_button)
     {
-        saveModelToFile();
+        save_model_to_file();
     }
-    else if (button == &harmonicApplyButton)
+    else if (button == &harmonic_apply_button)
     {
         applyHarmonicWeights();
     }
-    else if (button == &viewWeightsButton)
+    else if (button == &view_weights_button)
     {
-        setViewMode (ViewMode::Weights);
+        set_view_mode (ViewMode::Weights);
     }
-    else if (button == &viewLatentButton)
+    else if (button == &view_latent_button)
     {
-        setViewMode (ViewMode::Latent);
+        set_view_mode (ViewMode::Latent);
     }
-    else if (button == &latentEnableButton)
+    else if (button == &latent_enable_button)
     {
-        bool en = latentEnableButton.getToggleState();
+        bool en = latent_enable_button.getToggleState();
         audioProcessor.setLatentEnabled (en);
         latentPad.setEnabledState (en, audioProcessor.hasAutoencode());
     }
-    else if (button == &tabMutateButton)
+    else if (button == &tab_mutate_button)
     {
-        setSideTab (SideTab::Mutate);
+        set_side_tab (SideTab::Mutate);
     }
-    else if (button == &tabHarmonicsButton)
+    else if (button == &tab_harmonics_button)
     {
-        setSideTab (SideTab::Harmonics);
+        set_side_tab (SideTab::Harmonics);
     }
-    else if (button == &tabBridgeButton)
+    else if (button == &tab_bridge_button)
     {
-        setSideTab (SideTab::Bridge);
+        set_side_tab (SideTab::Bridge);
     }
-    else if (button == &mutateEnableToggle)
+    else if (button == &mutate_enable_toggle)
     {
-        applyKnobBending();
+        apply_knob_bending();
     }
-    else if (button == &driftEnableToggle)
+    else if (button == &drift_enable_toggle)
     {
-        if (!driftEnableToggle.getToggleState() && currentBendingLayer.isNotEmpty())
+        if (!drift_enable_toggle.getToggleState() && currentBendingLayer.isNotEmpty())
         {
             auto state = audioProcessor.getLayerState (currentBendingLayer.toStdString());
             state.driftOffsets.assign (state.driftOffsets.size(), 0.0f);
             audioProcessor.setLayerState (currentBendingLayer.toStdString(), state);
         }
     }
-    else if (button == &bridgeEnableToggle)
+    else if (button == &bridge_enable_toggle)
     {
-        bool en = bridgeEnableToggle.getToggleState();
+        bool en = bridge_enable_toggle.getToggleState();
         weightCanvas.setShowBridgeVisuals (en);
-        applyKnobBending();
+        apply_knob_bending();
     }
-    else if (button == &harmonicEnableToggle)
+    else if (button == &harmonic_enable_toggle)
     {
-        bool en = harmonicEnableToggle.getToggleState();
+        bool en = harmonic_enable_toggle.getToggleState();
         weightCanvas.setShowHarmonics (en);
         updateHarmonicGhostPreview();
     }
-    else if (button == &displayCurveButton)
+    else if (button == &display_curve_button)
     {
         weightCanvas.setRenderMode (WeightBendingComponent::RenderMode::Curve);
-        displayCurveButton.setColour (juce::TextButton::buttonColourId, UIConstants::Colors::deep_violet);
-        displayCurveButton.setColour (juce::TextButton::textColourOffId, UIConstants::Colors::text_white);
-        displayMatrixButton.setColour (juce::TextButton::buttonColourId, UIConstants::Colors::button_secondary_bg);
-        displayMatrixButton.setColour (juce::TextButton::textColourOffId, UIConstants::Colors::text_dimmed);
+        display_curve_button.setColour (juce::TextButton::buttonColourId, UIConstants::Colors::deep_violet);
+        display_curve_button.setColour (juce::TextButton::textColourOffId, UIConstants::Colors::text_white);
+        display_matrix_button.setColour (juce::TextButton::buttonColourId, UIConstants::Colors::button_secondary_bg);
+        display_matrix_button.setColour (juce::TextButton::textColourOffId, UIConstants::Colors::text_dimmed);
     }
-    else if (button == &displayMatrixButton)
+    else if (button == &display_matrix_button)
     {
         weightCanvas.setRenderMode (WeightBendingComponent::RenderMode::Matrix);
-        displayMatrixButton.setColour (juce::TextButton::buttonColourId, UIConstants::Colors::deep_violet);
-        displayMatrixButton.setColour (juce::TextButton::textColourOffId, UIConstants::Colors::text_white);
-        displayCurveButton.setColour (juce::TextButton::buttonColourId, UIConstants::Colors::button_secondary_bg);
-        displayCurveButton.setColour (juce::TextButton::textColourOffId, UIConstants::Colors::text_dimmed);
+        display_matrix_button.setColour (juce::TextButton::buttonColourId, UIConstants::Colors::deep_violet);
+        display_matrix_button.setColour (juce::TextButton::textColourOffId, UIConstants::Colors::text_white);
+        display_curve_button.setColour (juce::TextButton::buttonColourId, UIConstants::Colors::button_secondary_bg);
+        display_curve_button.setColour (juce::TextButton::textColourOffId, UIConstants::Colors::text_dimmed);
     }
 }
 
 //==============================================================================
 auto NNBendingAudioProcessorEditor::timerCallback() -> void {
-    if (audioProcessor.isModelLoaded() && statusLabel.getText() == "No model loaded.")
+    if (audioProcessor.isModelLoaded() && status_label.getText() == "No model loaded.")
     {
-        updateModelInfo();
+        update_model_info();
     }
 
     // If DAW host is automating parameters, reflect changes into UI knobs
     if (auto* p = audioProcessor.getScaleParam())
     {
         float pVal = p->get();
-        if (std::abs (pVal - lastKnownScale) > 0.005f && !scaleSlider.isMouseButtonDown())
+        if (std::abs (pVal - lastKnownScale) > 0.005f && !scale_slider.isMouseButtonDown())
         {
             lastKnownScale = pVal;
-            scaleSlider.setValue (pVal, juce::dontSendNotification);
-            applyKnobBending();
+            scale_slider.setValue (pVal, juce::dontSendNotification);
+            apply_knob_bending();
         }
     }
     if (auto* p = audioProcessor.getOffsetParam())
     {
         float pVal = p->get();
-        if (std::abs (pVal - lastKnownOffset) > 0.001f && !offsetSlider.isMouseButtonDown())
+        if (std::abs (pVal - lastKnownOffset) > 0.001f && !offset_slider.isMouseButtonDown())
         {
             lastKnownOffset = pVal;
-            offsetSlider.setValue (pVal, juce::dontSendNotification);
-            applyKnobBending();
+            offset_slider.setValue (pVal, juce::dontSendNotification);
+            apply_knob_bending();
         }
     }
     if (auto* p = audioProcessor.getHeatParam())
     {
         float pVal = p->get();
-        if (std::abs (pVal - lastKnownHeat) > 0.001f && !heatSlider.isMouseButtonDown())
+        if (std::abs (pVal - lastKnownHeat) > 0.001f && !heat_slider.isMouseButtonDown())
         {
             lastKnownHeat = pVal;
-            heatSlider.setValue (pVal, juce::dontSendNotification);
+            heat_slider.setValue (pVal, juce::dontSendNotification);
             if (currentBendingLayer.isNotEmpty())
                 audioProcessor.setLayerHeat (currentBendingLayer.toStdString(), pVal);
         }
@@ -557,10 +557,10 @@ auto NNBendingAudioProcessorEditor::timerCallback() -> void {
     if (auto* p = audioProcessor.getMemoryParam())
     {
         float pVal = p->get();
-        if (std::abs (pVal - lastKnownMemory) > 0.001f && !memorySlider.isMouseButtonDown())
+        if (std::abs (pVal - lastKnownMemory) > 0.001f && !memory_slider.isMouseButtonDown())
         {
             lastKnownMemory = pVal;
-            memorySlider.setValue (pVal, juce::dontSendNotification);
+            memory_slider.setValue (pVal, juce::dontSendNotification);
             if (currentBendingLayer.isNotEmpty())
                 audioProcessor.setLayerMemory (currentBendingLayer.toStdString(), pVal);
         }
@@ -568,10 +568,10 @@ auto NNBendingAudioProcessorEditor::timerCallback() -> void {
     if (auto* p = audioProcessor.getDryWetParam())
     {
         float pVal = p->get();
-        if (std::abs (pVal - lastKnownDryWet) > 0.005f && !dryWetSlider.isMouseButtonDown())
+        if (std::abs (pVal - lastKnownDryWet) > 0.005f && !dry_wet_slider.isMouseButtonDown())
         {
             lastKnownDryWet = pVal;
-            dryWetSlider.setValue (pVal, juce::dontSendNotification);
+            dry_wet_slider.setValue (pVal, juce::dontSendNotification);
             audioProcessor.setDryWet (pVal);
         }
     }
@@ -579,9 +579,9 @@ auto NNBendingAudioProcessorEditor::timerCallback() -> void {
     if (auto* p = audioProcessor.getLatentDepthParam())
     {
         float pVal = p->get();
-        if (std::abs (pVal - (float)latentDepthSlider.getValue()) > 0.005f && !latentDepthSlider.isMouseButtonDown())
+        if (std::abs (pVal - (float)latent_depth_slider.getValue()) > 0.005f && !latent_depth_slider.isMouseButtonDown())
         {
-            latentDepthSlider.setValue (pVal, juce::dontSendNotification);
+            latent_depth_slider.setValue (pVal, juce::dontSendNotification);
             audioProcessor.setLatentDepth (pVal);
         }
     }
@@ -591,16 +591,16 @@ auto NNBendingAudioProcessorEditor::timerCallback() -> void {
         latentPad.setCoords (audioProcessor.getLatentX(), audioProcessor.getLatentY());
     }
     latentPad.setEnabledState (audioProcessor.isLatentEnabled(), audioProcessor.hasAutoencode());
-    if (latentEnableButton.getToggleState() != audioProcessor.isLatentEnabled())
+    if (latent_enable_button.getToggleState() != audioProcessor.isLatentEnabled())
     {
-        latentEnableButton.setToggleState (audioProcessor.isLatentEnabled(), juce::dontSendNotification);
+        latent_enable_button.setToggleState (audioProcessor.isLatentEnabled(), juce::dontSendNotification);
     }
 
     if (audioProcessor.isFuseBlown())
     {
-        fuseButton.setButtonText ("FUSE: BLOWN!");
-        fuseButton.setColour (juce::TextButton::buttonColourId, UIConstants::Colors::fuse_blown);
-        fuseButton.setColour (juce::TextButton::textColourOffId, juce::Colours::yellow);
+        fuse_button.setButtonText ("FUSE: BLOWN!");
+        fuse_button.setColour (juce::TextButton::buttonColourId, UIConstants::Colors::fuse_blown);
+        fuse_button.setColour (juce::TextButton::textColourOffId, juce::Colours::yellow);
     }
     else
     {
@@ -617,27 +617,27 @@ auto NNBendingAudioProcessorEditor::timerCallback() -> void {
 
         if (bendingActive)
         {
-            fuseButton.setButtonText ("FUSE: ACTIVE");
-            fuseButton.setColour (juce::TextButton::buttonColourId, UIConstants::Colors::fuse_glowing_green);
-            fuseButton.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
+            fuse_button.setButtonText ("FUSE: ACTIVE");
+            fuse_button.setColour (juce::TextButton::buttonColourId, UIConstants::Colors::fuse_glowing_green);
+            fuse_button.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
         }
         else
         {
-            fuseButton.setButtonText ("FUSE: OK");
-            fuseButton.setColour (juce::TextButton::buttonColourId, UIConstants::Colors::forest_green);
-            fuseButton.setColour (juce::TextButton::textColourOffId, juce::Colours::lightgreen);
+            fuse_button.setButtonText ("FUSE: OK");
+            fuse_button.setColour (juce::TextButton::buttonColourId, UIConstants::Colors::forest_green);
+            fuse_button.setColour (juce::TextButton::textColourOffId, juce::Colours::lightgreen);
         }
     }
 
     float env = audioProcessor.getMomentaryEnvelope();
     if (env > 0.05f)
     {
-        shortCircuitButton.setColour (juce::TextButton::buttonColourId,
+        short_circuit_button.setColour (juce::TextButton::buttonColourId,
             UIConstants::Colors::crimson.interpolatedWith (UIConstants::Colors::short_circuit_active, env));
     }
     else
     {
-        shortCircuitButton.setColour (juce::TextButton::buttonColourId, UIConstants::Colors::crimson);
+        short_circuit_button.setColour (juce::TextButton::buttonColourId, UIConstants::Colors::crimson);
     }
 
     // Update canvas curves:
@@ -665,8 +665,8 @@ auto NNBendingAudioProcessorEditor::timerCallback() -> void {
             // Calculate target bent curve only when parameters or source change:
             if (!state.drawnWeights.empty())
             {
-                bool bridgeEnabled = bridgeEnableToggle.getToggleState();
-                bool mutateEnabled = mutateEnableToggle.getToggleState();
+                bool bridgeEnabled = bridge_enable_toggle.getToggleState();
+                bool mutateEnabled = mutate_enable_toggle.getToggleState();
                 float effScale = mutateEnabled ? state.scale : 1.0f;
                 float effOffset = mutateEnabled ? state.offset : 0.0f;
 
@@ -730,12 +730,12 @@ auto NNBendingAudioProcessorEditor::timerCallback() -> void {
     }
 }
 
-auto NNBendingAudioProcessorEditor::updateModelInfo() -> void {
+auto NNBendingAudioProcessorEditor::update_model_info() -> void {
     bool usingGpu = audioProcessor.isUsingGpu();
-    gpuButton.setButtonText (usingGpu ? "GPU" : "CPU");
-    gpuButton.setColour (juce::TextButton::buttonColourId,
+    gpu_button.setButtonText (usingGpu ? "GPU" : "CPU");
+    gpu_button.setColour (juce::TextButton::buttonColourId,
                          usingGpu ? UIConstants::Colors::dark_cyan : UIConstants::Colors::button_secondary_bg);
-    gpuButton.setColour (juce::TextButton::textColourOffId,
+    gpu_button.setColour (juce::TextButton::textColourOffId,
                          usingGpu ? juce::Colours::lightcyan : UIConstants::Colors::text_light);
 
     if (audioProcessor.isModelLoaded())
@@ -747,26 +747,26 @@ auto NNBendingAudioProcessorEditor::updateModelInfo() -> void {
             srStr += " [Resampled -> " + juce::String ((int)audioProcessor.getSampleRate()) + "Hz]";
 
         juce::String backendName (audioProcessor.getBackend().get_backend_name());
-        statusLabel.setText ("Loaded: " + file.getFileName() + " [" + backendName + "]" + srStr, juce::dontSendNotification);
-        statusLabel.setColour (juce::Label::textColourId, juce::Colours::lightgreen);
+        status_label.setText ("Loaded: " + file.getFileName() + " [" + backendName + "]" + srStr, juce::dontSendNotification);
+        status_label.setColour (juce::Label::textColourId, juce::Colours::lightgreen);
 
         // Update Buffer readout badge
-        bufferStatusLabel.setText (juce::String (audioProcessor.getBufferSize()), juce::dontSendNotification);
+        buffer_status_label.setText (juce::String (audioProcessor.getBufferSize()), juce::dontSendNotification);
 
         // Update Mode combo box
-        methodCombo.clear (juce::dontSendNotification);
+        method_combo.clear (juce::dontSendNotification);
         auto modes = audioProcessor.getAvailableModes();
         int id = 1;
         for (const auto& m : modes)
         {
-            methodCombo.addItem (m, id++);
+            method_combo.addItem (m, id++);
         }
-        methodCombo.setText (audioProcessor.getCurrentMode(), juce::dontSendNotification);
+        method_combo.setText (audioProcessor.getCurrentMode(), juce::dontSendNotification);
 
         // Update Layer combo box respecting selected Category
-        layerCombo.clear (juce::dontSendNotification);
+        layer_combo.clear (juce::dontSendNotification);
         auto layers = audioProcessor.getBackend().get_available_layers();
-        int catId = categoryCombo.getSelectedId();
+        int catId = category_combo.getSelectedId();
         id = 1;
         for (const auto& l : layers)
         {
@@ -782,23 +782,23 @@ auto NNBendingAudioProcessorEditor::updateModelInfo() -> void {
             else if (catId == 8 && cat == NNBendingAudioProcessor::LayerCategory::Bias) include = true;
 
             if (include)
-                layerCombo.addItem (l, id++);
+                layer_combo.addItem (l, id++);
         }
 
         // Populate Bridge Combo with [No Bridge] + all model layers
-        bridgeCombo.clear (juce::dontSendNotification);
-        bridgeCombo.addItem ("(Off)", 1);
+        bridge_combo.clear (juce::dontSendNotification);
+        bridge_combo.addItem ("(Off)", 1);
         int bridgeId = 2;
         for (const auto& l : layers)
         {
-            bridgeCombo.addItem (l, bridgeId++);
+            bridge_combo.addItem (l, bridgeId++);
         }
-        bridgeCombo.setSelectedId (1, juce::dontSendNotification);
+        bridge_combo.setSelectedId (1, juce::dontSendNotification);
         
         bool layerFound = false;
-        for (int i = 0; i < layerCombo.getNumItems(); ++i)
+        for (int i = 0; i < layer_combo.getNumItems(); ++i)
         {
-            if (layerCombo.getItemText(i) == currentBendingLayer)
+            if (layer_combo.getItemText(i) == currentBendingLayer)
             {
                 layerFound = true;
                 break;
@@ -807,13 +807,13 @@ auto NNBendingAudioProcessorEditor::updateModelInfo() -> void {
 
         if (layerFound && currentBendingLayer.isNotEmpty())
         {
-            layerCombo.setText (currentBendingLayer, juce::dontSendNotification);
-            selectLayer (currentBendingLayer);
+            layer_combo.setText (currentBendingLayer, juce::dontSendNotification);
+            select_layer (currentBendingLayer);
         }
-        else if (layerCombo.getNumItems() > 0)
+        else if (layer_combo.getNumItems() > 0)
         {
-            layerCombo.setSelectedId (1, juce::dontSendNotification);
-            selectLayer (layerCombo.getItemText(0));
+            layer_combo.setSelectedId (1, juce::dontSendNotification);
+            select_layer (layer_combo.getItemText(0));
         }
         else
         {
@@ -826,21 +826,21 @@ auto NNBendingAudioProcessorEditor::updateModelInfo() -> void {
     }
     else
     {
-        statusLabel.setText ("No model loaded.", juce::dontSendNotification);
-        statusLabel.setColour (juce::Label::textColourId, juce::Colours::darkgrey);
-        bufferStatusLabel.setText ("-", juce::dontSendNotification);
-        methodCombo.clear (juce::dontSendNotification);
-        layerCombo.clear (juce::dontSendNotification);
+        status_label.setText ("No model loaded.", juce::dontSendNotification);
+        status_label.setColour (juce::Label::textColourId, juce::Colours::darkgrey);
+        buffer_status_label.setText ("-", juce::dontSendNotification);
+        method_combo.clear (juce::dontSendNotification);
+        layer_combo.clear (juce::dontSendNotification);
         infoBendingLabel.setText ("Load a model to view weights.", juce::dontSendNotification);
         originalWeights.clear();
         currentWeights.clear();
         currentBendingLayer = "";
         weightCanvas.setWeights ({}, {});
-        updateKnobContextLabels (NNBendingAudioProcessor::LayerCategory::Other);
+        update_knob_context_labels (NNBendingAudioProcessor::LayerCategory::Other);
     }
 }
 
-auto NNBendingAudioProcessorEditor::selectLayer(const juce::String& layerName) -> void {
+auto NNBendingAudioProcessorEditor::select_layer(const juce::String& layerName) -> void {
     if (layerName.isEmpty()) return;
     
     currentBendingLayer = layerName;
@@ -867,20 +867,20 @@ auto NNBendingAudioProcessorEditor::selectLayer(const juce::String& layerName) -
         baseDrawnWeights = state.drawnWeights;
     }
 
-    scaleSlider.removeListener (this);
-    offsetSlider.removeListener (this);
-    heatSlider.removeListener (this);
-    memorySlider.removeListener (this);
-    driftModeCombo.removeListener (this);
+    scale_slider.removeListener (this);
+    offset_slider.removeListener (this);
+    heat_slider.removeListener (this);
+    memory_slider.removeListener (this);
+    drift_mode_combo.removeListener (this);
     
-    scaleSlider.setValue (state.scale, juce::dontSendNotification);
-    offsetSlider.setValue (state.offset, juce::dontSendNotification);
-    heatSlider.setValue (state.heat, juce::dontSendNotification);
-    memorySlider.setValue (state.memory, juce::dontSendNotification);
-    driftModeCombo.setSelectedId ((int)state.driftMode + 1, juce::dontSendNotification);
+    scale_slider.setValue (state.scale, juce::dontSendNotification);
+    offset_slider.setValue (state.offset, juce::dontSendNotification);
+    heat_slider.setValue (state.heat, juce::dontSendNotification);
+    memory_slider.setValue (state.memory, juce::dontSendNotification);
+    drift_mode_combo.setSelectedId ((int)state.driftMode + 1, juce::dontSendNotification);
 
-    freezeButton.setToggleState (state.frozen, juce::dontSendNotification);
-    freezeButton.setColour (juce::ToggleButton::textColourId,
+    freeze_button.setToggleState (state.frozen, juce::dontSendNotification);
+    freeze_button.setColour (juce::ToggleButton::textColourId,
                             state.frozen ? UIConstants::Colors::drift_orange : UIConstants::Colors::text_light);
 
     // Sync DAW host automatable parameters to active layer values
@@ -890,30 +890,30 @@ auto NNBendingAudioProcessorEditor::selectLayer(const juce::String& layerName) -
     if (auto* p = audioProcessor.getMemoryParam()) p->setValueNotifyingHost (p->convertTo0to1 (state.memory));
 
     // Sync bridge controls with this layer's state
-    bridgeCombo.removeListener (this);
-    bridgeDepthSlider.removeListener (this);
+    bridge_combo.removeListener (this);
+    bridge_depth_slider.removeListener (this);
 
     if (state.bridgeSourceLayer.empty())
     {
-        bridgeCombo.setSelectedId (1, juce::dontSendNotification);
+        bridge_combo.setSelectedId (1, juce::dontSendNotification);
     }
     else
     {
         int foundId = 1;
-        for (int i = 0; i < bridgeCombo.getNumItems(); ++i)
+        for (int i = 0; i < bridge_combo.getNumItems(); ++i)
         {
-            if (bridgeCombo.getItemText(i).toStdString() == state.bridgeSourceLayer)
+            if (bridge_combo.getItemText(i).toStdString() == state.bridgeSourceLayer)
             {
-                foundId = bridgeCombo.getItemId(i);
+                foundId = bridge_combo.getItemId(i);
                 break;
             }
         }
-        bridgeCombo.setSelectedId (foundId, juce::dontSendNotification);
+        bridge_combo.setSelectedId (foundId, juce::dontSendNotification);
     }
-    bridgeDepthSlider.setValue (state.bridgeDepth, juce::dontSendNotification);
+    bridge_depth_slider.setValue (state.bridgeDepth, juce::dontSendNotification);
 
-    bridgeCombo.addListener (this);
-    bridgeDepthSlider.addListener (this);
+    bridge_combo.addListener (this);
+    bridge_depth_slider.addListener (this);
 
     auto shape = audioProcessor.getBackend().get_layer_shape (layerName.toStdString());
     weightCanvas.setLayerShape (shape);
@@ -921,7 +921,7 @@ auto NNBendingAudioProcessorEditor::selectLayer(const juce::String& layerName) -
 
     std::vector<float> bridgedBase = baseDrawnWeights;
     std::vector<float> srcTiled;
-    bool bridgeEnabled = bridgeEnableToggle.getToggleState();
+    bool bridgeEnabled = bridge_enable_toggle.getToggleState();
     if (bridgeEnabled && state.bridgeDepth > 0.001f && !state.bridgeSourceLayer.empty() && state.bridgeSourceLayer != layerName.toStdString())
     {
         auto srcW = audioProcessor.getBackend().get_original_layer_weights (state.bridgeSourceLayer);
@@ -944,7 +944,7 @@ auto NNBendingAudioProcessorEditor::selectLayer(const juce::String& layerName) -
     if (!isContinuous)
     {
         std::vector<float> targetBent(bridgedBase.size());
-        bool mutateEnabled = mutateEnableToggle.getToggleState();
+        bool mutateEnabled = mutate_enable_toggle.getToggleState();
         float effScale = mutateEnabled ? state.scale : 1.0f;
         float effOffset = mutateEnabled ? state.offset : 0.0f;
         for (size_t i = 0; i < bridgedBase.size(); ++i)
@@ -969,13 +969,13 @@ auto NNBendingAudioProcessorEditor::selectLayer(const juce::String& layerName) -
     infoBendingLabel.setText ("Trace: [" + catName + "]  |  Layer: " + currentBendingLayer + "  |  " + juce::String (originalWeights.size()) + " params" + (audioProcessor.hasAutoencode() ? "  |  [Latent Hook Ready]" : ""), juce::dontSendNotification);
 
     // Update contextual knob labels (Gamma / Beta for Norm, Scale / Offset for other traces)
-    updateKnobContextLabels (category);
+    update_knob_context_labels (category);
 
-    scaleSlider.addListener (this);
-    offsetSlider.addListener (this);
-    heatSlider.addListener (this);
-    memorySlider.addListener (this);
-    driftModeCombo.addListener (this);
+    scale_slider.addListener (this);
+    offset_slider.addListener (this);
+    heat_slider.addListener (this);
+    memory_slider.addListener (this);
+    drift_mode_combo.addListener (this);
 
     lastKnownScale = state.scale;
     lastKnownOffset = state.offset;
@@ -986,14 +986,14 @@ auto NNBendingAudioProcessorEditor::selectLayer(const juce::String& layerName) -
     updateHarmonicGhostPreview();
 }
 
-auto NNBendingAudioProcessorEditor::applyKnobBending() -> void {
+auto NNBendingAudioProcessorEditor::apply_knob_bending() -> void {
     if (currentBendingLayer.isEmpty()) return;
     if (baseDrawnWeights.empty())
         baseDrawnWeights = audioProcessor.getBackend().get_original_layer_weights (currentBendingLayer.toStdString());
     
-    bool mutateEnabled = mutateEnableToggle.getToggleState();
-    float scale = mutateEnabled ? (float)scaleSlider.getValue() : 1.0f;
-    float offset = mutateEnabled ? (float)offsetSlider.getValue() : 0.0f;
+    bool mutateEnabled = mutate_enable_toggle.getToggleState();
+    float scale = mutateEnabled ? (float)scale_slider.getValue() : 1.0f;
+    float offset = mutateEnabled ? (float)offset_slider.getValue() : 0.0f;
 
     // Store per-layer scale and offset
     audioProcessor.setLayerScale (currentBendingLayer.toStdString(), scale);
@@ -1003,7 +1003,7 @@ auto NNBendingAudioProcessorEditor::applyKnobBending() -> void {
     auto state = audioProcessor.getLayerState (currentBendingLayer.toStdString());
     std::vector<float> bridgedBase = baseDrawnWeights;
     std::vector<float> srcTiled;
-    bool bridgeEnabled = bridgeEnableToggle.getToggleState();
+    bool bridgeEnabled = bridge_enable_toggle.getToggleState();
 
     if (bridgeEnabled && state.bridgeDepth > 0.001f && !state.bridgeSourceLayer.empty() && state.bridgeSourceLayer != currentBendingLayer.toStdString())
     {
@@ -1050,27 +1050,27 @@ auto NNBendingAudioProcessorEditor::applyKnobBending() -> void {
     lastBridgeEnabled = bridgeEnabled;
 }
 
-auto NNBendingAudioProcessorEditor::resetLayerWeights() -> void {
+auto NNBendingAudioProcessorEditor::reset_layer_weights() -> void {
     if (currentBendingLayer.isEmpty()) return;
     
     audioProcessor.getBackend().reset_layer_weights (currentBendingLayer.toStdString());
     audioProcessor.clearLayerBending (currentBendingLayer.toStdString());
     
-    scaleSlider.removeListener (this);
-    offsetSlider.removeListener (this);
-    heatSlider.removeListener (this);
-    memorySlider.removeListener (this);
-    bridgeCombo.removeListener (this);
-    bridgeDepthSlider.removeListener (this);
+    scale_slider.removeListener (this);
+    offset_slider.removeListener (this);
+    heat_slider.removeListener (this);
+    memory_slider.removeListener (this);
+    bridge_combo.removeListener (this);
+    bridge_depth_slider.removeListener (this);
 
-    scaleSlider.setValue (1.0, juce::dontSendNotification);
-    offsetSlider.setValue (0.0, juce::dontSendNotification);
-    heatSlider.setValue (0.0, juce::dontSendNotification);
-    memorySlider.setValue (0.8, juce::dontSendNotification);
-    bridgeCombo.setSelectedId (1, juce::dontSendNotification);
-    bridgeDepthSlider.setValue (0.0, juce::dontSendNotification);
-    freezeButton.setToggleState (false, juce::dontSendNotification);
-    freezeButton.setColour (juce::ToggleButton::textColourId, juce::Colours::lightgrey);
+    scale_slider.setValue (1.0, juce::dontSendNotification);
+    offset_slider.setValue (0.0, juce::dontSendNotification);
+    heat_slider.setValue (0.0, juce::dontSendNotification);
+    memory_slider.setValue (0.8, juce::dontSendNotification);
+    bridge_combo.setSelectedId (1, juce::dontSendNotification);
+    bridge_depth_slider.setValue (0.0, juce::dontSendNotification);
+    freeze_button.setToggleState (false, juce::dontSendNotification);
+    freeze_button.setColour (juce::ToggleButton::textColourId, juce::Colours::lightgrey);
 
     if (auto* p = audioProcessor.getScaleParam())  p->setValueNotifyingHost (p->convertTo0to1 (1.0f));
     if (auto* p = audioProcessor.getOffsetParam()) p->setValueNotifyingHost (p->convertTo0to1 (0.0f));
@@ -1085,12 +1085,12 @@ auto NNBendingAudioProcessorEditor::resetLayerWeights() -> void {
     lastKnobScale = 1.0;
     lastKnobOffset = 0.0;
 
-    scaleSlider.addListener (this);
-    offsetSlider.addListener (this);
-    heatSlider.addListener (this);
-    memorySlider.addListener (this);
-    bridgeCombo.addListener (this);
-    bridgeDepthSlider.addListener (this);
+    scale_slider.addListener (this);
+    offset_slider.addListener (this);
+    heat_slider.addListener (this);
+    memory_slider.addListener (this);
+    bridge_combo.addListener (this);
+    bridge_depth_slider.addListener (this);
 
     originalWeights = audioProcessor.getBackend().get_original_layer_weights (currentBendingLayer.toStdString());
     currentWeights = originalWeights;
@@ -1102,25 +1102,25 @@ auto NNBendingAudioProcessorEditor::resetLayerWeights() -> void {
     updateHarmonicGhostPreview();
 }
 
-auto NNBendingAudioProcessorEditor::resetAllLayerWeights() -> void {
+auto NNBendingAudioProcessorEditor::reset_all_layer_weights() -> void {
     audioProcessor.getBackend().reset_all_layer_weights();
     audioProcessor.clearAllLayerBending();
     
-    scaleSlider.removeListener (this);
-    offsetSlider.removeListener (this);
-    heatSlider.removeListener (this);
-    memorySlider.removeListener (this);
-    bridgeCombo.removeListener (this);
-    bridgeDepthSlider.removeListener (this);
+    scale_slider.removeListener (this);
+    offset_slider.removeListener (this);
+    heat_slider.removeListener (this);
+    memory_slider.removeListener (this);
+    bridge_combo.removeListener (this);
+    bridge_depth_slider.removeListener (this);
 
-    scaleSlider.setValue (1.0, juce::dontSendNotification);
-    offsetSlider.setValue (0.0, juce::dontSendNotification);
-    heatSlider.setValue (0.0, juce::dontSendNotification);
-    memorySlider.setValue (0.8, juce::dontSendNotification);
-    bridgeCombo.setSelectedId (1, juce::dontSendNotification);
-    bridgeDepthSlider.setValue (0.0, juce::dontSendNotification);
-    freezeButton.setToggleState (false, juce::dontSendNotification);
-    freezeButton.setColour (juce::ToggleButton::textColourId, juce::Colours::lightgrey);
+    scale_slider.setValue (1.0, juce::dontSendNotification);
+    offset_slider.setValue (0.0, juce::dontSendNotification);
+    heat_slider.setValue (0.0, juce::dontSendNotification);
+    memory_slider.setValue (0.8, juce::dontSendNotification);
+    bridge_combo.setSelectedId (1, juce::dontSendNotification);
+    bridge_depth_slider.setValue (0.0, juce::dontSendNotification);
+    freeze_button.setToggleState (false, juce::dontSendNotification);
+    freeze_button.setColour (juce::ToggleButton::textColourId, juce::Colours::lightgrey);
 
     if (auto* p = audioProcessor.getScaleParam())  p->setValueNotifyingHost (p->convertTo0to1 (1.0f));
     if (auto* p = audioProcessor.getOffsetParam()) p->setValueNotifyingHost (p->convertTo0to1 (0.0f));
@@ -1135,12 +1135,12 @@ auto NNBendingAudioProcessorEditor::resetAllLayerWeights() -> void {
     lastKnobScale = 1.0;
     lastKnobOffset = 0.0;
 
-    scaleSlider.addListener (this);
-    offsetSlider.addListener (this);
-    heatSlider.addListener (this);
-    memorySlider.addListener (this);
-    bridgeCombo.addListener (this);
-    bridgeDepthSlider.addListener (this);
+    scale_slider.addListener (this);
+    offset_slider.addListener (this);
+    heat_slider.addListener (this);
+    memory_slider.addListener (this);
+    bridge_combo.addListener (this);
+    bridge_depth_slider.addListener (this);
 
     if (currentBendingLayer.isNotEmpty())
     {
@@ -1154,11 +1154,11 @@ auto NNBendingAudioProcessorEditor::resetAllLayerWeights() -> void {
     }
 }
 
-auto NNBendingAudioProcessorEditor::saveModelToFile() -> void {
+auto NNBendingAudioProcessorEditor::save_model_to_file() -> void {
     if (!audioProcessor.isModelLoaded())
     {
-        statusLabel.setText ("Cannot save: No model loaded.", juce::dontSendNotification);
-        statusLabel.setColour (juce::Label::textColourId, juce::Colours::orangered);
+        status_label.setText ("Cannot save: No model loaded.", juce::dontSendNotification);
+        status_label.setColour (juce::Label::textColourId, juce::Colours::orangered);
         return;
     }
 
@@ -1182,50 +1182,50 @@ auto NNBendingAudioProcessorEditor::saveModelToFile() -> void {
             int err = audioProcessor.getBackend().save_model (file.getFullPathName().toStdString());
             if (err == 0)
             {
-                statusLabel.setText ("Saved bended model: " + file.getFileName(), juce::dontSendNotification);
-                statusLabel.setColour (juce::Label::textColourId, juce::Colours::lightgreen);
+                status_label.setText ("Saved bended model: " + file.getFileName(), juce::dontSendNotification);
+                status_label.setColour (juce::Label::textColourId, juce::Colours::lightgreen);
             }
             else
             {
-                statusLabel.setText ("Error: Failed to save model.", juce::dontSendNotification);
-                statusLabel.setColour (juce::Label::textColourId, juce::Colours::orangered);
+                status_label.setText ("Error: Failed to save model.", juce::dontSendNotification);
+                status_label.setColour (juce::Label::textColourId, juce::Colours::orangered);
             }
         }
     });
 }
 
-auto NNBendingAudioProcessorEditor::updateKnobContextLabels(NNBendingAudioProcessor::LayerCategory category) -> void {
+auto NNBendingAudioProcessorEditor::update_knob_context_labels(NNBendingAudioProcessor::LayerCategory category) -> void {
     if (category == NNBendingAudioProcessor::LayerCategory::Norm)
     {
         // Normalization / Dynamics context: Gamma (Gain) & Beta (Bias)
-        scaleLabel.setText (juce::CharPointer_UTF8 ("Gamma (\xce\xb3)"), juce::dontSendNotification);
-        scaleLabel.setColour (juce::Label::textColourId, UIConstants::Colors::lilac);
+        scale_label.setText (juce::CharPointer_UTF8 ("Gamma (\xce\xb3)"), juce::dontSendNotification);
+        scale_label.setColour (juce::Label::textColourId, UIConstants::Colors::lilac);
 
-        offsetLabel.setText (juce::CharPointer_UTF8 ("Beta (\xce\xb2)"), juce::dontSendNotification);
-        offsetLabel.setColour (juce::Label::textColourId, UIConstants::Colors::sky_blue);
+        offset_label.setText (juce::CharPointer_UTF8 ("Beta (\xce\xb2)"), juce::dontSendNotification);
+        offset_label.setColour (juce::Label::textColourId, UIConstants::Colors::sky_blue);
     }
     else if (category == NNBendingAudioProcessor::LayerCategory::Activation)
     {
         // Snake / periodic activation context: Alpha (Freq scaling) & Offset
-        scaleLabel.setText (juce::CharPointer_UTF8 ("Alpha (\xce\xb1)"), juce::dontSendNotification);
-        scaleLabel.setColour (juce::Label::textColourId, UIConstants::Colors::amber_accent);
+        scale_label.setText (juce::CharPointer_UTF8 ("Alpha (\xce\xb1)"), juce::dontSendNotification);
+        scale_label.setColour (juce::Label::textColourId, UIConstants::Colors::amber_accent);
 
-        offsetLabel.setText ("Offset", juce::dontSendNotification);
-        offsetLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
+        offset_label.setText ("Offset", juce::dontSendNotification);
+        offset_label.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
     }
     else
     {
         // Standard convolution / dense / bias context: Scale & Offset
-        scaleLabel.setText ("Scale", juce::dontSendNotification);
-        scaleLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
+        scale_label.setText ("Scale", juce::dontSendNotification);
+        scale_label.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
 
-        offsetLabel.setText ("Offset", juce::dontSendNotification);
-        offsetLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
+        offset_label.setText ("Offset", juce::dontSendNotification);
+        offset_label.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
     }
 }
 
 auto NNBendingAudioProcessorEditor::updateHarmonicGhostPreview() -> void {
-    if (!harmonicEnableToggle.getToggleState() || currentBendingLayer.isEmpty() || baseDrawnWeights.empty())
+    if (!harmonic_enable_toggle.getToggleState() || currentBendingLayer.isEmpty() || baseDrawnWeights.empty())
     {
         weightCanvas.setHarmonicGhostWeights ({}, false);
         return;
@@ -1234,11 +1234,11 @@ auto NNBendingAudioProcessorEditor::updateHarmonicGhostPreview() -> void {
     size_t N = baseDrawnWeights.size();
     std::vector<float> ghost (N);
 
-    float f = (float)harmonicFreqSlider.getValue();
-    int partials = (int)harmonicPartialsSlider.getValue();
-    float morph = (float)harmonicMorphSlider.getValue();
-    float gain = (float)harmonicDepthSlider.getValue();
-    int mode = harmonicModeCombo.getSelectedId(); // 1 = Add, 2 = Ring, 3 = Replace
+    float f = (float)harmonic_freq_slider.getValue();
+    int partials = (int)harmonic_partials_slider.getValue();
+    float morph = (float)harmonic_morph_slider.getValue();
+    float gain = (float)harmonic_depth_slider.getValue();
+    int mode = harmonic_mode_combo.getSelectedId(); // 1 = Add, 2 = Ring, 3 = Replace
 
     // TwoPi constant
     const float twoPi = 6.28318530717958647692f;
@@ -1279,11 +1279,11 @@ auto NNBendingAudioProcessorEditor::applyHarmonicWeights() -> void {
     size_t N = baseDrawnWeights.size();
     std::vector<float> stamped (N);
 
-    float f = (float)harmonicFreqSlider.getValue();
-    int partials = (int)harmonicPartialsSlider.getValue();
-    float morph = (float)harmonicMorphSlider.getValue();
-    float gain = (float)harmonicDepthSlider.getValue();
-    int mode = harmonicModeCombo.getSelectedId();
+    float f = (float)harmonic_freq_slider.getValue();
+    int partials = (int)harmonic_partials_slider.getValue();
+    float morph = (float)harmonic_morph_slider.getValue();
+    float gain = (float)harmonic_depth_slider.getValue();
+    int mode = harmonic_mode_combo.getSelectedId();
 
     const float twoPi = 6.28318530717958647692f;
 
@@ -1315,18 +1315,18 @@ auto NNBendingAudioProcessorEditor::applyHarmonicWeights() -> void {
     weightCanvas.setHarmonicGhostWeights ({}, false);
 
     // Apply via existing knob bending pipeline
-    applyKnobBending();
+    apply_knob_bending();
 
     infoBendingLabel.setText ("Harmonic wave stamped to " + currentBendingLayer, juce::dontSendNotification);
 }
 
-auto NNBendingAudioProcessorEditor::setSideTab(SideTab newTab) -> void {
+auto NNBendingAudioProcessorEditor::set_side_tab(SideTab newTab) -> void {
     currentSideTab = newTab;
-    sidePanel.setSideTab(newTab);
+    sidePanel.set_side_tab(newTab);
     repaint();
 }
 
-auto NNBendingAudioProcessorEditor::setViewMode(ViewMode newMode) -> void {
+auto NNBendingAudioProcessorEditor::set_view_mode(ViewMode newMode) -> void {
     currentViewMode = newMode;
 
     bool isWeights = (currentViewMode == ViewMode::Weights);
@@ -1337,25 +1337,25 @@ auto NNBendingAudioProcessorEditor::setViewMode(ViewMode newMode) -> void {
     const auto& activeText = UIConstants::Colors::text_white;
     const auto& inactiveText = UIConstants::Colors::text_dimmed;
 
-    viewWeightsButton.setColour(juce::TextButton::buttonColourId, isWeights ? activeBg : inactiveBg);
-    viewWeightsButton.setColour(juce::TextButton::textColourOffId, isWeights ? activeText : inactiveText);
+    view_weights_button.setColour(juce::TextButton::buttonColourId, isWeights ? activeBg : inactiveBg);
+    view_weights_button.setColour(juce::TextButton::textColourOffId, isWeights ? activeText : inactiveText);
 
-    viewLatentButton.setColour(juce::TextButton::buttonColourId, isLatent ? activeBg : inactiveBg);
-    viewLatentButton.setColour(juce::TextButton::textColourOffId, isLatent ? activeText : inactiveText);
+    view_latent_button.setColour(juce::TextButton::buttonColourId, isLatent ? activeBg : inactiveBg);
+    view_latent_button.setColour(juce::TextButton::textColourOffId, isLatent ? activeText : inactiveText);
 
     weightCanvas.setVisible(isWeights);
     latentPad.setVisible(isLatent);
 
-    categoryLabel.setVisible(isWeights);
-    categoryCombo.setVisible(isWeights);
-    layerLabel.setVisible(isWeights);
-    layerCombo.setVisible(isWeights);
-    resetLayerButton.setVisible(isWeights);
-    resetAllButton.setVisible(isWeights);
-    displayCurveButton.setVisible(isWeights);
-    displayMatrixButton.setVisible(isWeights);
+    category_label.setVisible(isWeights);
+    category_combo.setVisible(isWeights);
+    layer_label.setVisible(isWeights);
+    layer_combo.setVisible(isWeights);
+    reset_layer_button.setVisible(isWeights);
+    reset_all_button.setVisible(isWeights);
+    display_curve_button.setVisible(isWeights);
+    display_matrix_button.setVisible(isWeights);
 
-    sidePanel.setViewMode(newMode);
+    sidePanel.set_view_mode(newMode);
 
     if (isLatent) {
         if (audioProcessor.hasAutoencode())
@@ -1370,6 +1370,6 @@ auto NNBendingAudioProcessorEditor::setViewMode(ViewMode newMode) -> void {
 }
 
 auto NNBendingAudioProcessorEditor::updateLatentControlsVisibility() -> void {
-    sidePanel.latentPanel.resized();
+    side_panel.latent_panel.resized();
 }
 

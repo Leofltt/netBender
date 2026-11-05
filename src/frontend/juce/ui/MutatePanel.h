@@ -23,20 +23,5 @@ public:
     juce::ComboBox drift_mode_combo;
     juce::ToggleButton freeze_button{"Freeze Drift"};
 
-    // Compatibility references
-    juce::ToggleButton& mutateEnableToggle{mutate_enable_toggle};
-    juce::Label& scaleLabel{scale_label};
-    juce::Slider& scaleSlider{scale_slider};
-    juce::Label& offsetLabel{offset_label};
-    juce::Slider& offsetSlider{offset_slider};
-    juce::ToggleButton& driftEnableToggle{drift_enable_toggle};
-    juce::Label& heatLabel{heat_label};
-    juce::Slider& heatSlider{heat_slider};
-    juce::Label& memoryLabel{memory_label};
-    juce::Slider& memorySlider{memory_slider};
-    juce::Label& driftModeLabel{drift_mode_label};
-    juce::ComboBox& driftModeCombo{drift_mode_combo};
-    juce::ToggleButton& freezeButton{freeze_button};
-
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MutatePanel)
 };
