@@ -11,6 +11,27 @@ function(configure_nn_bending_target target_name)
         PluginProcessor.h
         PluginEditor.cpp
         PluginEditor.h
+        ui/FlatLookAndFeel.cpp
+        ui/FlatLookAndFeel.h
+        ui/HeaderComponent.cpp
+        ui/HeaderComponent.h
+        ui/LayerBarComponent.cpp
+        ui/LayerBarComponent.h
+        ui/MutatePanel.cpp
+        ui/MutatePanel.h
+        ui/HarmonicsPanel.cpp
+        ui/HarmonicsPanel.h
+        ui/BridgePanel.cpp
+        ui/BridgePanel.h
+        ui/LatentControlPanel.cpp
+        ui/LatentControlPanel.h
+        ui/SidePanelComponent.cpp
+        ui/SidePanelComponent.h
+        ui/WeightBendingComponent.cpp
+        ui/WeightBendingComponent.h
+        ui/LatentTerrainComponent.cpp
+        ui/LatentTerrainComponent.h
+        ui/UIConstants.h
     )
 
     # Include directories

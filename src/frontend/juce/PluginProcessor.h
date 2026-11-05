@@ -51,7 +51,7 @@ public:
     CircularBuffer(const CircularBuffer&) = delete;
     CircularBuffer& operator=(const CircularBuffer&) = delete;
 
-    void init(int size) {
+    auto init(int size) -> void {
         // Enforce power-of-two capacity for fast bitwise wrap-around
         int target = std::max(size * 4, 8192);
         m_capacity = 1;
@@ -64,7 +64,7 @@ public:
         m_available.store(0);
     }
     
-    void put(const float* data, int numSamples) {
+    auto put(const float* data, int numSamples) -> void {
         if (m_capacity <= 0 || numSamples <= 0 || m_buffer.empty()) return;
         int toWrite = std::min(numSamples, m_capacity);
 
@@ -92,7 +92,7 @@ public:
         }
     }
     
-    void get(float* dest, int numSamples) {
+    auto get(float* dest, int numSamples) -> void {
         if (m_capacity <= 0 || numSamples <= 0 || dest == nullptr) return;
         int avail = std::min(m_available.load(), m_capacity);
         int toRead = std::min(numSamples, avail);
@@ -112,9 +112,9 @@ public:
         }
     }
     
-    int getAvailable() const { return std::min(m_available.load(), m_capacity); }
+    auto getAvailable() const -> int { return std::min(m_available.load(), m_capacity); }
     
-    int peek(float* dest, int numSamples) const {
+    auto peek(float* dest, int numSamples) const -> int {
         if (m_capacity <= 0 || numSamples <= 0 || dest == nullptr || m_buffer.empty()) return 0;
         int avail = std::min(m_available.load(), m_capacity);
         int toRead = std::min(numSamples, avail);
@@ -129,7 +129,7 @@ public:
         return toRead;
     }
 
-    void drop(int numSamples) {
+    auto drop(int numSamples) -> void {
         if (m_capacity <= 0 || numSamples <= 0) return;
         int avail = std::min(m_available.load(), m_capacity);
         int toDrop = std::min(numSamples, avail);
@@ -137,7 +137,7 @@ public:
         m_available.fetch_sub(toDrop);
     }
     
-    void clear() {
+    auto clear() -> void {
         if (m_capacity > 0)
             std::fill(m_buffer.begin(), m_buffer.end(), 0.0f);
         m_writeIndex = 0;
@@ -156,16 +156,15 @@ private:
 
 class NNBendingAudioProcessor;
 
-class ModelThread : public juce::Thread
-{
+class ModelThread : public juce::Thread {
 public:
     ModelThread(NNBendingAudioProcessor& processor);
     ~ModelThread() override;
     
-    void run() override;
-    void triggerCompute();
-    void stop();
-    bool isProcessing() const { return m_processing.load(); }
+    auto run() -> void override;
+    auto triggerCompute() -> void;
+    auto stop() -> void;
+    auto isProcessing() const -> bool { return m_processing.load(); }
     
 private:
     NNBendingAudioProcessor& m_processor;
@@ -173,55 +172,54 @@ private:
     std::atomic<bool> m_processing { false };
 };
 
-class NNBendingAudioProcessor  : public juce::AudioProcessor
-{
+class NNBendingAudioProcessor : public juce::AudioProcessor {
 public:
     NNBendingAudioProcessor();
     ~NNBendingAudioProcessor() override;
 
-    void prepareToPlay (double sampleRate, int samplesPerBlock) override;
-    void releaseResources() override;
-    bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
-    void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    auto prepareToPlay(double sampleRate, int samplesPerBlock) -> void override;
+    auto releaseResources() -> void override;
+    auto isBusesLayoutSupported(const BusesLayout& layouts) const -> bool override;
+    auto processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) -> void override;
 
-    juce::AudioProcessorEditor* createEditor() override;
-    bool hasEditor() const override { return true; }
+    auto createEditor() -> juce::AudioProcessorEditor* override;
+    auto hasEditor() const -> bool override { return true; }
 
-    const juce::String getName() const override { return "NetBender"; }
-    bool acceptsMidi() const override { return false; }
-    bool producesMidi() const override { return false; }
-    bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 0.0; }
+    auto getName() const -> const juce::String override { return "NetBender"; }
+    auto acceptsMidi() const -> bool override { return false; }
+    auto producesMidi() const -> bool override { return false; }
+    auto isMidiEffect() const -> bool override { return false; }
+    auto getTailLengthSeconds() const -> double override { return 0.0; }
 
-    int getNumPrograms() override { return 1; }
-    int getCurrentProgram() override { return 0; }
-    void setCurrentProgram (int index) override {}
-    const juce::String getProgramName (int index) override { return {}; }
-    void changeProgramName (int index, const juce::String& newName) override {}
+    auto getNumPrograms() -> int override { return 1; }
+    auto getCurrentProgram() -> int override { return 0; }
+    auto setCurrentProgram(int index) -> void override {}
+    auto getProgramName(int index) -> const juce::String override { return {}; }
+    auto changeProgramName(int index, const juce::String& newName) -> void override {}
 
-    void getStateInformation (juce::MemoryBlock& destData) override;
-    void setStateInformation (const void* data, int sizeInBytes) override;
+    auto getStateInformation(juce::MemoryBlock& destData) -> void override;
+    auto setStateInformation(const void* data, int sizeInBytes) -> void override;
 
     // Backend methods
-    bool loadModel(const juce::File& file);
-    IBackend& getBackend() { return *m_backend; }
-    TorchBackend* getTorchBackend() { return dynamic_cast<TorchBackend*>(m_backend.get()); }
-    bool isModelLoaded() const { return m_modelLoaded.load(); }
-    juce::String getModelPath() const { return m_modelPath; }
-    juce::String getCurrentMethod() const { return m_currentMethod; }
-    void setCurrentMethod(const juce::String& method);
-    juce::String getCurrentMode() const { return m_currentMethod; }
-    void setCurrentMode(const juce::String& mode) { setCurrentMethod(mode); }
-    std::vector<juce::String> getAvailableModes() const;
-    int getBufferSize() const { return m_bufferSize; }
-    void setBufferSize(int size);
-    double getModelSampleRate() const { return m_modelSampleRate.load(); }
-    bool isResamplingActive() const { return m_resamplingActive.load(); }
-    bool isUsingGpu() const { return m_useGpu.load(); }
-    void setUseGpu(bool enabled);
+    auto loadModel(const juce::File& file) -> bool;
+    auto getBackend() -> IBackend& { return *m_backend; }
+    auto getTorchBackend() -> TorchBackend* { return dynamic_cast<TorchBackend*>(m_backend.get()); }
+    auto isModelLoaded() const -> bool { return m_modelLoaded.load(); }
+    auto getModelPath() const -> juce::String { return m_modelPath; }
+    auto getCurrentMethod() const -> juce::String { return m_currentMethod; }
+    auto setCurrentMethod(const juce::String& method) -> void;
+    auto getCurrentMode() const -> juce::String { return m_currentMethod; }
+    auto setCurrentMode(const juce::String& mode) -> void { setCurrentMethod(mode); }
+    auto getAvailableModes() const -> std::vector<juce::String>;
+    auto getBufferSize() const -> int { return m_bufferSize; }
+    auto setBufferSize(int size) -> void;
+    auto getModelSampleRate() const -> double { return m_modelSampleRate.load(); }
+    auto isResamplingActive() const -> bool { return m_resamplingActive.load(); }
+    auto isUsingGpu() const -> bool { return m_useGpu.load(); }
+    auto setUseGpu(bool enabled) -> void;
 
     // Latent bending hook (applied during autoencode mode)
-    void setLatentHook(IBackend::LatentHook hook) { m_latentHook = hook; }
+    auto setLatentHook(IBackend::LatentHook hook) -> void { m_latentHook = hook; }
 
     enum class LatentMode
     {
@@ -230,42 +228,39 @@ public:
         Quantize          // Latent space bitcrushing / discretization
     };
 
-    void setLatentMode(LatentMode mode) { m_latentMode.store(mode); }
-    LatentMode getLatentMode() const { return m_latentMode.load(); }
+    auto setLatentMode(LatentMode mode) -> void { m_latentMode.store(mode); }
+    auto getLatentMode() const -> LatentMode { return m_latentMode.load(); }
 
-    void setLatentEnabled(bool enabled) { m_latentEnabled.store(enabled); }
-    bool isLatentEnabled() const { return m_latentEnabled.load(); }
+    auto setLatentEnabled(bool enabled) -> void { m_latentEnabled.store(enabled); }
+    auto isLatentEnabled() const -> bool { return m_latentEnabled.load(); }
 
-    void setLatentCoords(float x, float y)
-    {
+    auto setLatentCoords(float x, float y) -> void {
         m_latentX.store(juce::jlimit(-1.0f, 1.0f, x));
         m_latentY.store(juce::jlimit(-1.0f, 1.0f, y));
         if (m_latentXParam) *m_latentXParam = m_latentX.load();
         if (m_latentYParam) *m_latentYParam = m_latentY.load();
     }
-    float getLatentX() const { return m_latentXParam ? m_latentXParam->get() : m_latentX.load(); }
-    float getLatentY() const { return m_latentYParam ? m_latentYParam->get() : m_latentY.load(); }
+    auto getLatentX() const -> float { return m_latentXParam ? m_latentXParam->get() : m_latentX.load(); }
+    auto getLatentY() const -> float { return m_latentYParam ? m_latentYParam->get() : m_latentY.load(); }
 
-    void setLatentDepth(float depth)
-    {
+    auto setLatentDepth(float depth) -> void {
         float d = juce::jlimit(0.0f, 2.0f, depth);
         m_latentDepth.store(d);
         if (m_latentDepthParam) *m_latentDepthParam = d;
     }
-    float getLatentDepth() const { return m_latentDepthParam ? m_latentDepthParam->get() : m_latentDepth.load(); }
+    auto getLatentDepth() const -> float { return m_latentDepthParam ? m_latentDepthParam->get() : m_latentDepth.load(); }
 
-    void setLatentSlew(float slew) { m_latentSlew.store(juce::jlimit(0.0f, 0.999f, slew)); }
-    float getLatentSlew() const { return m_latentSlew.load(); }
+    auto setLatentSlew(float slew) -> void { m_latentSlew.store(juce::jlimit(0.0f, 0.999f, slew)); }
+    auto getLatentSlew() const -> float { return m_latentSlew.load(); }
 
-    bool hasAutoencode() { return m_backend ? m_backend->has_autoencode() : false; }
+    auto hasAutoencode() -> bool { return m_backend ? m_backend->has_autoencode() : false; }
 
     // Thread communication
-    void runInference();
+    auto runInference() -> void;
 
     // Dry / Wet control
-    float getDryWet() const { return m_dryWetParam ? m_dryWetParam->get() : m_dryWet.load(); }
-    void setDryWet(float value)
-    {
+    auto getDryWet() const -> float { return m_dryWetParam ? m_dryWetParam->get() : m_dryWet.load(); }
+    auto setDryWet(float value) -> void {
         float v = juce::jlimit(0.0f, 1.0f, value);
         m_dryWet.store(v);
         if (m_dryWetParam)
@@ -286,8 +281,7 @@ public:
         Other       // Any remaining tensor parameters
     };
 
-    static LayerCategory classifyLayer(const std::string& name)
-    {
+    static auto classifyLayer(const std::string& name) -> LayerCategory {
         std::string lower = name;
         std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
         if (lower.find("norm") != std::string::npos || lower.find("weight_g") != std::string::npos || lower.find("gamma") != std::string::npos)
@@ -335,8 +329,7 @@ public:
         float lastAppliedEnv { -1.0f };     // Previous momentary envelope value applied
     };
 
-    LayerBendingState getLayerState(const std::string& layerName) const
-    {
+    auto getLayerState(const std::string& layerName) const -> LayerBendingState {
         std::lock_guard<std::mutex> lock(m_layerStateMutex);
         auto it = m_layerStates.find(layerName);
         if (it != m_layerStates.end())
@@ -344,101 +337,85 @@ public:
         return LayerBendingState();
     }
 
-    void setLayerState(const std::string& layerName, const LayerBendingState& state)
-    {
+    auto setLayerState(const std::string& layerName, const LayerBendingState& state) -> void {
         std::lock_guard<std::mutex> lock(m_layerStateMutex);
         m_layerStates[layerName] = state;
     }
 
-    void setLayerScale(const std::string& layerName, float scale)
-    {
+    auto setLayerScale(const std::string& layerName, float scale) -> void {
         std::lock_guard<std::mutex> lock(m_layerStateMutex);
         m_layerStates[layerName].scale = scale;
         m_layerStates[layerName].isApplied = false;
     }
 
-    void setLayerOffset(const std::string& layerName, float offset)
-    {
+    auto setLayerOffset(const std::string& layerName, float offset) -> void {
         std::lock_guard<std::mutex> lock(m_layerStateMutex);
         m_layerStates[layerName].offset = offset;
         m_layerStates[layerName].isApplied = false;
     }
 
-    void setLayerHeat(const std::string& layerName, float heat)
-    {
+    auto setLayerHeat(const std::string& layerName, float heat) -> void {
         std::lock_guard<std::mutex> lock(m_layerStateMutex);
         m_layerStates[layerName].heat = std::max(0.0f, heat);
     }
-    void setLayerJitter(const std::string& layerName, float jitter) { setLayerHeat(layerName, jitter); }
+    auto setLayerJitter(const std::string& layerName, float jitter) -> void { setLayerHeat(layerName, jitter); }
 
-    void setLayerMemory(const std::string& layerName, float memory)
-    {
+    auto setLayerMemory(const std::string& layerName, float memory) -> void {
         std::lock_guard<std::mutex> lock(m_layerStateMutex);
         m_layerStates[layerName].memory = juce::jlimit(0.0f, 1.0f, memory);
     }
 
-    void setLayerDriftMode(const std::string& layerName, DriftMode mode)
-    {
+    auto setLayerDriftMode(const std::string& layerName, DriftMode mode) -> void {
         std::lock_guard<std::mutex> lock(m_layerStateMutex);
         m_layerStates[layerName].driftMode = mode;
     }
 
-    void setLayerFrozen(const std::string& layerName, bool frozen)
-    {
+    auto setLayerFrozen(const std::string& layerName, bool frozen) -> void {
         std::lock_guard<std::mutex> lock(m_layerStateMutex);
         m_layerStates[layerName].frozen = frozen;
     }
 
-    void setLayerBridgeSource(const std::string& layerName, const std::string& sourceLayer)
-    {
+    auto setLayerBridgeSource(const std::string& layerName, const std::string& sourceLayer) -> void {
         std::lock_guard<std::mutex> lock(m_layerStateMutex);
         m_layerStates[layerName].bridgeSourceLayer = sourceLayer;
         m_layerStates[layerName].isApplied = false;
     }
 
-    void setLayerBridgeDepth(const std::string& layerName, float depth)
-    {
+    auto setLayerBridgeDepth(const std::string& layerName, float depth) -> void {
         std::lock_guard<std::mutex> lock(m_layerStateMutex);
         m_layerStates[layerName].bridgeDepth = juce::jlimit(0.0f, 1.0f, depth);
         m_layerStates[layerName].isApplied = false;
     }
 
-    void setLayerDrawnWeights(const std::string& layerName, const std::vector<float>& weights)
-    {
+    auto setLayerDrawnWeights(const std::string& layerName, const std::vector<float>& weights) -> void {
         std::lock_guard<std::mutex> lock(m_layerStateMutex);
         m_layerStates[layerName].drawnWeights = weights;
         m_layerStates[layerName].isApplied = false;
     }
 
-    void setLayerBaseWeights(const std::string& layerName, const std::vector<float>& weights)
-    {
+    auto setLayerBaseWeights(const std::string& layerName, const std::vector<float>& weights) -> void {
         setLayerDrawnWeights(layerName, weights);
     }
 
-    void setLayerOriginalWeights(const std::string& layerName, const std::vector<float>& weights)
-    {
+    auto setLayerOriginalWeights(const std::string& layerName, const std::vector<float>& weights) -> void {
         std::lock_guard<std::mutex> lock(m_layerStateMutex);
         m_layerStates[layerName].originalWeights = weights;
     }
 
-    void clearLayerBending(const std::string& layerName)
-    {
+    auto clearLayerBending(const std::string& layerName) -> void {
         std::lock_guard<std::mutex> lock(m_layerStateMutex);
         m_layerStates.erase(layerName);
     }
 
-    void clearAllLayerBending()
-    {
+    auto clearAllLayerBending() -> void {
         std::lock_guard<std::mutex> lock(m_layerStateMutex);
         m_layerStates.clear();
     }
 
-    bool hasActiveBending() const
-    {
+    auto hasActiveBending() const -> bool {
         std::lock_guard<std::mutex> lock(m_layerStateMutex);
         if (m_layerStates.empty()) return false;
-        for (const auto& pair : m_layerStates)
-        {
+        for (const auto& pair : m_layerStates) {
             const auto& s = pair.second;
             if (std::abs(s.scale - 1.0f) > 0.001f || std::abs(s.offset) > 0.001f || s.heat > 0.001f || s.frozen
                 || (s.bridgeDepth > 0.001f && !s.bridgeSourceLayer.empty()))
@@ -448,16 +425,15 @@ public:
     }
 
     // Safety Sentry & Blown Fuse Control
-    bool isFuseBlown() const { return m_blownFuse.load(); }
-    void resetFuse()
-    {
+    auto isFuseBlown() const -> bool { return m_blownFuse.load(); }
+    auto resetFuse() -> void {
         m_blownFuse.store(false);
         clearAllLayerBending();
         if (m_backend)
             m_backend->reset_all_layer_weights();
     }
-    void setAutoResetFuse(bool enabled) { m_autoResetFuse.store(enabled); }
-    bool getAutoResetFuse() const { return m_autoResetFuse.load(); }
+    auto setAutoResetFuse(bool enabled) -> void { m_autoResetFuse.store(enabled); }
+    auto getAutoResetFuse() const -> bool { return m_autoResetFuse.load(); }
 
     // Bending Trigger Modes
     enum class TriggerMode
@@ -468,38 +444,38 @@ public:
     };
 
     // Momentary Short-Circuit Gate Control
-    void triggerShortCircuit(bool active) { m_shortCircuitActive.store(active); }
-    bool isShortCircuitActive() const { return m_shortCircuitActive.load(); }
-    float getMomentaryEnvelope() const { return m_momentaryEnvelope.load(); }
+    auto triggerShortCircuit(bool active) -> void { m_shortCircuitActive.store(active); }
+    auto isShortCircuitActive() const -> bool { return m_shortCircuitActive.load(); }
+    auto getMomentaryEnvelope() const -> float { return m_momentaryEnvelope.load(); }
 
-    void setTriggerMode(TriggerMode mode) { m_triggerMode.store(mode); }
-    TriggerMode getTriggerMode() const { return m_triggerMode.load(); }
+    auto setTriggerMode(TriggerMode mode) -> void { m_triggerMode.store(mode); }
+    auto getTriggerMode() const -> TriggerMode { return m_triggerMode.load(); }
 
-    void setEnvelopeAttack(float att) { m_envAttack.store(juce::jlimit(0.01f, 1.0f, att)); }
-    float getEnvelopeAttack() const { return m_envAttack.load(); }
+    auto setEnvelopeAttack(float att) -> void { m_envAttack.store(juce::jlimit(0.01f, 1.0f, att)); }
+    auto getEnvelopeAttack() const -> float { return m_envAttack.load(); }
 
-    void setEnvelopeRelease(float rel) { m_envRelease.store(juce::jlimit(0.5f, 0.999f, rel)); }
-    float getEnvelopeRelease() const { return m_envRelease.load(); }
+    auto setEnvelopeRelease(float rel) -> void { m_envRelease.store(juce::jlimit(0.5f, 0.999f, rel)); }
+    auto getEnvelopeRelease() const -> float { return m_envRelease.load(); }
 
-    void setTransientThreshold(float th) { m_transientThreshold.store(juce::jlimit(0.01f, 1.0f, th)); }
-    float getTransientThreshold() const { return m_transientThreshold.load(); }
+    auto setTransientThreshold(float th) -> void { m_transientThreshold.store(juce::jlimit(0.01f, 1.0f, th)); }
+    auto getTransientThreshold() const -> float { return m_transientThreshold.load(); }
 
     // Active UI layer target for DAW automation mapping
-    void setActiveLayerName(const juce::String& name) { m_activeLayerName = name; }
-    juce::String getActiveLayerName() const { return m_activeLayerName; }
+    auto setActiveLayerName(const juce::String& name) -> void { m_activeLayerName = name; }
+    auto getActiveLayerName() const -> juce::String { return m_activeLayerName; }
 
     // Automatable parameters accessors
-    juce::AudioParameterFloat* getDryWetParam() const { return m_dryWetParam; }
-    juce::AudioParameterFloat* getScaleParam() const { return m_scaleParam; }
-    juce::AudioParameterFloat* getOffsetParam() const { return m_offsetParam; }
-    juce::AudioParameterFloat* getHeatParam() const { return m_heatParam; }
-    juce::AudioParameterFloat* getJitterParam() const { return m_heatParam; } // alias
-    juce::AudioParameterFloat* getMemoryParam() const { return m_memoryParam; }
-    juce::AudioParameterBool*  getShortCircuitParam() const { return m_shortCircuitParam; }
+    auto getDryWetParam() const -> juce::AudioParameterFloat* { return m_dryWetParam; }
+    auto getScaleParam() const -> juce::AudioParameterFloat* { return m_scaleParam; }
+    auto getOffsetParam() const -> juce::AudioParameterFloat* { return m_offsetParam; }
+    auto getHeatParam() const -> juce::AudioParameterFloat* { return m_heatParam; }
+    auto getJitterParam() const -> juce::AudioParameterFloat* { return m_heatParam; } // alias
+    auto getMemoryParam() const -> juce::AudioParameterFloat* { return m_memoryParam; }
+    auto getShortCircuitParam() const -> juce::AudioParameterBool* { return m_shortCircuitParam; }
 
-    juce::AudioParameterFloat* getLatentXParam() const { return m_latentXParam; }
-    juce::AudioParameterFloat* getLatentYParam() const { return m_latentYParam; }
-    juce::AudioParameterFloat* getLatentDepthParam() const { return m_latentDepthParam; }
+    auto getLatentXParam() const -> juce::AudioParameterFloat* { return m_latentXParam; }
+    auto getLatentYParam() const -> juce::AudioParameterFloat* { return m_latentYParam; }
+    auto getLatentDepthParam() const -> juce::AudioParameterFloat* { return m_latentDepthParam; }
 
 private:
     friend class ModelThread;

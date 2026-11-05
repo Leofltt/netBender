@@ -14,25 +14,21 @@ ModelThread::~ModelThread()
     stop();
 }
 
-void ModelThread::stop()
-{
+auto ModelThread::stop() -> void {
     signalThreadShouldExit();
     m_event.signal();
     stopThread(-1);
 }
 
-void ModelThread::run()
-{
-    while (!threadShouldExit())
-    {
+auto ModelThread::run() -> void {
+    while (!threadShouldExit()) {
         // Wait for trigger signal (timeout 20ms to allow responsive shutdown or idle checks)
         m_event.wait(20);
         
         if (threadShouldExit())
             break;
             
-        if (m_processing.load())
-        {
+        if (m_processing.load()) {
             const juce::ScopedAutoReleasePool pool;
             m_processor.runInference();
             m_processing.store(false);
@@ -40,8 +36,7 @@ void ModelThread::run()
     }
 }
 
-void ModelThread::triggerCompute()
-{
+auto ModelThread::triggerCompute() -> void {
     m_processing.store(true);
     m_event.signal();
 }
@@ -113,14 +108,12 @@ NNBendingAudioProcessor::~NNBendingAudioProcessor()
 }
 
 //==============================================================================
-void NNBendingAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
-{
+auto NNBendingAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock) -> void {
     juce::ignoreUnused(samplesPerBlock);
     m_hostSampleRate.store(sampleRate);
     if (m_backend)
         m_backend->set_sample_rate(sampleRate);
-    if (m_modelLoaded.load() && m_backend)
-    {
+    if (m_modelLoaded.load() && m_backend) {
         double modelSr = m_backend->get_sample_rate();
         m_modelSampleRate.store(modelSr);
         m_resamplingActive.store(std::abs(sampleRate - modelSr) > 1.0);
@@ -128,15 +121,13 @@ void NNBendingAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBl
     initBuffers();
 }
 
-void NNBendingAudioProcessor::releaseResources()
-{
+auto NNBendingAudioProcessor::releaseResources() -> void {
     m_model_thread.stop();
 }
 
-bool NNBendingAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
-{
+auto NNBendingAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const -> bool {
   #if JucePlugin_IsMidiEffect
-    juce::ignoreUnused (layouts);
+    juce::ignoreUnused(layouts);
     return true;
   #else
     if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::mono()
@@ -152,8 +143,7 @@ bool NNBendingAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts
   #endif
 }
 
-void NNBendingAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
-{
+auto NNBendingAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages) -> void {
     juce::ScopedNoDenormals noDenormals;
     auto totalNumInputChannels  = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
@@ -442,8 +432,7 @@ void NNBendingAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
 }
 
 //==============================================================================
-std::vector<juce::String> NNBendingAudioProcessor::getAvailableModes() const
-{
+auto NNBendingAudioProcessor::getAvailableModes() const -> std::vector<juce::String> {
     std::vector<juce::String> modes;
     if (!m_modelLoaded.load() || !m_backend)
         return modes;
@@ -454,8 +443,7 @@ std::vector<juce::String> NNBendingAudioProcessor::getAvailableModes() const
     return modes;
 }
 
-bool NNBendingAudioProcessor::loadModel(const juce::File& file)
-{
+auto NNBendingAudioProcessor::loadModel(const juce::File& file) -> bool {
     m_modelLoaded.store(false);
     m_model_thread.stop();
     
@@ -548,54 +536,44 @@ bool NNBendingAudioProcessor::loadModel(const juce::File& file)
     return false;
 }
 
-void NNBendingAudioProcessor::setCurrentMethod(const juce::String& method)
-{
+auto NNBendingAudioProcessor::setCurrentMethod(const juce::String& method) -> void {
     if (!m_backend) return;
     std::string methodStr = method.toStdString();
     auto modes = m_backend->get_plugin_modes();
     bool isValidMode = (std::find(modes.begin(), modes.end(), methodStr) != modes.end())
                     || m_backend->has_method(methodStr);
 
-    if (isValidMode)
-    {
+    if (isValidMode) {
         int prevIn = m_model_in;
         int prevOut = m_model_out;
         m_currentMethod = method;
         auto params = m_backend->get_mode_params(methodStr);
-        if (params.size() >= 4)
-        {
+        if (params.size() >= 4) {
             m_model_in = params[0];
             m_model_out = params[2];
         }
 
-        if (prevIn != m_model_in || prevOut != m_model_out)
-        {
+        if (prevIn != m_model_in || prevOut != m_model_out) {
             initBuffers();
-        }
-        else
-        {
+        } else {
             m_backend->clear_decode_gen_fifo();
         }
     }
 }
 
-void NNBendingAudioProcessor::setBufferSize(int size)
-{
-    if (size > 0 && (size & (size - 1)) == 0) // Power of two check
-    {
+auto NNBendingAudioProcessor::setBufferSize(int size) -> void {
+    if (size > 0 && (size & (size - 1)) == 0) { // Power of two check
         m_bufferSize = size;
         initBuffers();
     }
 }
 
-void NNBendingAudioProcessor::setUseGpu(bool enabled)
-{
+auto NNBendingAudioProcessor::setUseGpu(bool enabled) -> void {
     if (m_useGpu.load() == enabled && m_modelLoaded.load())
         return;
 
     m_useGpu.store(enabled);
-    if (!m_modelLoaded.load() || m_modelPath.isEmpty())
-    {
+    if (!m_modelLoaded.load() || m_modelPath.isEmpty()) {
         if (m_backend)
             m_backend->use_gpu(enabled);
         return;
@@ -605,8 +583,7 @@ void NNBendingAudioProcessor::setUseGpu(bool enabled)
     juce::File targetFile(m_modelPath);
 
     // For .pte models, automatically swap between sibling *_xnnpack.pte (CPU) and *_coreml.pte (GPU/ANE) if present
-    if (m_modelPath.endsWithIgnoreCase(".pte"))
-    {
+    if (m_modelPath.endsWithIgnoreCase(".pte")) {
         juce::String candidatePath = m_modelPath;
         if (enabled && candidatePath.containsIgnoreCase("_xnnpack.pte"))
             candidatePath = candidatePath.replace("_xnnpack.pte", "_coreml.pte", true);
@@ -618,8 +595,7 @@ void NNBendingAudioProcessor::setUseGpu(bool enabled)
             targetFile = candidateFile;
     }
 
-    if (loadModel(targetFile))
-    {
+    if (loadModel(targetFile)) {
         if (savedMethod.isNotEmpty())
             setCurrentMethod(savedMethod);
         std::lock_guard<std::mutex> lock(m_layerStateMutex);
@@ -628,8 +604,7 @@ void NNBendingAudioProcessor::setUseGpu(bool enabled)
     }
 }
 
-void NNBendingAudioProcessor::initBuffers()
-{
+auto NNBendingAudioProcessor::initBuffers() -> void {
     m_model_thread.stop();
     
     const juce::ScopedLock sl (getCallbackLock());
@@ -723,8 +698,7 @@ void NNBendingAudioProcessor::initBuffers()
     }
 }
 
-void NNBendingAudioProcessor::runInference()
-{
+auto NNBendingAudioProcessor::runInference() -> void {
     if (!m_modelLoaded.load() || m_model_out <= 0)
         return;
 
@@ -995,8 +969,7 @@ void NNBendingAudioProcessor::runInference()
     m_output_ready.store(true);
 }
 
-void NNBendingAudioProcessor::applyLatentTerrainHook(IBackend::LatentBuffer& buf)
-{
+auto NNBendingAudioProcessor::applyLatentTerrainHook(IBackend::LatentBuffer& buf) -> void {
     if (buf.data == nullptr || buf.channels <= 0 || buf.length <= 0)
         return;
 
@@ -1071,8 +1044,7 @@ void NNBendingAudioProcessor::applyLatentTerrainHook(IBackend::LatentBuffer& buf
 }
 
 //==============================================================================
-void NNBendingAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
-{
+auto NNBendingAudioProcessor::getStateInformation(juce::MemoryBlock& destData) -> void {
     juce::XmlElement xmlState ("NNBendingSettings");
     xmlState.setAttribute ("modelPath", m_modelPath);
     xmlState.setAttribute ("currentMethod", m_currentMethod);
@@ -1101,8 +1073,7 @@ void NNBendingAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
     copyXmlToBinary (xmlState, destData);
 }
 
-void NNBendingAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
-{
+auto NNBendingAudioProcessor::setStateInformation(const void* data, int sizeInBytes) -> void {
     std::unique_ptr<juce::XmlElement> xmlState (getXmlFromBinary (data, sizeInBytes));
     if (xmlState != nullptr)
     {
@@ -1156,15 +1127,13 @@ void NNBendingAudioProcessor::setStateInformation (const void* data, int sizeInB
 }
 
 //==============================================================================
-juce::AudioProcessorEditor* NNBendingAudioProcessor::createEditor()
-{
+auto NNBendingAudioProcessor::createEditor() -> juce::AudioProcessorEditor* {
     return new NNBendingAudioProcessorEditor (*this);
 }
 
 //==============================================================================
 // This creates the filter...
-juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
-{
+auto JUCE_CALLTYPE createPluginFilter() -> juce::AudioProcessor* {
     return new NNBendingAudioProcessor();
 }
 
