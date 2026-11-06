@@ -123,7 +123,7 @@ auto OnnxBackend::load(std::string path, double sample_rate, const std::string* 
         size_t dot_pos = base.find_last_of('.');
         if (dot_pos != std::string::npos) base = base.substr(0, dot_pos);
 
-        const std::vector<std::string> potential_methods = { "encode", "decode", "prior" };
+        const std::vector<std::string> potential_methods = { "encode", "decode", "prior", "flow_dit" };
         for (const auto& meth : potential_methods) {
             std::string companion_path = base + "_" + meth + ".onnx";
             std::ifstream test_file(companion_path);
@@ -1085,7 +1085,7 @@ auto OnnxBackend::perform_prior_decode(std::vector<float*>& out_buffer,
     if (!m_loaded) return;
     std::unique_lock<std::mutex> lock(m_session_mutex);
 
-    auto prior_it = m_impl->companions.find("prior");
+    auto prior_it = m_impl->companions.find(m_current_mode == "flow-dit" ? "flow_dit" : "prior");
     auto dec_it = m_impl->companions.find("decode");
 
     if (prior_it != m_impl->companions.end() && dec_it != m_impl->companions.end() &&
@@ -1409,6 +1409,9 @@ auto OnnxBackend::get_plugin_modes() -> std::vector<std::string> {
     if (has_method("prior")) {
         modes.push_back("prior");
     }
+    if (has_method("flow_dit")) {
+        modes.push_back("flow-dit");
+    }
     return modes;
 }
 
@@ -1416,7 +1419,7 @@ auto OnnxBackend::get_mode_params(std::string mode) -> std::vector<int> {
     // [in_dim, in_ratio, out_dim, out_ratio]
     if (mode == "forward") {
         return { m_in_channels, 1, m_out_channels, 1 };
-    } else if (mode == "decode gen" || mode == "prior") {
+    } else if (mode == "decode gen" || mode == "prior" || mode == "flow-dit") {
         return { 0, 1, m_out_channels, 1 };
     } else if (mode == "encode") {
         return { m_in_channels, 1, m_latent_dim, m_higher_ratio };

@@ -103,6 +103,28 @@ def main():
     migrate_pte_parser.add_argument("--channels", type=int, default=None, help="Override channel count")
     migrate_pte_parser.add_argument("--filter", nargs="+", default=None, help="Optional layer filter substrings")
 
+    # CoDiCodec
+    codi_parser = subparsers.add_parser("codicodec", help="Export Sony CSL Paris CoDiCodec (TorchScript, ONNX, or ExecuTorch)")
+    codi_parser.add_argument("-o", "--output", type=str, default=None, help="Output .ts, .onnx, or .pte file")
+    codi_parser.add_argument("--format", type=str, choices=["ts", "onnx", "pte", "both", "all"], default=None, help="Format to export")
+    codi_parser.add_argument("--onnx", action="store_true", help="Export as ONNX")
+    codi_parser.add_argument("--pte", action="store_true", help="Export as ExecuTorch (.pte)")
+    codi_parser.add_argument("--sr", type=int, default=48000, help="Audio sample rate (default: 48000)")
+    codi_parser.add_argument("--ratio", type=int, default=4096, help="Downsampling ratio (default: 4096)")
+    codi_parser.add_argument("--latent-dim", type=int, default=64, help="Continuous latent channels (default: 64)")
+    codi_parser.add_argument("--buffer-size", type=int, default=32768, help="Buffer size (default: 32768)")
+    codi_parser.add_argument("--denoising-steps", type=int, default=2, help="Decoder diffusion denoising steps (default: 2)")
+    codi_parser.add_argument("--no-bending", action="store_true", help="Don't promote parameters for ONNX bending")
+
+    # Flow-DiT
+    flow_parser = subparsers.add_parser("flow_dit", help="Export CoDiCodec-Flow DiT Prior")
+    flow_parser.add_argument("-i", "--checkpoint", default=None, help="Path to trained .pt checkpoint (optional)")
+    flow_parser.add_argument("-o", "--output", default=None, help="Output file path (.onnx, .ts, or .pte)")
+    flow_parser.add_argument("--format", choices=["onnx", "ts", "pte"], default="onnx", help="Export format")
+    flow_parser.add_argument("--steps", type=int, default=4, help="Unrolled Euler flow steps (default: 4)")
+    flow_parser.add_argument("--target-frames", type=int, default=8, help="Latent chunk frames (default: 8)")
+    flow_parser.add_argument("--no-bending", action="store_true", help="Do not promote parameters for weight bending")
+
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
@@ -188,6 +210,30 @@ def main():
             channels=args.channels,
             layer_filter=args.filter,
             verbose=True,
+        )
+    elif args.command == "codicodec":
+        from python_tools.exporters.codicodec_exporter import export_codicodec
+        target_fmt = args.format or ("onnx" if args.onnx else ("pte" if args.pte else "ts"))
+        export_codicodec(
+            output_path=args.output,
+            format=target_fmt,
+            sr=args.sr,
+            ratio=args.ratio,
+            latent_dim=args.latent_dim,
+            buffer_size=args.buffer_size,
+            denoising_steps=args.denoising_steps,
+            promote_for_bending=not args.no_bending,
+            verbose=True,
+        )
+    elif args.command == "flow_dit":
+        from python_tools.exporters.codicodec_flow_exporter import export_codicodec_flow
+        export_codicodec_flow(
+            checkpoint_path=args.checkpoint,
+            output_path=args.output,
+            format=args.format,
+            steps=args.steps,
+            target_frames=args.target_frames,
+            promote_for_bending=not args.no_bending,
         )
 
 

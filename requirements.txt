@@ -12,5 +12,6 @@ onnxruntime
 flatbuffers
 decorator
 encodec>=0.1.1
+codicodec>=0.1.2
 executorch>=1.0.0
 coremltools

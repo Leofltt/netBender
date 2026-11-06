@@ -122,10 +122,11 @@ def test_model_offline(
 
     total_samples = audio_in.size(-1)
     # Trim to multiple of ratio/buffer_size for clean chunking
-    aligned_samples = (total_samples // ratio) * ratio
+    align_unit = buffer_size if buffer_size and buffer_size > ratio else ratio
+    aligned_samples = (total_samples // align_unit) * align_unit
     if aligned_samples == 0:
-        aligned_samples = ratio
-        audio_in = torch.nn.functional.pad(audio_in, (0, ratio - total_samples))
+        aligned_samples = align_unit
+        audio_in = torch.nn.functional.pad(audio_in, (0, align_unit - total_samples))
     else:
         audio_in = audio_in[:, :, :aligned_samples]
 

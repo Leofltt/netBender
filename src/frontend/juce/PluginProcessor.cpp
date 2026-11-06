@@ -672,7 +672,7 @@ auto NNBendingAudioProcessor::runInference() -> void {
         if (m_backend)
             m_backend->perform_decode_gen(out_ptrs, 1, m_model_out, m_bufferSize, activeHook);
     }
-    else if (modeStr == "prior" || modeStr == "generate")
+    else if (modeStr == "prior" || modeStr == "generate" || modeStr == "flow-dit")
     {
         if (m_backend)
             m_backend->perform_prior_decode(out_ptrs, 1, m_model_out, m_bufferSize);

@@ -11,6 +11,8 @@ without recreating the ONNX Runtime session during live audio callbacks.
 import argparse
 import sys
 import os
+import json
+import struct
 from typing import List, Optional
 
 try:

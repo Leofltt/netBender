@@ -505,6 +505,9 @@ auto TorchBackend::get_plugin_modes() -> std::vector<std::string> {
   } else if (has_method("generate")) {
     modes.push_back("generate");
   }
+  if (has_method("flow_dit")) {
+    modes.push_back("flow-dit");
+  }
 
   // If none of the known modes match, fallback to available methods
   if (modes.empty()) {
@@ -528,7 +531,7 @@ auto TorchBackend::get_mode_params(std::string mode) -> std::vector<int> {
       }
     }
   }
-  if ((mode == "decode gen" || mode == "prior" || mode == "generate") && has_method("decode")) {
+  if ((mode == "decode gen" || mode == "prior" || mode == "generate" || mode == "flow-dit") && has_method("decode")) {
     auto dp = get_method_params("decode");
     if (dp.size() >= 4) {
       // 0 inputs, audio out channels from decode

@@ -263,7 +263,7 @@ auto ExecuTorchBackend::load(std::string path, double sample_rate, const std::st
         }
 
         // Also check for companion _encode.pte, _decode.pte, _prior.pte files
-        const std::vector<std::string> potential_companions = { "encode", "decode", "prior" };
+        const std::vector<std::string> potential_companions = { "encode", "decode", "prior", "flow_dit" };
         for (const auto& meth : potential_companions) {
             if ( std::find(m_available_methods.begin(), m_available_methods.end(), meth) != m_available_methods.end() ) {
                 continue;
@@ -290,7 +290,7 @@ auto ExecuTorchBackend::load(std::string path, double sample_rate, const std::st
     // Check companion .pte files on disk so method introspection works even without C++ runtime linked
     if (m_available_methods.empty()) {
         m_available_methods.push_back("forward");
-        const std::vector<std::string> potential_companions = { "encode", "decode", "prior" };
+        const std::vector<std::string> potential_companions = { "encode", "decode", "prior", "flow_dit" };
         for (const auto& meth : potential_companions) {
             std::string comp_path = base + "_" + meth + ".pte";
             std::ifstream f(comp_path, std::ios::binary);
@@ -724,6 +724,9 @@ auto ExecuTorchBackend::get_plugin_modes() -> std::vector<std::string> {
     if (has_prior_decode()) {
         modes.push_back("prior");
     }
+    if (has_method("flow_dit")) {
+        modes.push_back("flow-dit");
+    }
     if (modes.empty()) {
         modes.push_back("forward");
     }
@@ -731,7 +734,7 @@ auto ExecuTorchBackend::get_plugin_modes() -> std::vector<std::string> {
 }
 
 auto ExecuTorchBackend::get_mode_params(std::string mode) -> std::vector<int> {
-    if (mode == "decode gen" || mode == "prior" || mode == "generate") {
+    if (mode == "decode gen" || mode == "prior" || mode == "generate" || mode == "flow-dit") {
         return { 0, 1, m_out_channels, 1 };
     }
     return get_method_params(mode);
