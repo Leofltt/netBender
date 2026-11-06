@@ -43,6 +43,8 @@ namespace UIConstants {
         inline const juce::Colour fuse_glowing_green          { 0xff006633 };
         inline const juce::Colour short_circuit_active        { 0xffff3300 };
         inline const juce::Colour amber_accent               { 0xfff59e0b };
+        inline const juce::Colour copper                     { 0xffc26a38 };
+        inline const juce::Colour golden_ochre               { 0xffd99b26 };
 
         // Buttons & Tabs
         inline const juce::Colour tab_active_bg               { 0xff4a1d72 };
