@@ -25,7 +25,6 @@ Compiled edge runtimes (ExecuTorch `.pte` and ONNX Runtime `.onnx`) achieve thei
 1. **Embedded JSON Metadata**: The `.bin` file header embeds the model metadata (sample rate, compression ratio, channels, methods, `history_samples`, `output_offset`, `latent_scale`, and delegate settings), removing the need for separate `.json` sidecar files.
 2. **Contiguous Binary Tensors**: Promoted layer names, dimensions, and float32 weights are stored contiguously directly after the metadata header.
 3. **Instant Zero-Copy Mapping**: At runtime, NetBender reads the metadata and memory-maps the baseline weights with zero serialization overhead, binding them directly into ExecuTorch and ONNX Runtime execution inputs.
-4. **Backward Compatibility**: NetBender retains backward compatibility with legacy v1 `.bin` and standalone `.json` files if present.
 
 #### Binary Layout (`NBND` v2 Byte Specification)
 
@@ -64,8 +63,8 @@ All multi-byte numeric fields are encoded in **little-endian** byte order:
 | *(Repeated $T$ times)* | `name` | `char[K]` | Layer identifier name (e.g. `"generator.conv_in.weight"`). |
 | | `num_dims` | `uint32` | Number of dimensions $D$ (tensor rank). |
 | | `shape` | `int64[D]` | Array of $D$ 64-bit signed integers defining tensor shape (e.g. `[128, 64, 7]`). |
-| | `num_elements`| `uint64` | Total number of elements $E = \prod \text{shape}$. |
-| | `weights` | `float32[E]`| IEEE 754 32-bit floating point tensor weights ($E \times 4$ bytes). |
+| | `num_elements` | `uint64` | Total number of elements $E = \prod \text{shape}$. |
+| | `weights` | `float32[E]` | IEEE 754 32-bit floating point tensor weights ($E \times 4$ bytes). |
 
 ---
 
@@ -267,9 +266,6 @@ Connect a message box to the left inlet of `netBender~` and route the rightmost 
 ---
 
 ## Building from Source
-
-> [!IMPORTANT]
-> **Source Directory Note**: The root CMake configuration file (`CMakeLists.txt`) is located in **`src/`**, not at the repository root. Always pass `-S src -B build` when configuring CMake.
 
 ### Prerequisites
 
