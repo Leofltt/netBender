@@ -8,10 +8,8 @@
 #include <torch/torch.h>
 #endif
 
-
 template <typename data_type> 
 class StaticBuffer {
-
 public:
     using BufferData = std::vector<data_type>;
     using BufferShape = std::array<size_t, 2>;
@@ -22,59 +20,60 @@ private:
     double _samplingRate; 
     
 public: 
-
     StaticBuffer() {
         _dims = BufferShape({0, 0});
-    };
+    }
 
     StaticBuffer(const size_t dim1, const size_t dim2, const double samplingRate = -1) {
         _dims = BufferShape({dim1, dim2});
         _data = std::make_shared<BufferData>(get_empty_buffer(dim1, dim2));
         _samplingRate = samplingRate;
-    };
+    }
 
     StaticBuffer(BufferData data, const double samplingRate) {
         _dims = BufferShape({data.dims(), data[0].dims()});
-        _data = std::make_shared(data);
+        _data = std::make_shared<BufferData>(data);
         _samplingRate = samplingRate;
-    };
+    }
 
-    StaticBuffer(const StaticBuffer &buffer) {
+    StaticBuffer(const StaticBuffer& buffer) {
         _dims = buffer._dims; 
         _data = buffer._data;
         _samplingRate = buffer._samplingRate;
     }
 
-    BufferShape dims () {
+    auto dims() -> BufferShape {
         return _dims;
     }
 
-    double sr() { return _samplingRate; }
+    auto sr() -> double {
+        return _samplingRate;
+    }
 
-    static BufferData get_empty_buffer(const size_t dim1, const size_t dim2) {
+    static auto get_empty_buffer(const size_t dim1, const size_t dim2) -> BufferData {
         return BufferData(dim1 * dim2, 0.f);
-    };
+    }
 
-    void clear() {
+    auto clear() -> void {
         _data.get()->clear();
     }
 
-    void reset() {
+    auto reset() -> void {
         std::fill(_data.get()->begin(), _data.get()->end(), 0.0f);
-    };
+    }
 
 #if !defined(NETBENDER_NO_TORCH_HEADERS)
-    torch::Tensor to_tensor() {
-        auto obj = torch::from_blob(_data.get()->data(), {(long long)_dims[0], (long long)_dims[1]}, torch::kFloat);
+    auto to_tensor() -> torch::Tensor {
+        auto obj = torch::from_blob(_data.get()->data(), {static_cast<long long>(_dims[0]), static_cast<long long>(_dims[1])}, torch::kFloat);
         return obj;
-    };
+    }
 #endif
 
-    float& at(const size_t dim1, const size_t dim2) {
+    auto at(const size_t dim1, const size_t dim2) -> float& {
         return _data.get()->at(dim1 * _dims[0] + dim2);
     }
 
-    void put(data_type data, const size_t dim1, const size_t dim2) {
+    auto put(data_type data, const size_t dim1, const size_t dim2) -> void {
         at(dim1, dim2) = data;
     }
 };

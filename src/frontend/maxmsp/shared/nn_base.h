@@ -14,7 +14,7 @@
 
 #include "buffer_tools.h"
 #include "dict_utils.h"
-#include "../../../backend/backend.h"
+#include "../../../backend/IBackend.h"
 #include "../../../backend/BackendFactory.h"
 #include "../../../shared/circular_buffer.h"
 #include "../../../shared/static_buffer.h"

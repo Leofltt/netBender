@@ -11,12 +11,45 @@ function(configure_nn_bending_target target_name)
         PluginProcessor.h
         PluginEditor.cpp
         PluginEditor.h
+        dsp/AudioRingBuffer.cpp
+        dsp/AudioRingBuffer.h
+        core/ModelThread.cpp
+        core/ModelThread.h
+        core/BendingManager.cpp
+        core/BendingManager.h
+        core/LatentTerrainEngine.cpp
+        core/LatentTerrainEngine.h
+        core/SafetySentry.cpp
+        core/SafetySentry.h
+        ui/FlatLookAndFeel.cpp
+        ui/FlatLookAndFeel.h
+        ui/HeaderComponent.cpp
+        ui/HeaderComponent.h
+        ui/LayerBarComponent.cpp
+        ui/LayerBarComponent.h
+        ui/MutatePanel.cpp
+        ui/MutatePanel.h
+        ui/HarmonicsPanel.cpp
+        ui/HarmonicsPanel.h
+        ui/BridgePanel.cpp
+        ui/BridgePanel.h
+        ui/LatentControlPanel.cpp
+        ui/LatentControlPanel.h
+        ui/SidePanelComponent.cpp
+        ui/SidePanelComponent.h
+        ui/WeightBendingComponent.cpp
+        ui/WeightBendingComponent.h
+        ui/LatentTerrainComponent.cpp
+        ui/LatentTerrainComponent.h
+        ui/UIConstants.h
     )
 
     # Include directories
     target_include_directories(${target_name} PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/ui"
+        "${CMAKE_CURRENT_SOURCE_DIR}/core"
+        "${CMAKE_CURRENT_SOURCE_DIR}/dsp"
         "${CMAKE_SOURCE_DIR}/backend"
         "${CMAKE_SOURCE_DIR}/shared"
         "${CMAKE_BINARY_DIR}/_deps"

@@ -1,311 +1,46 @@
 #pragma once
 #include <JuceHeader.h>
 #include <functional>
-#include <cmath>
+#include <vector>
 
-class LatentTerrainComponent : public juce::Component
-{
+class LatentTerrainComponent : public juce::Component {
 public:
-    LatentTerrainComponent()
-    {
-        setOpaque(true);
-        setMouseCursor(juce::MouseCursor::CrosshairCursor);
-    }
-
+    LatentTerrainComponent();
     ~LatentTerrainComponent() override = default;
 
     std::function<void(float, float)> onCoordsChanged;
 
-    void setCoords(float x, float y)
-    {
-        m_x = juce::jlimit(-1.0f, 1.0f, x);
-        m_y = juce::jlimit(-1.0f, 1.0f, y);
+    auto set_coords(float x, float y) -> void;
+    auto setCoords(float x, float y) -> void { set_coords(x, y); }
 
-        auto padArea = getLocalBounds().toFloat().reduced(6.0f);
-        float pw = padArea.getWidth();
-        float ph = padArea.getHeight();
-        float cx = padArea.getX() + pw * 0.5f;
-        float cy = padArea.getY() + ph * 0.5f;
-        float cursorX = cx + m_x * (pw * 0.48f);
-        float cursorY = cy - m_y * (ph * 0.48f);
-        recordTrailPoint(cursorX, cursorY);
+    auto get_coord_x() const -> float { return m_x; }
+    auto getCoordX() const -> float { return get_coord_x(); }
 
-        repaint();
-    }
+    auto get_coord_y() const -> float { return m_y; }
+    auto getCoordY() const -> float { return get_coord_y(); }
 
-    float getCoordX() const { return m_x; }
-    float getCoordY() const { return m_y; }
+    auto set_enabled_state(bool is_enabled, bool has_bottleneck) -> void;
+    auto setEnabledState(bool isEnabled, bool hasBottleneck) -> void { set_enabled_state(isEnabled, hasBottleneck); }
 
-    void setEnabledState(bool isEnabled, bool hasBottleneck)
-    {
-        m_isEnabled = isEnabled;
-        m_hasBottleneck = hasBottleneck;
-        repaint();
-    }
-
-    void paint(juce::Graphics& g) override
-    {
-        auto bounds = getLocalBounds().toFloat();
-
-        g.setColour(juce::Colour::fromString("#ff0e0d13"));
-        g.fillRect(bounds);
-
-        auto padArea = bounds.reduced(6.0f);
-        float pw = padArea.getWidth();
-        float ph = padArea.getHeight();
-
-        g.setColour(juce::Colour::fromString("#ff110f17"));
-        g.fillRect(padArea);
-
-        g.setColour(juce::Colour::fromString("#ff2d253d"));
-        g.drawRect(padArea, 1.0f);
-
-        if (!m_hasBottleneck)
-        {
-            g.setColour(juce::Colours::grey.withAlpha(0.6f));
-            g.setFont(juce::FontOptions(14.0f));
-            g.drawText("Current model has no autoencode / latent bottleneck.\n(Requires paired encode + decode methods, e.g. RAVE)",
-                       padArea.toNearestInt(), juce::Justification::centred, true);
-            return;
-        }
-
-        float cx = padArea.getX() + pw * 0.5f;
-        float cy = padArea.getY() + ph * 0.5f;
-
-        // Render multi-pole potential / topographic latent heat map via precomputed texture blit
-        {
-            juce::Graphics::ScopedSaveState sss(g);
-            g.reduceClipRegion(padArea.toNearestInt());
-
-            updateBackgroundTerrainImage((int)pw, (int)ph);
-            if (m_backgroundTerrainImage.isValid())
-            {
-                g.setImageResamplingQuality(juce::Graphics::ResamplingQuality::lowResamplingQuality);
-                g.drawImage(m_backgroundTerrainImage, padArea, juce::RectanglePlacement::stretchToFit);
-            }
-        }
-
-        {
-            juce::Graphics::ScopedSaveState sss(g);
-            g.reduceClipRegion(padArea.toNearestInt());
-
-            int gridSteps = 16;
-            for (int i = 0; i <= gridSteps; ++i)
-            {
-                float frac = (float)i / (float)gridSteps;
-                float xLine = padArea.getX() + frac * pw;
-                float yLine = padArea.getY() + frac * ph;
-
-                g.setColour(juce::Colour::fromString("#ff382f4c").withAlpha(0.25f));
-                g.drawVerticalLine((int)xLine, padArea.getY(), padArea.getBottom());
-                g.drawHorizontalLine((int)yLine, padArea.getX(), padArea.getRight());
-            }
-        }
-
-        g.setColour(juce::Colour::fromString("#ff4c3d69").withAlpha(0.6f));
-        g.drawHorizontalLine((int)cy, padArea.getX(), padArea.getRight());
-        g.drawVerticalLine((int)cx, padArea.getY(), padArea.getBottom());
-
-        float maxRadius = std::min(pw, ph) * 0.46f;
-        for (int step = 1; step <= 4; ++step)
-        {
-            float r = maxRadius * (step / 4.0f);
-            g.setColour(juce::Colour::fromString("#ff58447d").withAlpha(step == 4 ? 0.55f : 0.30f));
-            g.drawEllipse(cx - r, cy - r, r * 2.0f, r * 2.0f, step == 4 ? 1.2f : 0.8f);
-
-            g.setColour(juce::Colours::white.withAlpha(0.28f));
-            g.setFont(juce::FontOptions(9.0f));
-            g.drawText(juce::String(step * 0.25f, 2),
-                       (int)(cx + 4), (int)(cy - r - 6), 30, 12, juce::Justification::centredLeft);
-        }
-
-        {
-            g.setColour(juce::Colour::fromString("#ff3b3254").withAlpha(0.35f));
-            float diagDist = maxRadius * 0.95f;
-            float cos45 = 0.7071f * diagDist;
-            g.drawLine(cx - cos45, cy - cos45, cx + cos45, cy + cos45, 0.8f);
-            g.drawLine(cx - cos45, cy + cos45, cx + cos45, cy - cos45, 0.8f);
-        }
-
-        float cursorX = cx + m_x * (pw * 0.48f);
-        float cursorY = cy - m_y * (ph * 0.48f);
-
-        {
-            float distFromOrigin = std::sqrt(m_x * m_x + m_y * m_y);
-            juce::Colour rayColour = m_isEnabled ? juce::Colour::fromString("#ff06b6d4") 
-                                                 : juce::Colour::fromString("#ff64748b");
-            g.setColour(rayColour.withAlpha(0.40f));
-            g.drawLine(cx, cy, cursorX, cursorY, 1.0f);
-            if (distFromOrigin > 0.15f)
-            {
-                float midX = (cx + cursorX) * 0.5f;
-                float midY = (cy + cursorY) * 0.5f;
-                g.setColour(juce::Colours::cyan.withAlpha(0.85f));
-                g.setFont(juce::FontOptions(9.0f));
-                g.drawText(juce::String::formatted("r=%.2f", distFromOrigin),
-                           (int)(midX + 4), (int)(midY - 6), 40, 12, juce::Justification::centredLeft);
-            }
-        }
-
-        if (m_trail.size() >= 2)
-        {
-            juce::Path trailPath;
-            trailPath.startNewSubPath(m_trail[0].x, m_trail[0].y);
-            for (size_t i = 1; i < m_trail.size(); ++i)
-                trailPath.lineTo(m_trail[i].x, m_trail[i].y);
-
-            juce::Colour trailColour = m_isEnabled ? juce::Colour::fromString("#ffd946ef")
-                                                   : juce::Colour::fromString("#ff64748b");
-            g.setColour(trailColour.withAlpha(0.35f));
-            g.strokePath(trailPath, juce::PathStrokeType(1.2f));
-            for (size_t i = 0; i < m_trail.size(); ++i)
-            {
-                float alpha = (float)(i + 1) / (float)m_trail.size() * 0.5f;
-                g.setColour(trailColour.withAlpha(alpha));
-                g.fillEllipse(m_trail[i].x - 2.0f, m_trail[i].y - 2.0f, 4.0f, 4.0f);
-            }
-        }
-
-        juce::Colour glowColour = m_isEnabled ? juce::Colour::fromString("#ffd946ef") 
-                                              : juce::Colour::fromString("#ff64748b"); 
-        
-        juce::ColourGradient glowGrad(
-            glowColour.withAlpha(0.40f), cursorX, cursorY,
-            glowColour.withAlpha(0.0f), cursorX, cursorY + 32.0f, true
-        );
-        g.setGradientFill(glowGrad);
-        g.fillEllipse(cursorX - 32.0f, cursorY - 32.0f, 64.0f, 64.0f);
-
-        g.setColour(glowColour.withAlpha(0.95f));
-        g.drawEllipse(cursorX - 10.0f, cursorY - 10.0f, 20.0f, 20.0f, 1.2f);
-        g.drawEllipse(cursorX - 3.0f, cursorY - 3.0f, 6.0f, 6.0f, 1.8f);
-        g.setColour(juce::Colours::white.withAlpha(0.85f));
-        g.drawHorizontalLine((int)cursorY, cursorX - 16.0f, cursorX - 5.0f);
-        g.drawHorizontalLine((int)cursorY, cursorX + 5.0f, cursorX + 16.0f);
-        g.drawVerticalLine((int)cursorX, cursorY - 16.0f, cursorY - 5.0f);
-        g.drawVerticalLine((int)cursorX, cursorY + 5.0f, cursorY + 16.0f);
-
-        g.setFont(juce::FontOptions(11.0f));
-        g.setColour(juce::Colours::white.withAlpha(0.85f));
-        float mag = std::sqrt(m_x * m_x + m_y * m_y);
-        float angleRad = std::atan2(m_y, m_x);
-        float angleDeg = angleRad * (180.0f / 3.14159265f);
-        if (angleDeg < 0.0f) angleDeg += 360.0f;
-
-        juce::String coordsText = juce::String::formatted("X: %+.3f   Y: %+.3f   |   Mag: %.3f   θ: %.1f°", m_x, m_y, mag, angleDeg);
-        g.drawText(coordsText, padArea.reduced(10.0f, 6.0f).toNearestInt(), juce::Justification::bottomLeft, true);
-
-        juce::String modeText = m_isEnabled ? "LATENT HOOK: ACTIVE" : "STANDBY (Click to Modulate)";
-        g.setColour(m_isEnabled ? juce::Colour::fromString("#ffd946ef") : juce::Colours::silver.withAlpha(0.6f));
-        g.drawText(modeText, padArea.reduced(10.0f, 6.0f).toNearestInt(), juce::Justification::topRight, true);
-    }
-
-    void mouseDown(const juce::MouseEvent& e) override
-    {
-        updateFromMouse(e);
-    }
-
-    void mouseDrag(const juce::MouseEvent& e) override
-    {
-        updateFromMouse(e);
-    }
-
-    void mouseDoubleClick(const juce::MouseEvent& /*e*/) override
-    {
-        // Double-click snaps back to (0, 0)
-        setCoords(0.0f, 0.0f);
-        if (onCoordsChanged)
-            onCoordsChanged(0.0f, 0.0f);
-    }
+    auto paint(juce::Graphics& g) -> void override;
+    auto mouseDown(const juce::MouseEvent& e) -> void override;
+    auto mouseDrag(const juce::MouseEvent& e) -> void override;
+    auto mouseDoubleClick(const juce::MouseEvent& e) -> void override;
 
 private:
-    float m_x { 0.0f };
-    float m_y { 0.0f };
-    bool m_isEnabled { false };
-    bool m_hasBottleneck { true };
-
-    juce::Image m_backgroundTerrainImage;
-
-    void updateBackgroundTerrainImage(int w, int h)
-    {
-        if (w <= 0 || h <= 0) return;
-        int steps = 36;
-        if (!m_backgroundTerrainImage.isValid() || m_backgroundTerrainImage.getWidth() != steps || m_backgroundTerrainImage.getHeight() != steps)
-        {
-            m_backgroundTerrainImage = juce::Image(juce::Image::ARGB, steps, steps, false);
-            juce::Image::BitmapData bmp(m_backgroundTerrainImage, juce::Image::BitmapData::writeOnly);
-
-            for (int sy = 0; sy < steps; ++sy)
-            {
-                float pyNorm = 1.0f - 2.0f * ((sy + 0.5f) / (float)steps);
-                auto* line = reinterpret_cast<uint32_t*>(bmp.getLinePointer(sy));
-
-                for (int sx = 0; sx < steps; ++sx)
-                {
-                    float pxNorm = 2.0f * ((sx + 0.5f) / (float)steps) - 1.0f;
-                    float dOrigin = std::sqrt(pxNorm * pxNorm + pyNorm * pyNorm);
-
-                    float field1 = std::sin(pxNorm * 3.14159f * 1.5f) * std::cos(pyNorm * 3.14159f * 1.5f);
-                    float field2 = 0.5f * std::cos(dOrigin * 6.28318f);
-                    float field = 0.5f * (field1 + field2); // [-0.75, +0.75]
-                    float val = juce::jlimit(0.0f, 1.0f, 0.45f + field * 0.35f);
-
-                    juce::Colour cellCol;
-                    if (val < 0.45f)
-                    {
-                        float t = val / 0.45f;
-                        cellCol = juce::Colour::fromString("#ff0b0a12").interpolatedWith(juce::Colour::fromString("#ff17122a"), t);
-                    }
-                    else if (val < 0.70f)
-                    {
-                        float t = (val - 0.45f) / 0.25f;
-                        cellCol = juce::Colour::fromString("#ff17122a").interpolatedWith(juce::Colour::fromString("#ff2e1065"), t);
-                    }
-                    else
-                    {
-                        float t = (val - 0.70f) / 0.30f;
-                        cellCol = juce::Colour::fromString("#ff2e1065").interpolatedWith(juce::Colour::fromString("#ff065f46"), t);
-                    }
-                    line[sx] = cellCol.withAlpha(0.70f).getARGB();
-                }
-            }
-        }
-    }
+    auto update_background_terrain_image(int w, int h) -> void;
+    auto record_trail_point(float px, float py) -> void;
+    auto update_from_mouse(const juce::MouseEvent& e) -> void;
 
     struct Point2D { float x; float y; };
+
+    float m_x{0.0f};
+    float m_y{0.0f};
+    bool m_isEnabled{false};
+    bool m_hasBottleneck{true};
+
+    juce::Image m_backgroundTerrainImage;
     std::vector<Point2D> m_trail;
-
-    void recordTrailPoint(float px, float py)
-    {
-        m_trail.push_back({ px, py });
-        if (m_trail.size() > 24)
-            m_trail.erase(m_trail.begin());
-    }
-
-    void updateFromMouse(const juce::MouseEvent& e)
-    {
-        auto padArea = getLocalBounds().toFloat().reduced(6.0f);
-        float pw = padArea.getWidth();
-        float ph = padArea.getHeight();
-
-        float cx = padArea.getX() + pw * 0.5f;
-        float cy = padArea.getY() + ph * 0.5f;
-
-        float normX = (e.position.x - cx) / (pw * 0.48f);
-        float normY = -(e.position.y - cy) / (ph * 0.48f); // Inverted so up is +1
-
-        m_x = juce::jlimit(-1.0f, 1.0f, normX);
-        m_y = juce::jlimit(-1.0f, 1.0f, normY);
-
-        float cursorX = cx + m_x * (pw * 0.48f);
-        float cursorY = cy - m_y * (ph * 0.48f);
-        recordTrailPoint(cursorX, cursorY);
-
-        repaint();
-
-        if (onCoordsChanged)
-            onCoordsChanged(m_x, m_y);
-    }
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LatentTerrainComponent)
 };

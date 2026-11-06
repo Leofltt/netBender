@@ -1,6 +1,6 @@
 #pragma once
 #include "IBackend.h"
-#include "backend.h"
+#include "TorchBackend.h"
 #include "OnnxBackend.h"
 #include "ExecuTorchBackend.h"
 #include <memory>
@@ -35,14 +35,5 @@ public:
 
   static auto create_default() -> std::unique_ptr<IBackend> {
     return std::make_unique<TorchBackend>();
-  }
-
-  // Backward compatibility aliases
-  static auto createForFile(const std::string& path) -> std::unique_ptr<IBackend> {
-    return create_for_file(path);
-  }
-
-  static auto createDefault() -> std::unique_ptr<IBackend> {
-    return create_default();
   }
 };

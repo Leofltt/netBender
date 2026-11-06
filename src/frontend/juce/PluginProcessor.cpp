@@ -4,49 +4,6 @@
 #include <cmath>
 
 //==============================================================================
-ModelThread::ModelThread(NNBendingAudioProcessor& processor)
-    : juce::Thread("Model Thread"), m_processor(processor)
-{
-}
-
-ModelThread::~ModelThread()
-{
-    stop();
-}
-
-void ModelThread::stop()
-{
-    signalThreadShouldExit();
-    m_event.signal();
-    stopThread(-1);
-}
-
-void ModelThread::run()
-{
-    while (!threadShouldExit())
-    {
-        // Wait for trigger signal (timeout 20ms to allow responsive shutdown or idle checks)
-        m_event.wait(20);
-        
-        if (threadShouldExit())
-            break;
-            
-        if (m_processing.load())
-        {
-            const juce::ScopedAutoReleasePool pool;
-            m_processor.runInference();
-            m_processing.store(false);
-        }
-    }
-}
-
-void ModelThread::triggerCompute()
-{
-    m_processing.store(true);
-    m_event.signal();
-}
-
-//==============================================================================
 NNBendingAudioProcessor::NNBendingAudioProcessor()
 #ifndef JucePlugin_PreferredChannelConfigurations
      : AudioProcessor (BusesProperties()
@@ -104,7 +61,7 @@ NNBendingAudioProcessor::NNBendingAudioProcessor()
         juce::NormalisableRange<float> (0.0f, 2.0f, 0.01f), 0.5f
     ));
 
-    m_backend = BackendFactory::createDefault();
+    m_backend = BackendFactory::create_default();
 }
 
 NNBendingAudioProcessor::~NNBendingAudioProcessor()
@@ -113,14 +70,12 @@ NNBendingAudioProcessor::~NNBendingAudioProcessor()
 }
 
 //==============================================================================
-void NNBendingAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
-{
+auto NNBendingAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock) -> void {
     juce::ignoreUnused(samplesPerBlock);
     m_hostSampleRate.store(sampleRate);
     if (m_backend)
         m_backend->set_sample_rate(sampleRate);
-    if (m_modelLoaded.load() && m_backend)
-    {
+    if (m_modelLoaded.load() && m_backend) {
         double modelSr = m_backend->get_sample_rate();
         m_modelSampleRate.store(modelSr);
         m_resamplingActive.store(std::abs(sampleRate - modelSr) > 1.0);
@@ -128,15 +83,13 @@ void NNBendingAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBl
     initBuffers();
 }
 
-void NNBendingAudioProcessor::releaseResources()
-{
+auto NNBendingAudioProcessor::releaseResources() -> void {
     m_model_thread.stop();
 }
 
-bool NNBendingAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
-{
+auto NNBendingAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const -> bool {
   #if JucePlugin_IsMidiEffect
-    juce::ignoreUnused (layouts);
+    juce::ignoreUnused(layouts);
     return true;
   #else
     if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::mono()
@@ -152,8 +105,7 @@ bool NNBendingAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts
   #endif
 }
 
-void NNBendingAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
-{
+auto NNBendingAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages) -> void {
     juce::ScopedNoDenormals noDenormals;
     auto totalNumInputChannels  = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
@@ -171,11 +123,11 @@ void NNBendingAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         auto msg = metadata.getMessage();
         if (msg.isNoteOn())
         {
-            m_midiGateActive.store(true);
+            m_bending_manager.trigger_short_circuit(true);
         }
         else if (msg.isNoteOff())
         {
-            m_midiGateActive.store(false);
+            m_bending_manager.trigger_short_circuit(false);
         }
     }
 
@@ -201,9 +153,7 @@ void NNBendingAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
             float peak = buffer.getMagnitude(c, 0, numSamples);
             if (peak > maxPeak) maxPeak = peak;
         }
-        float prevEnv = m_audioEnvelope.load();
-        float newEnv = std::max(maxPeak, prevEnv * 0.9f); // Fast attack, smooth decay
-        m_audioEnvelope.store(newEnv);
+        m_bending_manager.update_audio_envelope(maxPeak);
     }
     
     // 1. If inference output is ready from background thread, transfer to output ring buffers
@@ -290,7 +240,7 @@ void NNBendingAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         }
         
         // Check if we have enough samples to trigger inference and thread is idle
-        if (!m_model_thread.isProcessing() && m_in_buffers[0].getAvailable() >= m_bufferSize)
+        if (!m_model_thread.is_processing() && m_in_buffers[0].get_available() >= m_bufferSize)
         {
             std::unique_lock<std::mutex> lock(m_staging_mutex, std::try_to_lock);
             if (lock.owns_lock())
@@ -299,16 +249,16 @@ void NNBendingAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                 {
                     m_in_buffers[c].get(m_staging_in[c].data(), m_bufferSize);
                 }
-                m_model_thread.triggerCompute();
+                m_model_thread.trigger_compute();
             }
         }
     }
     else
     {
         // Generative model (0 audio inputs): trigger inference whenever output buffer needs filling
-        if (!m_model_thread.isProcessing() && m_out_buffers[0].getAvailable() < m_bufferSize * 3)
+        if (!m_model_thread.is_processing() && m_out_buffers[0].get_available() < m_bufferSize * 3)
         {
-            m_model_thread.triggerCompute();
+            m_model_thread.trigger_compute();
         }
     }
     
@@ -372,7 +322,6 @@ void NNBendingAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
     // 4. Dry/Wet Blending & Safety Sentry
     float wetGain = m_dryWet.load();
     float dryGain = 1.0f - wetGain;
-    bool fuseBlown = m_blownFuse.load();
 
     if ((int)m_dryBlockScratch.size() < numSamples)
         m_dryBlockScratch.resize(numSamples, 0.0f);
@@ -384,66 +333,16 @@ void NNBendingAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         {
             m_dry_delay_buffers[dryCh].get(m_dryBlockScratch.data(), numSamples);
             float* outPtr = buffer.getWritePointer(c);
-            
-            if (fuseBlown)
-            {
-                // Blown fuse: bypass wet model output and pass pure dry audio to protect listeners
-                for (int i = 0; i < numSamples; ++i)
-                {
-                    outPtr[i] = m_dryBlockScratch[i];
-                }
-            }
-            else
-            {
-                for (int i = 0; i < numSamples; ++i)
-                {
-                    float rawWet = outPtr[i];
-
-                    // NaN & Inf Sentry Check
-                    if (std::isnan(rawWet) || std::isinf(rawWet))
-                    {
-                        m_blownFuse.store(true);
-                        outPtr[i] = 0.0f;
-                        continue;
-                    }
-
-                    // Transparent soft headroom saturation on wet model output:
-                    // Linear unity gain for |x| <= 0.6, smoothly compressing transient peaks to <= 1.3f
-                    float satWet = (std::abs(rawWet) < 0.6f) ? rawWet : (std::tanh(rawWet * 0.77f) * 1.3f);
-                    float sample = satWet * wetGain + m_dryBlockScratch[i] * dryGain;
-
-                    // Hard cutoff safety check for runaway signals
-                    if (std::isnan(sample) || std::isinf(sample) || std::abs(sample) > 2.0f)
-                    {
-                        m_blownFuse.store(true);
-                        sample = 0.0f; // Instantly silence runaway sample
-                    }
-                    else
-                    {
-                        // Soft clamp to +/- 1.5 to protect output converters
-                        sample = juce::jlimit(-1.5f, 1.5f, sample);
-                    }
-                    outPtr[i] = sample;
-                }
-            }
+            m_safety_sentry.process_channel(outPtr, m_dryBlockScratch.data(), numSamples, wetGain, dryGain);
         }
     }
 
     // Auto-recovery handling if enabled
-    if (m_blownFuse.load() && m_autoResetFuse.load())
-    {
-        int cooldown = m_fuseCooldownBlocks.fetch_add(1);
-        if (cooldown > 40) // ~0.5-1.0s depending on block size
-        {
-            m_fuseCooldownBlocks.store(0);
-            resetFuse();
-        }
-    }
+    m_safety_sentry.tick_recovery([this] { resetFuse(); });
 }
 
 //==============================================================================
-std::vector<juce::String> NNBendingAudioProcessor::getAvailableModes() const
-{
+auto NNBendingAudioProcessor::getAvailableModes() const -> std::vector<juce::String> {
     std::vector<juce::String> modes;
     if (!m_modelLoaded.load() || !m_backend)
         return modes;
@@ -454,8 +353,7 @@ std::vector<juce::String> NNBendingAudioProcessor::getAvailableModes() const
     return modes;
 }
 
-bool NNBendingAudioProcessor::loadModel(const juce::File& file)
-{
+auto NNBendingAudioProcessor::loadModel(const juce::File& file) -> bool {
     m_modelLoaded.store(false);
     m_model_thread.stop();
     
@@ -463,7 +361,7 @@ bool NNBendingAudioProcessor::loadModel(const juce::File& file)
     
     try
     {
-        auto newBackend = BackendFactory::createForFile(path);
+        auto newBackend = BackendFactory::create_for_file(path);
         if (!newBackend)
             return false;
 
@@ -520,9 +418,7 @@ bool NNBendingAudioProcessor::loadModel(const juce::File& file)
             }
             
             // Reset latent terrain cached matrices on new model load
-            m_rffMatrix.clear();
-            m_prevLatentBuffer.clear();
-            m_cachedLatentDim = 0;
+            m_latent_engine.reset();
 
             // Query model sample rate vs host sample rate
             double hostSr = getSampleRate();
@@ -548,54 +444,44 @@ bool NNBendingAudioProcessor::loadModel(const juce::File& file)
     return false;
 }
 
-void NNBendingAudioProcessor::setCurrentMethod(const juce::String& method)
-{
+auto NNBendingAudioProcessor::setCurrentMethod(const juce::String& method) -> void {
     if (!m_backend) return;
     std::string methodStr = method.toStdString();
     auto modes = m_backend->get_plugin_modes();
     bool isValidMode = (std::find(modes.begin(), modes.end(), methodStr) != modes.end())
                     || m_backend->has_method(methodStr);
 
-    if (isValidMode)
-    {
+    if (isValidMode) {
         int prevIn = m_model_in;
         int prevOut = m_model_out;
         m_currentMethod = method;
         auto params = m_backend->get_mode_params(methodStr);
-        if (params.size() >= 4)
-        {
+        if (params.size() >= 4) {
             m_model_in = params[0];
             m_model_out = params[2];
         }
 
-        if (prevIn != m_model_in || prevOut != m_model_out)
-        {
+        if (prevIn != m_model_in || prevOut != m_model_out) {
             initBuffers();
-        }
-        else
-        {
+        } else {
             m_backend->clear_decode_gen_fifo();
         }
     }
 }
 
-void NNBendingAudioProcessor::setBufferSize(int size)
-{
-    if (size > 0 && (size & (size - 1)) == 0) // Power of two check
-    {
+auto NNBendingAudioProcessor::setBufferSize(int size) -> void {
+    if (size > 0 && (size & (size - 1)) == 0) { // Power of two check
         m_bufferSize = size;
         initBuffers();
     }
 }
 
-void NNBendingAudioProcessor::setUseGpu(bool enabled)
-{
+auto NNBendingAudioProcessor::setUseGpu(bool enabled) -> void {
     if (m_useGpu.load() == enabled && m_modelLoaded.load())
         return;
 
     m_useGpu.store(enabled);
-    if (!m_modelLoaded.load() || m_modelPath.isEmpty())
-    {
+    if (!m_modelLoaded.load() || m_modelPath.isEmpty()) {
         if (m_backend)
             m_backend->use_gpu(enabled);
         return;
@@ -605,8 +491,7 @@ void NNBendingAudioProcessor::setUseGpu(bool enabled)
     juce::File targetFile(m_modelPath);
 
     // For .pte models, automatically swap between sibling *_xnnpack.pte (CPU) and *_coreml.pte (GPU/ANE) if present
-    if (m_modelPath.endsWithIgnoreCase(".pte"))
-    {
+    if (m_modelPath.endsWithIgnoreCase(".pte")) {
         juce::String candidatePath = m_modelPath;
         if (enabled && candidatePath.containsIgnoreCase("_xnnpack.pte"))
             candidatePath = candidatePath.replace("_xnnpack.pte", "_coreml.pte", true);
@@ -618,18 +503,13 @@ void NNBendingAudioProcessor::setUseGpu(bool enabled)
             targetFile = candidateFile;
     }
 
-    if (loadModel(targetFile))
-    {
+    if (loadModel(targetFile)) {
         if (savedMethod.isNotEmpty())
             setCurrentMethod(savedMethod);
-        std::lock_guard<std::mutex> lock(m_layerStateMutex);
-        for (auto& pair : m_layerStates)
-            pair.second.isApplied = false;
     }
 }
 
-void NNBendingAudioProcessor::initBuffers()
-{
+auto NNBendingAudioProcessor::initBuffers() -> void {
     m_model_thread.stop();
     
     const juce::ScopedLock sl (getCallbackLock());
@@ -723,202 +603,19 @@ void NNBendingAudioProcessor::initBuffers()
     }
 }
 
-void NNBendingAudioProcessor::runInference()
-{
+auto NNBendingAudioProcessor::runInference() -> void {
     if (!m_modelLoaded.load() || m_model_out <= 0)
         return;
 
-    {
-        std::lock_guard<std::mutex> lock(m_layerStateMutex);
-        std::string activeLayer = m_activeLayerName.toStdString();
-        if (!activeLayer.empty() && m_scaleParam && m_offsetParam && m_heatParam)
-        {
-            auto& state = m_layerStates[activeLayer];
-            float newScale = m_scaleParam->get();
-            float newOffset = m_offsetParam->get();
-            float newHeat = m_heatParam->get();
-            float newMemory = m_memoryParam ? m_memoryParam->get() : state.memory;
+    // 1. Update and apply weight bending to backend
+    float scaleVal = m_scaleParam ? m_scaleParam->get() : 1.0f;
+    float offsetVal = m_offsetParam ? m_offsetParam->get() : 0.0f;
+    float heatVal = m_heatParam ? m_heatParam->get() : 0.0f;
+    float memVal = m_memoryParam ? m_memoryParam->get() : -1.0f;
+    bool shortVal = m_shortCircuitParam ? m_shortCircuitParam->get() : false;
+    m_bending_manager.apply_bending(m_backend.get(), m_activeLayerName.toStdString(), scaleVal, offsetVal, heatVal, memVal, shortVal);
 
-            if (std::abs(state.scale - newScale) > 0.0001f ||
-                std::abs(state.offset - newOffset) > 0.0001f ||
-                std::abs(state.heat - newHeat) > 0.0001f ||
-                std::abs(state.memory - newMemory) > 0.0001f)
-            {
-                state.scale = newScale;
-                state.offset = newOffset;
-                state.heat = newHeat;
-                state.memory = newMemory;
-                state.isApplied = false; // Trigger re-application
-            }
-        }
-
-        // Calculate momentary envelope progression based on TriggerMode:
-        TriggerMode mode = m_triggerMode.load();
-        bool shortActive = false;
-
-        if (mode == TriggerMode::Momentary)
-        {
-            shortActive = m_shortCircuitActive.load() || (m_shortCircuitParam && m_shortCircuitParam->get());
-        }
-        else if (mode == TriggerMode::Transient)
-        {
-            shortActive = (m_audioEnvelope.load() >= m_transientThreshold.load());
-        }
-
-        float currentEnv = m_momentaryEnvelope.load();
-        float att = m_envAttack.load();
-        float rel = m_envRelease.load();
-
-        if (mode == TriggerMode::Continuous)
-        {
-            // In continuous mode, bending is always 100% active
-            currentEnv = 1.0f;
-        }
-        else
-        {
-            if (shortActive)
-                currentEnv = std::min(1.0f, currentEnv + att);
-            else
-                currentEnv = std::max(0.0f, currentEnv * rel);
-        }
-
-        m_momentaryEnvelope.store(currentEnv);
-
-        for (auto& pair : m_layerStates)
-        {
-            const std::string& layerName = pair.first;
-            LayerBendingState& state = pair.second;
-            if (state.originalWeights.empty())
-            {
-                state.originalWeights = m_backend->get_original_layer_weights(layerName);
-            }
-            if (state.originalWeights.empty())
-                continue;
-
-            size_t numWeights = state.originalWeights.size();
-
-            if (state.drawnWeights.size() != numWeights)
-            {
-                state.drawnWeights = state.originalWeights;
-            }
-
-            if (state.driftOffsets.size() != numWeights)
-            {
-                state.driftOffsets.assign(numWeights, 0.0f);
-            }
-
-            // Cross-Talk (Trace Bridging): Blend target layer's base shape with a source layer
-            if (state.scratchBridged.size() != numWeights)
-                state.scratchBridged.resize(numWeights);
-            std::memcpy(state.scratchBridged.data(), state.drawnWeights.data(), numWeights * sizeof(float));
-
-            if (state.bridgeDepth > 0.001f && !state.bridgeSourceLayer.empty() && state.bridgeSourceLayer != layerName)
-            {
-                auto sourceWeights = m_backend->get_original_layer_weights(state.bridgeSourceLayer);
-                if (!sourceWeights.empty())
-                {
-                    float alpha = juce::jlimit(0.0f, 1.0f, state.bridgeDepth);
-                    size_t srcSize = sourceWeights.size();
-                    for (size_t i = 0; i < numWeights; ++i)
-                    {
-                        float srcVal = sourceWeights[i % srcSize];
-                        state.scratchBridged[i] = (1.0f - alpha) * state.drawnWeights[i] + alpha * srcVal;
-                    }
-                }
-            }
-
-            if (state.scratchFinal.size() != numWeights)
-                state.scratchFinal.resize(numWeights);
-
-            // Compute stochastic drift when heat > 0 and not frozen
-            if (state.heat > 0.0001f && !state.frozen)
-            {
-                float heat = state.heat;
-                float memory = juce::jlimit(0.0f, 0.999f, state.memory);
-
-                for (size_t i = 0; i < numWeights; ++i)
-                {
-                    float noise = (m_jitterRng.nextFloat() * 2.0f - 1.0f) * heat;
-
-                    if (state.driftMode == DriftMode::ThermalOU)
-                    {
-                        // Ornstein-Uhlenbeck: dW = -theta * W + sigma * dW_noise
-                        state.driftOffsets[i] = (state.driftOffsets[i] * memory) + noise * (1.0f - memory);
-                    }
-                    else if (state.driftMode == DriftMode::RandomWalk)
-                    {
-                        // Continuous wandering walk with soft bounds
-                        state.driftOffsets[i] = juce::jlimit(-1.0f, 1.0f, state.driftOffsets[i] + noise * 0.1f);
-                    }
-                    else // Classic Noise / Glitch
-                    {
-                        state.driftOffsets[i] = noise;
-                    }
-
-                    // Calculate bent target weight (Bridged base shape * Static Scale + Offset + Stochastic Drift)
-                    float bentWeight = (state.scratchBridged[i] * state.scale + state.offset) + state.driftOffsets[i];
-
-                    if (mode == TriggerMode::Continuous)
-                    {
-                        state.scratchFinal[i] = bentWeight;
-                    }
-                    else
-                    {
-                        // Crossfade from unbent baseline W0 (originalWeights) to target bent W based on envelope
-                        state.scratchFinal[i] = state.originalWeights[i] + currentEnv * (bentWeight - state.originalWeights[i]);
-                    }
-                }
-                m_backend->set_layer_weights(layerName, state.scratchFinal);
-                state.isApplied = true;
-                state.lastAppliedEnv = currentEnv;
-            }
-            else if (mode != TriggerMode::Continuous && currentEnv > 0.001f)
-            {
-                // Momentary gate active without heat: only recompute if envelope moved significantly
-                if (std::abs(currentEnv - state.lastAppliedEnv) > 0.002f)
-                {
-                    // Vectorized: bentWeight = bridgedBase * scale + offset
-                    juce::FloatVectorOperations::copy(state.scratchFinal.data(), state.scratchBridged.data(), (int)numWeights);
-                    juce::FloatVectorOperations::multiply(state.scratchFinal.data(), state.scale, (int)numWeights);
-                    juce::FloatVectorOperations::add(state.scratchFinal.data(), state.offset, (int)numWeights);
-
-                    // Vectorized crossfade: finalWeights = originalWeights * (1 - env) + bentWeight * env
-                    juce::FloatVectorOperations::multiply(state.scratchFinal.data(), currentEnv, (int)numWeights);
-                    juce::FloatVectorOperations::addWithMultiply(state.scratchFinal.data(), state.originalWeights.data(), 1.0f - currentEnv, (int)numWeights);
-
-                    m_backend->set_layer_weights(layerName, state.scratchFinal);
-                    state.isApplied = true;
-                    state.lastAppliedEnv = currentEnv;
-                }
-            }
-            else if (mode == TriggerMode::Continuous)
-            {
-                // Continuous mode without drift: apply bent target once and skip redundant uploads
-                if (!state.isApplied)
-                {
-                    // Vectorized: finalWeights = bridgedBase * scale + offset
-                    juce::FloatVectorOperations::copy(state.scratchFinal.data(), state.scratchBridged.data(), (int)numWeights);
-                    juce::FloatVectorOperations::multiply(state.scratchFinal.data(), state.scale, (int)numWeights);
-                    juce::FloatVectorOperations::add(state.scratchFinal.data(), state.offset, (int)numWeights);
-
-                    m_backend->set_layer_weights(layerName, state.scratchFinal);
-                    state.isApplied = true;
-                }
-            }
-            else if (mode != TriggerMode::Continuous && currentEnv <= 0.001f)
-            {
-                // Momentary gate inactive: restore unbent baseline weights once
-                if (state.isApplied)
-                {
-                    m_backend->set_layer_weights(layerName, state.originalWeights);
-                    state.isApplied = false;
-                    state.lastAppliedEnv = 0.0f;
-                }
-            }
-        }
-    }
-        
-    // 3. Copy audio inputs from staging buffers to local worker buffers under a brief lock
+    // 2. Copy audio inputs from staging buffers to local worker buffers under a brief lock
     {
         std::lock_guard<std::mutex> lock(m_staging_mutex);
         for (int c = 0; c < m_model_in; ++c)
@@ -945,10 +642,13 @@ void NNBendingAudioProcessor::runInference()
     {
         // Compose latent hook: if user hook is set, use it; otherwise if latent terrain is enabled, execute it!
         IBackend::LatentHook activeHook = m_latentHook;
-        if (!activeHook && m_latentEnabled.load())
+        if (!activeHook && m_latent_engine.is_enabled())
         {
-            activeHook = [this](IBackend::LatentBuffer& buf) {
-                applyLatentTerrainHook(buf);
+            float lx = m_latentXParam ? m_latentXParam->get() : -999.0f;
+            float ly = m_latentYParam ? m_latentYParam->get() : -999.0f;
+            float depth = m_latentDepthParam ? m_latentDepthParam->get() : -999.0f;
+            activeHook = [this, lx, ly, depth](IBackend::LatentBuffer& buf) {
+                m_latent_engine.apply_hook(buf, lx, ly, depth);
             };
         }
 
@@ -961,8 +661,11 @@ void NNBendingAudioProcessor::runInference()
         IBackend::LatentHook activeHook = m_latentHook;
         if (!activeHook)
         {
-            activeHook = [this](IBackend::LatentBuffer& buf) {
-                applyLatentTerrainHook(buf);
+            float lx = m_latentXParam ? m_latentXParam->get() : -999.0f;
+            float ly = m_latentYParam ? m_latentYParam->get() : -999.0f;
+            float depth = m_latentDepthParam ? m_latentDepthParam->get() : -999.0f;
+            activeHook = [this, lx, ly, depth](IBackend::LatentBuffer& buf) {
+                m_latent_engine.apply_hook(buf, lx, ly, depth);
             };
         }
 
@@ -980,7 +683,7 @@ void NNBendingAudioProcessor::runInference()
             m_backend->perform(in_ptrs, out_ptrs, modeStr, 1, m_model_out, m_bufferSize);
     }
 
-    // 5. Transfer computed output back to staging_out under a brief lock
+    // 3. Transfer computed output back to staging_out under a brief lock
     {
         std::lock_guard<std::mutex> lock(m_staging_mutex);
         for (int c = 0; c < m_model_out; ++c)
@@ -995,98 +698,22 @@ void NNBendingAudioProcessor::runInference()
     m_output_ready.store(true);
 }
 
-void NNBendingAudioProcessor::applyLatentTerrainHook(IBackend::LatentBuffer& buf)
-{
-    if (buf.data == nullptr || buf.channels <= 0 || buf.length <= 0)
-        return;
-
-    float lx = m_latentXParam ? m_latentXParam->get() : m_latentX.load();
-    float ly = m_latentYParam ? m_latentYParam->get() : m_latentY.load();
-    float depth = m_latentDepthParam ? m_latentDepthParam->get() : m_latentDepth.load();
-    auto mode = m_latentMode.load();
-
-    int64_t latentDim = buf.channels;
-    int64_t length = buf.length;
-    size_t totalElems = (size_t)(latentDim * length);
-
-    if (mode == LatentMode::FourierOrbit)
-    {
-        int64_t numHarmonics = std::max((int64_t)1, latentDim / 2);
-        if (m_rffMatrix.size() != (size_t)(numHarmonics * 2) || m_cachedLatentDim != (int)latentDim)
-        {
-            std::mt19937 rng(42);
-            std::normal_distribution<float> dist(0.0f, 2.5f);
-            m_rffMatrix.resize((size_t)(numHarmonics * 2));
-            for (auto& val : m_rffMatrix)
-                val = dist(rng);
-            m_cachedLatentDim = (int)latentDim;
-        }
-
-        float normDepth = depth * (std::sqrt(16.0f) / std::sqrt((float)std::max((int64_t)1, latentDim)));
-
-        for (int64_t h = 0; h < numHarmonics; ++h)
-        {
-            float proj = m_rffMatrix[(size_t)(h * 2)] * lx + m_rffMatrix[(size_t)(h * 2 + 1)] * ly;
-            float cosOffset = normDepth * std::cos(proj);
-            float sinOffset = normDepth * std::sin(proj);
-
-            if (h < latentDim)
-            {
-                float* chPtr = buf.data + (h * length);
-                for (int64_t t = 0; t < length; ++t)
-                    chPtr[t] += cosOffset;
-            }
-            if ((numHarmonics + h) < latentDim)
-            {
-                float* chPtr = buf.data + ((numHarmonics + h) * length);
-                for (int64_t t = 0; t < length; ++t)
-                    chPtr[t] += sinOffset;
-            }
-        }
-    }
-    else if (mode == LatentMode::LatentSlew)
-    {
-        float slew = m_latentSlew.load();
-        if (m_prevLatentBuffer.size() == totalElems)
-        {
-            for (size_t i = 0; i < totalElems; ++i)
-            {
-                buf.data[i] = (1.0f - slew) * buf.data[i] + slew * m_prevLatentBuffer[i];
-            }
-        }
-        else
-        {
-            m_prevLatentBuffer.resize(totalElems);
-        }
-        std::memcpy(m_prevLatentBuffer.data(), buf.data, totalElems * sizeof(float));
-    }
-    else if (mode == LatentMode::Quantize)
-    {
-        float qStep = std::max(0.01f, depth * 0.5f);
-        for (size_t i = 0; i < totalElems; ++i)
-        {
-            buf.data[i] = std::round(buf.data[i] / qStep) * qStep;
-        }
-    }
-}
-
 //==============================================================================
-void NNBendingAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
-{
+auto NNBendingAudioProcessor::getStateInformation(juce::MemoryBlock& destData) -> void {
     juce::XmlElement xmlState ("NNBendingSettings");
     xmlState.setAttribute ("modelPath", m_modelPath);
     xmlState.setAttribute ("currentMethod", m_currentMethod);
     xmlState.setAttribute ("bufferSize", m_bufferSize);
     xmlState.setAttribute ("activeLayer", m_activeLayerName);
     xmlState.setAttribute ("dryWet", (double)getDryWet());
-    xmlState.setAttribute ("triggerMode", (int)m_triggerMode.load());
-    xmlState.setAttribute ("envAttack", (double)m_envAttack.load());
-    xmlState.setAttribute ("envRelease", (double)m_envRelease.load());
-    xmlState.setAttribute ("transientThresh", (double)m_transientThreshold.load());
+    xmlState.setAttribute ("triggerMode", (int)getTriggerMode());
+    xmlState.setAttribute ("envAttack", (double)getEnvelopeAttack());
+    xmlState.setAttribute ("envRelease", (double)getEnvelopeRelease());
+    xmlState.setAttribute ("transientThresh", (double)getTransientThreshold());
 
-    std::lock_guard<std::mutex> lock(m_layerStateMutex);
     auto* layersElement = xmlState.createNewChildElement ("Layers");
-    for (const auto& pair : m_layerStates)
+    auto allStates = m_bending_manager.get_all_layer_states();
+    for (const auto& pair : allStates)
     {
         auto* layerEl = layersElement->createNewChildElement ("Layer");
         layerEl->setAttribute ("name", pair.first);
@@ -1101,8 +728,7 @@ void NNBendingAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
     copyXmlToBinary (xmlState, destData);
 }
 
-void NNBendingAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
-{
+auto NNBendingAudioProcessor::setStateInformation(const void* data, int sizeInBytes) -> void {
     std::unique_ptr<juce::XmlElement> xmlState (getXmlFromBinary (data, sizeInBytes));
     if (xmlState != nullptr)
     {
@@ -1131,23 +757,21 @@ void NNBendingAudioProcessor::setStateInformation (const void* data, int sizeInB
             auto* layersElement = xmlState->getChildByName ("Layers");
             if (layersElement != nullptr)
             {
-                std::lock_guard<std::mutex> lock(m_layerStateMutex);
                 for (auto* layerEl : layersElement->getChildIterator())
                 {
                     std::string name = layerEl->getStringAttribute ("name").toStdString();
                     if (!name.empty())
                     {
-                        auto& state = m_layerStates[name];
-                        state.scale = (float)layerEl->getDoubleAttribute ("scale", 1.0);
-                        state.offset = (float)layerEl->getDoubleAttribute ("offset", 0.0);
-                        // Read heat, fallback to jitter if older project
+                        float scale = (float)layerEl->getDoubleAttribute ("scale", 1.0);
+                        float offset = (float)layerEl->getDoubleAttribute ("offset", 0.0);
                         double heatVal = layerEl->getDoubleAttribute ("heat", -1.0);
                         if (heatVal < 0.0)
                             heatVal = layerEl->getDoubleAttribute ("jitter", 0.0);
-                        state.heat = (float)heatVal;
-                        state.memory = (float)layerEl->getDoubleAttribute ("memory", 0.8);
-                        state.driftMode = (DriftMode)layerEl->getIntAttribute ("driftMode", 0);
-                        state.frozen = layerEl->getBoolAttribute ("frozen", false);
+                        float heat = (float)heatVal;
+                        float memory = (float)layerEl->getDoubleAttribute ("memory", 0.8);
+                        auto driftMode = (DriftMode)layerEl->getIntAttribute ("driftMode", 0);
+                        bool frozen = layerEl->getBoolAttribute ("frozen", false);
+                        m_bending_manager.restore_layer_state(name, scale, offset, heat, memory, driftMode, frozen);
                     }
                 }
             }
@@ -1156,15 +780,12 @@ void NNBendingAudioProcessor::setStateInformation (const void* data, int sizeInB
 }
 
 //==============================================================================
-juce::AudioProcessorEditor* NNBendingAudioProcessor::createEditor()
-{
+auto NNBendingAudioProcessor::createEditor() -> juce::AudioProcessorEditor* {
     return new NNBendingAudioProcessorEditor (*this);
 }
 
 //==============================================================================
 // This creates the filter...
-juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
-{
+auto JUCE_CALLTYPE createPluginFilter() -> juce::AudioProcessor* {
     return new NNBendingAudioProcessor();
 }
-

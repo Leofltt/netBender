@@ -139,6 +139,3 @@ public:
     {5, "buffer"} 
   };
 };
-
-// Backward-compatible alias for existing frontend code
-using Backend = TorchBackend;
