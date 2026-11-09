@@ -3,12 +3,16 @@ project(nn_bending_tests)
 
 add_executable(test_backends
     test_backends.cpp
+    "${CMAKE_SOURCE_DIR}/frontend/juce/dsp/AudioRingBuffer.cpp"
+    "${CMAKE_SOURCE_DIR}/frontend/juce/core/SafetySentry.cpp"
 )
 
 target_include_directories(test_backends PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_SOURCE_DIR}/backend"
     "${CMAKE_SOURCE_DIR}/shared"
+    "${CMAKE_SOURCE_DIR}/frontend/juce/dsp"
+    "${CMAKE_SOURCE_DIR}/frontend/juce/core"
     "${ONNXRUNTIME_INCLUDE_DIR}"
 )
 

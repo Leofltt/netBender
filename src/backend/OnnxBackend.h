@@ -136,6 +136,7 @@ private:
     int m_in_channels { 1 };
     int m_out_channels { 1 };
     int m_higher_ratio { 1 };
+    int m_buffer_size { 0 };
     int m_latent_dim { 64 };
     float m_latent_scale { 1.0f };
     int m_decode_latent_steps { 0 };

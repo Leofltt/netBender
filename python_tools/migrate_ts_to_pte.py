@@ -534,14 +534,32 @@ def extract_nn_tilde_metadata(ts_mod: torch.jit.ScriptModule, default_buffer_siz
             pass
 
     sr = 44100
-    for sr_attr in ("sr", "_sr", "sample_rate", "sampling_rate"):
-        if hasattr(ts_mod, sr_attr):
-            try:
-                val = getattr(ts_mod, sr_attr)
-                sr = int(val() if callable(val) else val)
-                break
-            except Exception:
-                pass
+    found_sr = False
+    for target in (ts_mod, getattr(ts_mod, "_rave", None)):
+        if target is None or found_sr:
+            continue
+        for sr_attr in ("sr", "_sr", "sample_rate", "sampling_rate", "get_sample_rate"):
+            if hasattr(target, sr_attr):
+                try:
+                    val = getattr(target, sr_attr)
+                    cand = int(val() if callable(val) else (val.item() if hasattr(val, "item") else val))
+                    if cand > 0:
+                        sr = cand
+                        found_sr = True
+                        break
+                except Exception:
+                    pass
+    if not found_sr:
+        try:
+            for bname, bval in ts_mod.named_buffers():
+                if "sampling_rate" in bname or "sample_rate" in bname:
+                    if bval.numel() == 1:
+                        cand = int(bval.item())
+                        if cand > 0:
+                            sr = cand
+                            break
+        except Exception:
+            pass
 
     higher_ratio = 1
     method_props: Dict[str, Any] = {}

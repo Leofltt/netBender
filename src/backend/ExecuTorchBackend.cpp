@@ -216,6 +216,7 @@ auto ExecuTorchBackend::load_metadata_and_sidecar(const std::string& base_path) 
 auto ExecuTorchBackend::load(std::string path, double sample_rate, const std::string* target_method) -> int {
     std::unique_lock<std::mutex> lock(m_session_mutex);
     m_loaded = false;
+    m_forward_use_autoencode = false;
     m_path = path;
     m_sample_rate = sample_rate > 0.0 ? sample_rate : 44100.0;
     m_model_sample_rate = m_sample_rate;
@@ -239,34 +240,68 @@ auto ExecuTorchBackend::load(std::string path, double sample_rate, const std::st
 #if defined(NETBENDER_HAS_EXECUTORCH) && NETBENDER_HAS_EXECUTORCH
     try {
         m_impl->companions.clear();
-        m_impl->module = std::make_unique<executorch::extension::Module>(
-            path, executorch::extension::Module::LoadMode::MmapUseMlockIgnoreErrors
-        );
-        auto err = m_impl->module->load();
-        if (err != executorch::runtime::Error::Ok) {
-            m_last_error = "ExecuTorch failed to load .pte program (error " + std::to_string((int)err) + ")";
-            std::cerr << "[ExecuTorchBackend] " << m_last_error << std::endl;
-            return -1;
+        m_impl->module.reset();
+
+        // CoreML / ANE has a ~255 dynamic input limit per program. If a model has >250 promoted
+        // bendable layers and both encode/decode companions exist, route forward through encode+decode
+        // directly without loading the monolithic combined forward program.
+        std::string del_lower = m_delegate;
+        std::transform(del_lower.begin(), del_lower.end(), del_lower.begin(), ::tolower);
+
+        bool check_split_coreml = (del_lower == "coreml" && m_available_layers.size() > 250);
+        bool has_enc_file = false;
+        bool has_dec_file = false;
+        if (check_split_coreml) {
+            std::ifstream fe(base + "_encode.pte", std::ios::binary);
+            has_enc_file = fe.good();
+            std::ifstream fd(base + "_decode.pte", std::ios::binary);
+            has_dec_file = fd.good();
         }
 
-        // Introspect methods directly from .pte program if not in JSON
-        auto method_names_res = m_impl->module->method_names();
-        if (method_names_res.ok()) {
-            m_available_methods.clear();
-            for (const auto& name : method_names_res.get()) {
-                // Skip constant attribute getter methods when populating audio methods
-                if (name == "sr" || name == "get_sample_rate" || name == "encode_params" || name == "decode_params" || name == "forward_params") {
-                    continue;
+        if (check_split_coreml && has_enc_file && has_dec_file) {
+            m_forward_use_autoencode = true;
+            if (std::find(m_available_methods.begin(), m_available_methods.end(), "forward") == m_available_methods.end()) {
+                m_available_methods.insert(m_available_methods.begin(), "forward");
+            }
+        } else {
+            m_impl->module = std::make_unique<executorch::extension::Module>(
+                path, executorch::extension::Module::LoadMode::MmapUseMlockIgnoreErrors
+            );
+            auto err = m_impl->module->load();
+            if (err != executorch::runtime::Error::Ok) {
+                m_last_error = "ExecuTorch failed to load .pte program (error " + std::to_string((int)err) + ")";
+                std::cerr << "[ExecuTorchBackend] " << m_last_error << std::endl;
+                return -1;
+            }
+
+            // Introspect methods directly from .pte program if not in JSON
+            auto method_names_res = m_impl->module->method_names();
+            if (method_names_res.ok()) {
+                for (const auto& name : method_names_res.get()) {
+                    if (name == "sr" || name == "get_sample_rate" || name == "encode_params" || name == "decode_params" || name == "forward_params") {
+                        continue;
+                    }
+                    if (std::find(m_available_methods.begin(), m_available_methods.end(), name) == m_available_methods.end()) {
+                        m_available_methods.push_back(name);
+                    }
                 }
-                m_available_methods.push_back(name);
             }
         }
 
-        // Also check for companion _encode.pte, _decode.pte, _prior.pte files
+        // Check for companion _encode.pte, _decode.pte, _prior.pte files ONLY if not natively in main module
         const std::vector<std::string> potential_companions = { "encode", "decode", "prior" };
         for (const auto& meth : potential_companions) {
-            if ( std::find(m_available_methods.begin(), m_available_methods.end(), meth) != m_available_methods.end() ) {
-                continue;
+            bool main_has_meth = false;
+            if (m_impl->module) {
+                auto m_res = m_impl->module->method_names();
+                if (m_res.ok()) {
+                    for (const auto& name : m_res.get()) {
+                        if (name == meth) { main_has_meth = true; break; }
+                    }
+                }
+            }
+            if (main_has_meth) {
+                continue; // Method already natively available in loaded main program
             }
             std::string comp_path = base + "_" + meth + ".pte";
             std::ifstream f(comp_path, std::ios::binary);
@@ -277,7 +312,9 @@ auto ExecuTorchBackend::load(std::string path, double sample_rate, const std::st
                 );
                 if (comp_mod->load() == executorch::runtime::Error::Ok) {
                     m_impl->companions[meth] = std::move(comp_mod);
-                    m_available_methods.push_back(meth);
+                    if (std::find(m_available_methods.begin(), m_available_methods.end(), meth) == m_available_methods.end()) {
+                        m_available_methods.push_back(meth);
+                    }
                 }
             }
         }
@@ -314,14 +351,25 @@ auto ExecuTorchBackend::load(std::string path, double sample_rate, const std::st
                 auto in0_res = meta.input_tensor_meta(0);
                 if (in0_res.ok()) {
                     auto sizes = in0_res.get().sizes();
+                    if (sizes.size() >= 2 && sizes[1] > 0 && m_available_layers.empty()) {
+                        m_in_channels = (int)sizes[1];
+                    }
                     if (sizes.size() >= 3) {
-                        int compiled_len = sizes[2];
-                        if (compiled_len > 0 && (int)(m_history_samples + m_buffer_size) != compiled_len) {
-                            if (compiled_len == m_buffer_size || compiled_len == 2048) {
-                                m_history_samples = 0;
-                                m_output_offset = 0;
+                        int compiled_len = (int)sizes[2];
+                        if (compiled_len > 0) {
+                            if (m_history_samples > 0 && compiled_len > (int)m_history_samples) {
+                                m_buffer_size = compiled_len - (int)m_history_samples;
+                            } else if (m_history_samples == 0) {
+                                m_buffer_size = compiled_len;
                             }
                         }
+                    }
+                }
+                auto out0_res = meta.output_tensor_meta(0);
+                if (out0_res.ok()) {
+                    auto out_sizes = out0_res.get().sizes();
+                    if (out_sizes.size() >= 2 && out_sizes[1] > 0 && m_available_layers.empty()) {
+                        m_out_channels = (int)out_sizes[1];
                     }
                 }
             }
@@ -334,8 +382,14 @@ auto ExecuTorchBackend::load(std::string path, double sample_rate, const std::st
                 auto dec_in0 = dec_meta_res.get().input_tensor_meta(0);
                 if (dec_in0.ok()) {
                     auto sizes = dec_in0.get().sizes();
+                    if (sizes.size() >= 2 && sizes[1] > 0 && m_available_layers.empty()) {
+                        m_latent_dim = (int)sizes[1];
+                    }
                     if (sizes.size() >= 3 && sizes[2] > 0) {
-                        m_decode_latent_steps = sizes[2];
+                        m_decode_latent_steps = (int)sizes[2];
+                        if (m_higher_ratio <= 1 && m_buffer_size > 0 && m_decode_latent_steps > 0) {
+                            m_higher_ratio = std::max(1, m_buffer_size / m_decode_latent_steps);
+                        }
                     }
                 }
             }
@@ -350,9 +404,9 @@ auto ExecuTorchBackend::load(std::string path, double sample_rate, const std::st
     }
 
     m_loaded = true;
-    clear_decode_gen_fifo();
     m_last_error.clear();
-    lock.unlock(); // Unlock before warm-up so inference methods can acquire session mutex
+    lock.unlock(); // Unlock before FIFO clear & warm-up so methods can acquire session mutex
+    clear_decode_gen_fifo();
 
     // Warm up ExecuTorch delegate (CoreML / XNNPACK) to pre-allocate memory and compile graph
     try {
@@ -425,8 +479,7 @@ auto ExecuTorchBackend::perform(std::vector<float*>& in_buffer,
         return;
     }
 
-    std::unique_lock<std::mutex> lock(m_session_mutex, std::try_to_lock);
-    if (!lock.owns_lock()) return;
+    std::unique_lock<std::mutex> lock(m_session_mutex);
 
 #if defined(NETBENDER_HAS_EXECUTORCH) && NETBENDER_HAS_EXECUTORCH
     executorch::extension::Module* target_mod = m_impl->module.get();
@@ -483,11 +536,20 @@ auto ExecuTorchBackend::perform(std::vector<float*>& in_buffer,
         inputs.push_back(audio_tensor);
 
         // Bind any promoted bendable parameter tensors for this method
+        int num_method_inputs = 1;
+        try {
+            auto meta_res = target_mod->method_meta(exec_method);
+            if (meta_res.ok()) {
+                num_method_inputs = (int)meta_res.get().num_inputs();
+            }
+        } catch (...) {}
+
         std::vector<executorch::extension::TensorPtr> param_tensors;
         auto pm_it = m_method_param_inputs.find(method);
-        if (pm_it != m_method_param_inputs.end()) {
+        if (num_method_inputs > 1 && pm_it != m_method_param_inputs.end()) {
             param_tensors.reserve(pm_it->second.size());
             for (const auto& pname : pm_it->second) {
+                if ((int)inputs.size() >= num_method_inputs) break;
                 auto pit = m_parameters.find(pname);
                 if (pit != m_parameters.end()) {
                     std::vector<executorch::aten::SizesType> psizes;
@@ -500,6 +562,12 @@ auto ExecuTorchBackend::perform(std::vector<float*>& in_buffer,
         }
 
         auto result = target_mod->execute(exec_method, inputs);
+        if (!result.ok() && method == "forward" && has_autoencode()) {
+            m_forward_use_autoencode = true;
+            lock.unlock();
+            perform_forward(in_buffer, out_buffer, n_batches, n_out_channels, n_vec, nullptr);
+            return;
+        }
         if (result.ok() && !result.get().empty() && result.get()[0].isTensor()) {
             auto out_tensor = result.get()[0].toTensor();
             const float* out_data = out_tensor.const_data_ptr<float>();
@@ -509,10 +577,11 @@ auto ExecuTorchBackend::perform(std::vector<float*>& in_buffer,
             if (method == "encode") {
                 int target_latent_steps = std::max(1, m_decode_latent_steps);
                 int copy_samples = std::min(target_latent_steps, out_samples);
+                int latent_offset = std::max(0, out_samples - copy_samples);
                 for (int c = 0; c < out_ch; ++c) {
                     if (out_buffer[c]) {
                         if (copy_samples > 0) {
-                            std::memcpy(out_buffer[c], out_data + (c * out_samples), copy_samples * sizeof(float));
+                            std::memcpy(out_buffer[c], out_data + (c * out_samples) + latent_offset, copy_samples * sizeof(float));
                         }
                         if (copy_samples < target_latent_steps) {
                             std::memset(out_buffer[c] + copy_samples, 0, (target_latent_steps - copy_samples) * sizeof(float));
@@ -562,8 +631,30 @@ auto ExecuTorchBackend::perform_forward(std::vector<float*>& in_buffer,
                                         std::vector<float*>& out_buffer,
                                         int n_batches, int n_out_channels, int n_vec,
                                         LatentHook latent_hook) -> void {
-    if (has_autoencode()) {
+    // If no latent hook is active and a native forward method exists, run it directly
+    if (!latent_hook && !m_forward_use_autoencode && has_method("forward")) {
+        perform(in_buffer, out_buffer, "forward", n_batches, n_out_channels, n_vec);
+        return;
+    }
+
+    if ((latent_hook || m_forward_use_autoencode || !has_method("forward")) && has_autoencode()) {
 #if defined(NETBENDER_HAS_EXECUTORCH) && NETBENDER_HAS_EXECUTORCH
+        if (m_buffer_size > 0 && n_vec > m_buffer_size && (n_vec % m_buffer_size == 0)) {
+            int chunks = n_vec / m_buffer_size;
+            for (int chk = 0; chk < chunks; ++chk) {
+                std::vector<float*> chunk_in(in_buffer.size());
+                for (size_t c = 0; c < in_buffer.size(); ++c) {
+                    chunk_in[c] = in_buffer[c] ? in_buffer[c] + (chk * m_buffer_size) : nullptr;
+                }
+                std::vector<float*> chunk_out(out_buffer.size());
+                for (size_t c = 0; c < out_buffer.size(); ++c) {
+                    chunk_out[c] = out_buffer[c] ? out_buffer[c] + (chk * m_buffer_size) : nullptr;
+                }
+                perform_forward(chunk_in, chunk_out, n_batches, n_out_channels, m_buffer_size, latent_hook);
+            }
+            return;
+        }
+
         int latent_steps = std::max(1, m_decode_latent_steps);
         std::vector<std::vector<float>> latent_storage(m_latent_dim, std::vector<float>(latent_steps, 0.0f));
         std::vector<float*> latent_ptrs(m_latent_dim);
@@ -772,7 +863,6 @@ auto ExecuTorchBackend::get_layer_weights(std::string layer_name) -> std::vector
 }
 
 auto ExecuTorchBackend::get_original_layer_weights(std::string layer_name) -> std::vector<float> {
-    std::lock_guard<std::mutex> lock(m_session_mutex);
     auto it = m_parameters.find(layer_name);
     if (it != m_parameters.end()) {
         return it->second.original_weights;
@@ -781,7 +871,6 @@ auto ExecuTorchBackend::get_original_layer_weights(std::string layer_name) -> st
 }
 
 auto ExecuTorchBackend::get_layer_shape(std::string layer_name) -> std::vector<int64_t> {
-    std::lock_guard<std::mutex> lock(m_session_mutex);
     auto it = m_parameters.find(layer_name);
     if (it != m_parameters.end()) {
         return it->second.shape;

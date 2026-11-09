@@ -96,17 +96,46 @@ auto BendingManager::set_layer_drawn_weights(const std::string& layer_name, cons
 
 auto BendingManager::set_layer_original_weights(const std::string& layer_name, const std::vector<float>& weights) -> void {
     std::lock_guard<std::mutex> lock(m_mutex);
-    m_layer_states[layer_name].originalWeights = weights;
+    auto& state = m_layer_states[layer_name];
+    state.originalWeights = weights;
+    if (state.drawnWeights.empty()) {
+        state.drawnWeights = weights;
+        if (std::abs(state.scale - 1.0f) <= 0.0001f &&
+            std::abs(state.offset) <= 0.0001f &&
+            state.heat <= 0.0001f &&
+            (state.bridgeDepth <= 0.001f || state.bridgeSourceLayer.empty())) {
+            state.isApplied = true;
+        }
+    }
 }
 
 auto BendingManager::clear_layer_bending(const std::string& layer_name) -> void {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_layer_states.erase(layer_name);
+    if (!layer_name.empty()) {
+        m_pending_reset_layers.push_back(layer_name);
+    }
 }
 
 auto BendingManager::clear_all_layer_bending() -> void {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_layer_states.clear();
+    m_pending_reset_layers.clear();
+    m_pending_reset_all = true;
+}
+
+auto BendingManager::get_layer_live_weights(const std::string& layer_name) const -> std::vector<float> {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_layer_states.find(layer_name);
+    if (it != m_layer_states.end()) {
+        if (it->second.isApplied && !it->second.scratchFinal.empty()) {
+            return it->second.scratchFinal;
+        }
+        if (!it->second.originalWeights.empty()) {
+            return it->second.originalWeights;
+        }
+    }
+    return {};
 }
 
 auto BendingManager::has_active_bending() const -> bool {
@@ -172,23 +201,46 @@ auto BendingManager::apply_bending(
 
     std::lock_guard<std::mutex> lock(m_mutex);
 
+    if (m_atomic_reset_all_requested.exchange(false)) {
+        m_layer_states.clear();
+        m_pending_reset_layers.clear();
+        m_pending_reset_all = true;
+    }
+
+    if (m_pending_reset_all) {
+        backend->reset_all_layer_weights();
+        m_pending_reset_all = false;
+        m_pending_reset_layers.clear();
+    } else if (!m_pending_reset_layers.empty()) {
+        for (const auto& rst_layer : m_pending_reset_layers) {
+            backend->reset_layer_weights(rst_layer);
+        }
+        m_pending_reset_layers.clear();
+    }
+
     // Update active layer from automated DAW parameters
     if (!active_layer_name.empty()) {
-        auto& state = m_layer_states[active_layer_name];
-        float new_scale = param_scale;
-        float new_offset = param_offset;
-        float new_heat = param_heat;
-        float new_memory = (param_memory >= 0.0f) ? param_memory : state.memory;
+        auto it = m_layer_states.find(active_layer_name);
+        bool is_non_default = (std::abs(param_scale - 1.0f) > 0.0001f ||
+                               std::abs(param_offset) > 0.0001f ||
+                               param_heat > 0.0001f);
+        if (it != m_layer_states.end() || is_non_default) {
+            auto& state = m_layer_states[active_layer_name];
+            float new_scale = param_scale;
+            float new_offset = param_offset;
+            float new_heat = param_heat;
+            float new_memory = (param_memory >= 0.0f) ? param_memory : state.memory;
 
-        if (std::abs(state.scale - new_scale) > 0.0001f ||
-            std::abs(state.offset - new_offset) > 0.0001f ||
-            std::abs(state.heat - new_heat) > 0.0001f ||
-            std::abs(state.memory - new_memory) > 0.0001f) {
-            state.scale = new_scale;
-            state.offset = new_offset;
-            state.heat = new_heat;
-            state.memory = new_memory;
-            state.isApplied = false;
+            if (std::abs(state.scale - new_scale) > 0.0001f ||
+                std::abs(state.offset - new_offset) > 0.0001f ||
+                std::abs(state.heat - new_heat) > 0.0001f ||
+                std::abs(state.memory - new_memory) > 0.0001f) {
+                state.scale = new_scale;
+                state.offset = new_offset;
+                state.heat = new_heat;
+                state.memory = new_memory;
+                state.isApplied = false;
+            }
         }
     }
 
@@ -222,6 +274,20 @@ auto BendingManager::apply_bending(
     for (auto& pair : m_layer_states) {
         const std::string& layer_name = pair.first;
         LayerBendingState& state = pair.second;
+
+        bool has_drift = (state.heat > 0.0001f && !state.frozen);
+        if (!has_drift) {
+            if (mode == TriggerMode::Continuous && state.isApplied) {
+                continue;
+            }
+            if (mode != TriggerMode::Continuous && current_env <= 0.001f && !state.isApplied) {
+                continue;
+            }
+            if (mode != TriggerMode::Continuous && current_env > 0.001f &&
+                std::abs(current_env - state.lastAppliedEnv) <= 0.002f) {
+                continue;
+            }
+        }
 
         if (state.originalWeights.empty()) {
             state.originalWeights = backend->get_original_layer_weights(layer_name);

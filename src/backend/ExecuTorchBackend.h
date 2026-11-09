@@ -107,6 +107,7 @@ private:
     double m_model_sample_rate { 44100.0 };
     bool m_loaded { false };
     bool m_use_gpu { false };
+    bool m_forward_use_autoencode { false };
     std::string m_last_error;
     std::mutex m_session_mutex;
 

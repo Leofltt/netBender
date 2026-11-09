@@ -156,24 +156,7 @@ auto NetBenderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juc
         m_bending_manager.update_audio_envelope(maxPeak);
     }
     
-    // 1. If inference output is ready from background thread, transfer to output ring buffers
-    if (m_output_ready.load())
-    {
-        std::unique_lock<std::mutex> lock(m_staging_mutex, std::try_to_lock);
-        if (lock.owns_lock())
-        {
-            if (m_output_ready.load())
-            {
-                int n_outs = std::min((int)m_out_buffers.size(), (int)m_staging_out.size());
-                for (int c = 0; c < n_outs; ++c)
-                {
-                    m_out_buffers[c].put(m_staging_out[c].data(), m_bufferSize);
-                }
-                m_output_ready.store(false);
-            }
-        }
-    }
-    
+
     // 2. Feed incoming audio into dry delay buffers (for all modes) and model inputs (for forward mode)
     int numDryChannels = (int)m_dry_delay_buffers.size();
     for (int c = 0; c < numDryChannels; ++c)
@@ -267,14 +250,20 @@ auto NetBenderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juc
     if (resampling && hostSr > 0.0 && modelSr > 0.0)
     {
         double outRatio = modelSr / hostSr;
+        int requiredModelSamples = (int)std::ceil(numSamples * outRatio) + 2;
         int masterConsumed = 0;
 
         for (int c = 0; c < n_outs; ++c)
         {
             if (c < (int)m_output_resamplers.size() && c < (int)m_resampled_out_scratch.size())
             {
-                int maxScratch = (int)m_resampled_out_scratch[c].size();
-                m_out_buffers[c].peek(m_resampled_out_scratch[c].data(), maxScratch);
+                int peekCount = std::min(requiredModelSamples, (int)m_resampled_out_scratch[c].size());
+                int avail = m_out_buffers[c].peek(m_resampled_out_scratch[c].data(), peekCount);
+                if (avail < peekCount)
+                {
+                    std::fill(m_resampled_out_scratch[c].begin() + avail,
+                              m_resampled_out_scratch[c].begin() + peekCount, 0.0f);
+                }
 
                 int consumed = m_output_resamplers[c].process(
                     outRatio,
@@ -283,7 +272,7 @@ auto NetBenderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juc
                     numSamples
                 );
 
-                if (c == 0) masterConsumed = consumed;
+                if (c == 0) masterConsumed = std::min(consumed, avail);
             }
             else
             {
@@ -337,8 +326,11 @@ auto NetBenderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juc
         }
     }
 
-    // Auto-recovery handling if enabled
-    m_safety_sentry.tick_recovery([this] { resetFuse(); });
+    // Auto-recovery handling if enabled (lock-free & allocation-free on audio thread)
+    m_safety_sentry.tick_recovery([this] {
+        m_safety_sentry.reset_fuse();
+        m_bending_manager.request_audio_thread_reset_all();
+    });
 }
 
 //==============================================================================
@@ -391,7 +383,10 @@ auto NetBenderAudioProcessor::loadModel(const juce::File& file) -> bool {
                         break;
                     }
                 }
-                m_currentMethod = defaultMode;
+                {
+                    std::lock_guard<std::mutex> stateLock(m_state_mutex);
+                    m_currentMethod = defaultMode;
+                }
                 
                 auto params = m_backend->get_mode_params(defaultMode);
                 if (params.size() >= 4)
@@ -417,8 +412,13 @@ auto NetBenderAudioProcessor::loadModel(const juce::File& file) -> bool {
                 m_bufferSize = std::max(minBufferForRatio, reqSize * 2);
             }
             
-            // Reset latent terrain cached matrices on new model load
+            // Reset latent terrain cached matrices and stale layer bending states on new model load
             m_latent_engine.reset();
+            m_bending_manager.clear_all_layer_bending();
+            {
+                std::lock_guard<std::mutex> stateLock(m_state_mutex);
+                m_activeLayerName = "";
+            }
 
             // Query model sample rate vs host sample rate
             double hostSr = getSampleRate();
@@ -454,7 +454,10 @@ auto NetBenderAudioProcessor::setCurrentMethod(const juce::String& method) -> vo
     if (isValidMode) {
         int prevIn = m_model_in;
         int prevOut = m_model_out;
-        m_currentMethod = method;
+        {
+            std::lock_guard<std::mutex> stateLock(m_state_mutex);
+            m_currentMethod = method;
+        }
         auto params = m_backend->get_mode_params(methodStr);
         if (params.size() >= 4) {
             m_model_in = params[0];
@@ -464,7 +467,10 @@ auto NetBenderAudioProcessor::setCurrentMethod(const juce::String& method) -> vo
         if (prevIn != m_model_in || prevOut != m_model_out) {
             initBuffers();
         } else {
-            m_backend->clear_decode_gen_fifo();
+            m_pendingClearFifo.store(true);
+            if (!m_model_thread.isThreadRunning() && m_backend) {
+                m_backend->clear_decode_gen_fifo();
+            }
         }
     }
 }
@@ -487,7 +493,7 @@ auto NetBenderAudioProcessor::setUseGpu(bool enabled) -> void {
         return;
     }
 
-    juce::String savedMethod = m_currentMethod;
+    juce::String savedMethod = getCurrentMethod();
     juce::File targetFile(m_modelPath);
 
     // For .pte models, automatically swap between sibling *_xnnpack.pte (CPU) and *_coreml.pte (GPU/ANE) if present
@@ -577,16 +583,17 @@ auto NetBenderAudioProcessor::initBuffers() -> void {
             m_dry_delay_buffers[i].put(nullptr, latencySamples);
     }
     
+    int modelLatencySamples = (m_model_in > 0) ? (m_bufferSize * 2) : 0;
     for (int i = 0; i < n_out; ++i)
     {
         m_out_buffers[i].init(m_bufferSize);
         m_staging_out[i].assign(m_bufferSize, 0.0f);
         m_worker_out[i].assign(m_bufferSize, 0.0f);
-        // Pre-fill output buffer with latency cushion in forward mode
+        // Pre-fill output buffer with latency cushion in model sample units
         // to prevent starvation during background model inference and align with dry delay buffer
-        if (m_model_in > 0 && latencySamples > 0)
+        if (modelLatencySamples > 0)
         {
-            m_out_buffers[i].put(nullptr, latencySamples);
+            m_out_buffers[i].put(nullptr, modelLatencySamples);
         }
     }
     
@@ -607,13 +614,26 @@ auto NetBenderAudioProcessor::runInference() -> void {
     if (!m_modelLoaded.load() || m_model_out <= 0)
         return;
 
+    std::string activeLayerStr;
+    std::string modeStr;
+    IBackend::LatentHook userLatentHook;
+    {
+        std::lock_guard<std::mutex> stateLock(m_state_mutex);
+        activeLayerStr = m_activeLayerName.toStdString();
+        modeStr = m_currentMethod.toStdString();
+        userLatentHook = m_latentHook;
+    }
+
+    if (m_pendingClearFifo.exchange(false) && m_backend)
+        m_backend->clear_decode_gen_fifo();
+
     // 1. Update and apply weight bending to backend
     float scaleVal = m_scaleParam ? m_scaleParam->get() : 1.0f;
     float offsetVal = m_offsetParam ? m_offsetParam->get() : 0.0f;
     float heatVal = m_heatParam ? m_heatParam->get() : 0.0f;
     float memVal = m_memoryParam ? m_memoryParam->get() : -1.0f;
     bool shortVal = m_shortCircuitParam ? m_shortCircuitParam->get() : false;
-    m_bending_manager.apply_bending(m_backend.get(), m_activeLayerName.toStdString(), scaleVal, offsetVal, heatVal, memVal, shortVal);
+    m_bending_manager.apply_bending(m_backend.get(), activeLayerStr, scaleVal, offsetVal, heatVal, memVal, shortVal);
 
     // 2. Copy audio inputs from staging buffers to local worker buffers under a brief lock
     {
@@ -637,11 +657,10 @@ auto NetBenderAudioProcessor::runInference() -> void {
     for (int c = 0; c < numOut; ++c)
         out_ptrs.emplace_back(m_worker_out[c].data());
         
-    std::string modeStr = m_currentMethod.toStdString();
     if (modeStr == "forward")
     {
         // Compose latent hook: if user hook is set, use it; otherwise if latent terrain is enabled, execute it!
-        IBackend::LatentHook activeHook = m_latentHook;
+        IBackend::LatentHook activeHook = userLatentHook;
         if (!activeHook && m_latent_engine.is_enabled())
         {
             float lx = m_latentXParam ? m_latentXParam->get() : -999.0f;
@@ -658,7 +677,7 @@ auto NetBenderAudioProcessor::runInference() -> void {
     else if (modeStr == "decode gen")
     {
         // Autonomous neural synthesis: generate latent trajectory with Pad/Drift/Harmonics and decode
-        IBackend::LatentHook activeHook = m_latentHook;
+        IBackend::LatentHook activeHook = userLatentHook;
         if (!activeHook)
         {
             float lx = m_latentXParam ? m_latentXParam->get() : -999.0f;
@@ -683,28 +702,23 @@ auto NetBenderAudioProcessor::runInference() -> void {
             m_backend->perform(in_ptrs, out_ptrs, modeStr, 1, m_model_out, m_bufferSize);
     }
 
-    // 3. Transfer computed output back to staging_out under a brief lock
+    // 3. Push computed output directly into output ring buffers
+    for (int c = 0; c < m_model_out; ++c)
     {
-        std::lock_guard<std::mutex> lock(m_staging_mutex);
-        for (int c = 0; c < m_model_out; ++c)
+        if (c < (int)m_out_buffers.size() && c < (int)m_worker_out.size())
         {
-            if (c < (int)m_staging_out.size() && c < (int)m_worker_out.size())
-            {
-                std::memcpy(m_staging_out[c].data(), m_worker_out[c].data(), m_bufferSize * sizeof(float));
-            }
+            m_out_buffers[c].put(m_worker_out[c].data(), m_bufferSize);
         }
     }
-    
-    m_output_ready.store(true);
 }
 
 //==============================================================================
 auto NetBenderAudioProcessor::getStateInformation(juce::MemoryBlock& destData) -> void {
     juce::XmlElement xmlState ("NetBenderSettings");
     xmlState.setAttribute ("modelPath", m_modelPath);
-    xmlState.setAttribute ("currentMethod", m_currentMethod);
+    xmlState.setAttribute ("currentMethod", getCurrentMethod());
     xmlState.setAttribute ("bufferSize", m_bufferSize);
-    xmlState.setAttribute ("activeLayer", m_activeLayerName);
+    xmlState.setAttribute ("activeLayer", getActiveLayerName());
     xmlState.setAttribute ("dryWet", (double)getDryWet());
     xmlState.setAttribute ("triggerMode", (int)getTriggerMode());
     xmlState.setAttribute ("envAttack", (double)getEnvelopeAttack());
@@ -736,7 +750,7 @@ auto NetBenderAudioProcessor::setStateInformation(const void* data, int sizeInBy
         {
             m_bufferSize = xmlState->getIntAttribute ("bufferSize", 2048);
             setDryWet ((float)xmlState->getDoubleAttribute ("dryWet", 1.0));
-            m_activeLayerName = xmlState->getStringAttribute ("activeLayer");
+            setActiveLayerName (xmlState->getStringAttribute ("activeLayer"));
             setTriggerMode ((TriggerMode)xmlState->getIntAttribute ("triggerMode", 0));
             setEnvelopeAttack ((float)xmlState->getDoubleAttribute ("envAttack", 0.25));
             setEnvelopeRelease ((float)xmlState->getDoubleAttribute ("envRelease", 0.85));

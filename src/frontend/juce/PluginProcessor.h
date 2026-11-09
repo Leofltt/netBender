@@ -55,9 +55,12 @@ public:
     auto getTorchBackend() -> TorchBackend* { return dynamic_cast<TorchBackend*>(m_backend.get()); }
     auto isModelLoaded() const -> bool { return m_modelLoaded.load(); }
     auto getModelPath() const -> juce::String { return m_modelPath; }
-    auto getCurrentMethod() const -> juce::String { return m_currentMethod; }
+    auto getCurrentMethod() const -> juce::String {
+        std::lock_guard<std::mutex> lock(m_state_mutex);
+        return m_currentMethod;
+    }
     auto setCurrentMethod(const juce::String& method) -> void;
-    auto getCurrentMode() const -> juce::String { return m_currentMethod; }
+    auto getCurrentMode() const -> juce::String { return getCurrentMethod(); }
     auto setCurrentMode(const juce::String& mode) -> void { setCurrentMethod(mode); }
     auto getAvailableModes() const -> std::vector<juce::String>;
     auto getBufferSize() const -> int { return m_bufferSize; }
@@ -68,7 +71,10 @@ public:
     auto setUseGpu(bool enabled) -> void;
 
     // Latent bending engine
-    auto setLatentHook(IBackend::LatentHook hook) -> void { m_latentHook = hook; }
+    auto setLatentHook(IBackend::LatentHook hook) -> void {
+        std::lock_guard<std::mutex> lock(m_state_mutex);
+        m_latentHook = std::move(hook);
+    }
     auto setLatentMode(LatentMode mode) -> void { m_latent_engine.set_mode(mode); }
     auto getLatentMode() const -> LatentMode { return m_latent_engine.get_mode(); }
     auto setLatentEnabled(bool enabled) -> void { m_latent_engine.set_enabled(enabled); }
@@ -117,17 +123,23 @@ public:
     auto setLayerDrawnWeights(const std::string& layerName, const std::vector<float>& weights) -> void { m_bending_manager.set_layer_drawn_weights(layerName, weights); }
     auto setLayerBaseWeights(const std::string& layerName, const std::vector<float>& weights) -> void { m_bending_manager.set_layer_base_weights(layerName, weights); }
     auto setLayerOriginalWeights(const std::string& layerName, const std::vector<float>& weights) -> void { m_bending_manager.set_layer_original_weights(layerName, weights); }
-    auto clearLayerBending(const std::string& layerName) -> void { m_bending_manager.clear_layer_bending(layerName); }
-    auto clearAllLayerBending() -> void { m_bending_manager.clear_all_layer_bending(); }
+    auto clearLayerBending(const std::string& layerName) -> void {
+        m_bending_manager.clear_layer_bending(layerName);
+        if (!m_model_thread.isThreadRunning() && m_backend)
+            m_backend->reset_layer_weights(layerName);
+    }
+    auto clearAllLayerBending() -> void {
+        m_bending_manager.clear_all_layer_bending();
+        if (!m_model_thread.isThreadRunning() && m_backend)
+            m_backend->reset_all_layer_weights();
+    }
     auto hasActiveBending() const -> bool { return m_bending_manager.has_active_bending(); }
 
     // Safety Sentry & Blown Fuse Control
     auto isFuseBlown() const -> bool { return m_safety_sentry.is_fuse_blown(); }
     auto resetFuse() -> void {
         m_safety_sentry.reset_fuse();
-        m_bending_manager.clear_all_layer_bending();
-        if (m_backend)
-            m_backend->reset_all_layer_weights();
+        clearAllLayerBending();
     }
     auto setAutoResetFuse(bool enabled) -> void { m_safety_sentry.set_auto_reset(enabled); }
     auto getAutoResetFuse() const -> bool { return m_safety_sentry.get_auto_reset(); }
@@ -146,8 +158,14 @@ public:
     auto getTransientThreshold() const -> float { return m_bending_manager.get_transient_threshold(); }
 
     // Active UI layer target for DAW automation mapping
-    auto setActiveLayerName(const juce::String& name) -> void { m_activeLayerName = name; }
-    auto getActiveLayerName() const -> juce::String { return m_activeLayerName; }
+    auto setActiveLayerName(const juce::String& name) -> void {
+        std::lock_guard<std::mutex> lock(m_state_mutex);
+        m_activeLayerName = name;
+    }
+    auto getActiveLayerName() const -> juce::String {
+        std::lock_guard<std::mutex> lock(m_state_mutex);
+        return m_activeLayerName;
+    }
 
     // Subsystem accessors
     auto getBendingManager() -> BendingManager& { return m_bending_manager; }
@@ -212,7 +230,9 @@ private:
     std::vector<std::vector<float>> m_worker_out;
 
     std::mutex m_staging_mutex;
+    mutable std::mutex m_state_mutex;
     std::atomic<bool> m_output_ready { false };
+    std::atomic<bool> m_pendingClearFifo { false };
 
     // Resampling infrastructure (Host SR <-> Model SR)
     std::atomic<double> m_hostSampleRate { 44100.0 };

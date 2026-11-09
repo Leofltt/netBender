@@ -78,6 +78,8 @@ public:
 
     auto clear_layer_bending(const std::string& layer_name) -> void;
     auto clear_all_layer_bending() -> void;
+    auto request_audio_thread_reset_all() -> void { m_atomic_reset_all_requested.store(true); }
+    [[nodiscard]] auto get_layer_live_weights(const std::string& layer_name) const -> std::vector<float>;
     [[nodiscard]] auto has_active_bending() const -> bool;
     [[nodiscard]] auto get_all_layer_states() const -> std::unordered_map<std::string, LayerBendingState>;
     auto restore_layer_state(const std::string& name, float scale, float offset, float heat, float memory, DriftMode drift_mode, bool frozen) -> void;
@@ -114,6 +116,9 @@ public:
 
 private:
     std::unordered_map<std::string, LayerBendingState> m_layer_states;
+    std::vector<std::string> m_pending_reset_layers;
+    bool m_pending_reset_all { false };
+    std::atomic<bool> m_atomic_reset_all_requested { false };
     mutable std::mutex m_mutex;
     juce::Random m_jitter_rng;
 

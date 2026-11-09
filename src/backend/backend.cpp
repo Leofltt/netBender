@@ -641,34 +641,55 @@ auto TorchBackend::set_sample_rate(double sample_rate) -> void {
 }
 
 auto TorchBackend::get_sample_rate() -> double {
-  if (has_method("get_sample_rate")) {
+  if (!m_loaded) return m_sr > 0 ? m_sr : 44100.0;
+  {
     std::unique_lock<std::mutex> model_lock(m_model_mutex);
-    auto args = empty_args();
-    auto kwargs = empty_kwargs();
-    try {
-      auto res = m_model.get_method("get_sample_rate")(args, kwargs);
-      model_lock.unlock();
-      if (res.isInt()) {
-        int sr = res.toInt();
-        if (sr > 0) return (double)sr;
-      } else if (res.isDouble()) {
-        double sr = res.toDouble();
-        if (sr > 0) return sr;
-      }
-    } catch (...) {
-      model_lock.unlock();
-    }
-  }
-  try {
-    for (const auto& buf : m_model.named_buffers()) {
-      if (buf.name.find("sampling_rate") != std::string::npos || buf.name.find("sample_rate") != std::string::npos) {
-        if (buf.value.numel() == 1) {
-          int64_t sr = buf.value.item<int64_t>();
+    if (m_model.find_method("get_sample_rate")) {
+      auto args = empty_args();
+      auto kwargs = empty_kwargs();
+      try {
+        auto res = m_model.get_method("get_sample_rate")(args, kwargs);
+        if (res.isInt()) {
+          int64_t sr = res.toInt();
           if (sr > 0) return (double)sr;
+        } else if (res.isDouble()) {
+          double sr = res.toDouble();
+          if (sr > 0) return sr;
+        }
+      } catch (...) {}
+    }
+    for (const char* attr_name : {"sr", "sampling_rate", "sample_rate"}) {
+      try {
+        if (m_model.hasattr(attr_name)) {
+          auto val = m_model.attr(attr_name);
+          if (val.isInt()) {
+            int64_t sr = val.toInt();
+            if (sr > 0) return (double)sr;
+          } else if (val.isDouble()) {
+            double sr = val.toDouble();
+            if (sr > 0) return sr;
+          } else if (val.isTensor()) {
+            auto t = val.toTensor();
+            if (t.numel() == 1) {
+              double sr = t.item<double>();
+              if (sr > 0) return sr;
+            }
+          }
+        }
+      } catch (...) {}
+    }
+    try {
+      for (const auto& buf : m_model.named_buffers()) {
+        if (buf.name.find("sampling_rate") != std::string::npos || buf.name.find("sample_rate") != std::string::npos) {
+          if (buf.value.numel() == 1) {
+            int64_t sr = buf.value.item<int64_t>();
+            if (sr > 0) return (double)sr;
+          }
         }
       }
-    }
-  } catch (...) {}
+    } catch (...) {}
+  }
+  if (get_higher_ratio() == 320) return 24000.0;
   return m_sr > 0 ? m_sr : 44100.0;
 }
 

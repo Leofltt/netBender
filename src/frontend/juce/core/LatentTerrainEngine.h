@@ -4,6 +4,7 @@
 #include <atomic>
 #include <vector>
 #include <cstdint>
+#include <mutex>
 
 enum class LatentMode {
     FourierOrbit = 0, // 2D XY mapped via Random Fourier Features into multidimensional latent space

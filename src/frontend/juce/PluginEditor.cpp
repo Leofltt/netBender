@@ -72,7 +72,6 @@ NetBenderAudioProcessorEditor::NetBenderAudioProcessorEditor (NetBenderAudioProc
             if (mode == NetBenderAudioProcessor::TriggerMode::Continuous)
             {
                 currentWeights = modifiedWeights;
-                audioProcessor.getBackend().set_layer_weights (currentBendingLayer.toStdString(), currentWeights);
                 weightCanvas.setTargetBentWeights ({});
             }
             else
@@ -381,7 +380,9 @@ auto NetBenderAudioProcessorEditor::buttonClicked(juce::Button* button) -> void 
             freeze_button.setColour (juce::ToggleButton::textColourId, UIConstants::Colors::drift_orange);
             if (currentBendingLayer.isNotEmpty())
             {
-                currentWeights = audioProcessor.getBackend().get_layer_weights (currentBendingLayer.toStdString());
+                currentWeights = audioProcessor.getBendingManager().get_layer_live_weights (currentBendingLayer.toStdString());
+                if (currentWeights.empty())
+                    currentWeights = audioProcessor.getBackend().get_layer_weights (currentBendingLayer.toStdString());
                 float scale = (float)scale_slider.getValue();
                 float offset = (float)offset_slider.getValue();
                 baseDrawnWeights.resize (currentWeights.size());
@@ -646,21 +647,21 @@ auto NetBenderAudioProcessorEditor::timerCallback() -> void {
     if (audioProcessor.isModelLoaded() && currentBendingLayer.isNotEmpty() && !weightCanvas.isCurrentlyDrawing())
     {
         auto triggerMode = audioProcessor.getTriggerMode();
-        auto state = audioProcessor.getLayerState (currentBendingLayer.toStdString());
 
         if (triggerMode == NetBenderAudioProcessor::TriggerMode::Continuous)
         {
             weightCanvas.setTargetBentWeights ({});
             
-            if (state.heat > 0.0001f && !state.frozen)
+            if (heat_slider.getValue() > 0.0001 && !freeze_button.getToggleState())
             {
-                auto liveWeights = audioProcessor.getBackend().get_layer_weights (currentBendingLayer.toStdString());
+                auto liveWeights = audioProcessor.getBendingManager().get_layer_live_weights (currentBendingLayer.toStdString());
                 if (!liveWeights.empty())
                     weightCanvas.updateCurrentWeights (liveWeights);
             }
         }
         else
         {
+            auto state = audioProcessor.getLayerState (currentBendingLayer.toStdString());
             // In Momentary / Transient modes:
             // Calculate target bent curve only when parameters or source change:
             if (!state.drawnWeights.empty())
@@ -720,7 +721,7 @@ auto NetBenderAudioProcessorEditor::timerCallback() -> void {
             bool isBendingEngaged = (audioProcessor.getMomentaryEnvelope() > 0.001f);
             if (isBendingEngaged || state.heat > 0.0001f)
             {
-                auto liveWeights = audioProcessor.getBackend().get_layer_weights (currentBendingLayer.toStdString());
+                auto liveWeights = audioProcessor.getBendingManager().get_layer_live_weights (currentBendingLayer.toStdString());
                 if (!liveWeights.empty())
                 {
                     weightCanvas.updateCurrentWeights (liveWeights);
@@ -854,13 +855,20 @@ auto NetBenderAudioProcessorEditor::select_layer(const juce::String& layerName) 
     {
         state.originalWeights = originalWeights;
         audioProcessor.setLayerOriginalWeights (layerName.toStdString(), originalWeights);
+        if (state.drawnWeights.empty())
+        {
+            baseDrawnWeights = originalWeights;
+            state.drawnWeights = originalWeights;
+        }
+        else
+        {
+            baseDrawnWeights = state.drawnWeights;
+        }
     }
-
-    if (state.drawnWeights.empty())
+    else if (state.drawnWeights.empty())
     {
         baseDrawnWeights = originalWeights;
         state.drawnWeights = originalWeights;
-        audioProcessor.setLayerDrawnWeights (layerName.toStdString(), baseDrawnWeights);
     }
     else
     {
@@ -1035,7 +1043,6 @@ auto NetBenderAudioProcessorEditor::apply_knob_bending() -> void {
     if (isContinuous)
     {
         currentWeights = bentTarget;
-        audioProcessor.getBackend().set_layer_weights (currentBendingLayer.toStdString(), currentWeights);
         weightCanvas.updateCurrentWeights (currentWeights);
         weightCanvas.setTargetBentWeights ({});
     }
@@ -1053,7 +1060,6 @@ auto NetBenderAudioProcessorEditor::apply_knob_bending() -> void {
 auto NetBenderAudioProcessorEditor::reset_layer_weights() -> void {
     if (currentBendingLayer.isEmpty()) return;
     
-    audioProcessor.getBackend().reset_layer_weights (currentBendingLayer.toStdString());
     audioProcessor.clearLayerBending (currentBendingLayer.toStdString());
     
     scale_slider.removeListener (this);
@@ -1103,7 +1109,6 @@ auto NetBenderAudioProcessorEditor::reset_layer_weights() -> void {
 }
 
 auto NetBenderAudioProcessorEditor::reset_all_layer_weights() -> void {
-    audioProcessor.getBackend().reset_all_layer_weights();
     audioProcessor.clearAllLayerBending();
     
     scale_slider.removeListener (this);

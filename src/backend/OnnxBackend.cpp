@@ -64,6 +64,15 @@ auto OnnxBackend::load(std::string path, double sample_rate, const std::string* 
     m_path = path;
     m_sample_rate = sample_rate > 0.0 ? sample_rate : 44100.0;
     m_model_sample_rate = m_sample_rate;
+    m_in_channels = 1;
+    m_out_channels = 1;
+    m_higher_ratio = 1;
+    m_buffer_size = 0;
+    m_latent_dim = 64;
+    m_latent_scale = 1.0f;
+    m_decode_latent_steps = 0;
+    m_history_samples = 0;
+    m_output_offset = 0;
     m_impl->companions.clear();
 
     try {
@@ -205,6 +214,36 @@ auto OnnxBackend::load(std::string path, double sample_rate, const std::string* 
                 } catch (...) {}
 
                 try {
+                    std::string meta_buf = lookup_meta("netbender.buffer_size");
+                    if (!meta_buf.empty()) {
+                        m_buffer_size = std::max(0, std::stoi(meta_buf));
+                    }
+                } catch (...) {}
+
+                try {
+                    std::string meta_in_ch = lookup_meta("netbender.in_channels");
+                    if (!meta_in_ch.empty()) {
+                        int ch = std::stoi(meta_in_ch);
+                        if (ch > 0) m_in_channels = ch;
+                    }
+                } catch (...) {}
+
+                try {
+                    std::string meta_out_ch = lookup_meta("netbender.out_channels");
+                    if (!meta_out_ch.empty()) {
+                        int ch = std::stoi(meta_out_ch);
+                        if (ch > 0) m_out_channels = ch;
+                    }
+                } catch (...) {}
+
+                try {
+                    std::string meta_arch = lookup_meta("netbender.architecture");
+                    if (meta_arch == "encodec" && m_buffer_size <= 0) {
+                        m_buffer_size = 2048;
+                    }
+                } catch (...) {}
+
+                try {
                     std::string meta_sr = lookup_meta("netbender.sample_rate");
                     if (!meta_sr.empty()) {
                         double sr = std::stod(meta_sr);
@@ -337,9 +376,9 @@ auto OnnxBackend::load(std::string path, double sample_rate, const std::string* 
         }
 
         m_loaded = true;
-        clear_decode_gen_fifo();
         m_last_error.clear();
-        lock.unlock(); // Unlock before warm-up so inference methods can acquire session mutex
+        lock.unlock(); // Unlock before FIFO clear & warm-up so methods can acquire session mutex
+        clear_decode_gen_fifo();
 
         // Warm up ONNX session(s) to compile execution provider kernels (CoreML / CPU)
         try {
@@ -556,6 +595,26 @@ auto OnnxBackend::introspect_graph() -> void {
                             int r = std::stoi(r_s);
                             if (r > 0) m_higher_ratio = r;
                         }
+                        std::string bs_s = get_field("buffer_size", "netbender.buffer_size");
+                        if (!bs_s.empty()) {
+                            int bs = std::stoi(bs_s);
+                            if (bs > 0) m_buffer_size = bs;
+                        }
+                        std::string ic_s = get_field("in_channels", "netbender.in_channels");
+                        if (!ic_s.empty()) {
+                            int ic = std::stoi(ic_s);
+                            if (ic > 0) m_in_channels = ic;
+                        }
+                        std::string oc_s = get_field("out_channels", "netbender.out_channels");
+                        if (!oc_s.empty()) {
+                            int oc = std::stoi(oc_s);
+                            if (oc > 0) m_out_channels = oc;
+                        }
+                        std::string arch_s = get_field("architecture", "netbender.architecture");
+                        if (arch_s.empty()) arch_s = get_field("model_name", "netbender.model_name");
+                        if (arch_s == "encodec" && m_buffer_size <= 0) {
+                            m_buffer_size = 2048;
+                        }
                         std::string ld_s = get_field("latent_dim", "netbender.latent_dim");
                         if (!ld_s.empty()) {
                             int ld = std::stoi(ld_s);
@@ -641,7 +700,11 @@ auto OnnxBackend::introspect_graph() -> void {
         m_audio_outputs.push_back(stream);
 
         if (i == 0) {
-            m_out_channels = (shape.size() >= 2 && shape[1] > 0) ? (int)shape[1] : 1;
+            if (shape.size() >= 2 && shape[1] > 0) {
+                m_out_channels = (int)shape[1];
+            } else if (m_out_channels <= 0) {
+                m_out_channels = m_in_channels;
+            }
         }
     }
 
@@ -659,8 +722,24 @@ auto OnnxBackend::perform(std::vector<float*>& in_buffer,
                           std::string method,
                           int n_batches, int n_out_channels, int n_vec) -> void {
     if (!m_loaded) return;
-    std::unique_lock<std::mutex> lock(m_session_mutex, std::try_to_lock);
-    if (!lock.owns_lock()) return;
+
+    if (m_buffer_size > 0 && n_vec > m_buffer_size && (n_vec % m_buffer_size == 0) && (method == "forward" || method == "encode")) {
+        int chunks = n_vec / m_buffer_size;
+        for (int chk = 0; chk < chunks; ++chk) {
+            std::vector<float*> chunk_in(in_buffer.size());
+            for (size_t c = 0; c < in_buffer.size(); ++c) {
+                chunk_in[c] = in_buffer[c] ? in_buffer[c] + (chk * m_buffer_size) : nullptr;
+            }
+            std::vector<float*> chunk_out(out_buffer.size());
+            for (size_t c = 0; c < out_buffer.size(); ++c) {
+                chunk_out[c] = out_buffer[c] ? out_buffer[c] + (chk * m_buffer_size) : nullptr;
+            }
+            perform(chunk_in, chunk_out, method, n_batches, n_out_channels, m_buffer_size);
+        }
+        return;
+    }
+
+    std::unique_lock<std::mutex> lock(m_session_mutex);
 
     // Check if target method belongs to a companion session (e.g. encode, decode, prior)
     auto comp_it = m_impl->companions.find(method);
@@ -831,26 +910,21 @@ auto OnnxBackend::perform(std::vector<float*>& in_buffer,
         if (audio_input_ptr && !m_audio_inputs.empty()) {
             run_input_names.push_back(m_audio_inputs[0].name.c_str());
 
-            if (m_history_samples > 0 || in_ch > 1) {
-                stream_len = (int)m_history_samples + n_vec;
-                composite_audio.resize(in_ch * stream_len);
+            int target_vec = (m_buffer_size > 0 && n_vec < m_buffer_size) ? m_buffer_size : n_vec;
+            if (m_history_samples > 0 || in_ch > 1 || target_vec > n_vec) {
+                stream_len = (int)m_history_samples + target_vec;
+                composite_audio.assign(in_ch * stream_len, 0.0f);
                 for (int c = 0; c < in_ch; ++c) {
                     float* hist_data = (m_history_samples > 0 && c < (int)m_audio_history.size()) ? m_audio_history[c].data() : nullptr;
                     float* in_data = (c < (int)in_buffer.size()) ? in_buffer[c] : nullptr;
                     float* dest = composite_audio.data() + (c * stream_len);
                     // Copy historical context
-                    if (m_history_samples > 0) {
-                        if (hist_data) {
-                            std::memcpy(dest, hist_data, m_history_samples * sizeof(float));
-                        } else {
-                            std::memset(dest, 0, m_history_samples * sizeof(float));
-                        }
+                    if (m_history_samples > 0 && hist_data) {
+                        std::memcpy(dest, hist_data, m_history_samples * sizeof(float));
                     }
                     // Copy current block
                     if (in_data) {
                         std::memcpy(dest + m_history_samples, in_data, n_vec * sizeof(float));
-                    } else {
-                        std::memset(dest + m_history_samples, 0, n_vec * sizeof(float));
                     }
                 }
                 std::vector<int64_t> in_shape = { 1, in_ch, (int64_t)stream_len };
@@ -947,6 +1021,24 @@ auto OnnxBackend::perform_forward(std::vector<float*>& in_buffer,
                                   int n_batches, int n_out_channels, int n_vec,
                                   LatentHook latent_hook) -> void {
     if (latent_hook) {
+        if (m_buffer_size > 0 && n_vec > m_buffer_size) {
+            int offset = 0;
+            while (offset < n_vec) {
+                int chunk = std::min(m_buffer_size, n_vec - offset);
+                std::vector<float*> sub_in(in_buffer.size(), nullptr);
+                std::vector<float*> sub_out(out_buffer.size(), nullptr);
+                for (size_t c = 0; c < in_buffer.size(); ++c) {
+                    if (in_buffer[c]) sub_in[c] = in_buffer[c] + offset;
+                }
+                for (size_t c = 0; c < out_buffer.size(); ++c) {
+                    if (out_buffer[c]) sub_out[c] = out_buffer[c] + offset;
+                }
+                perform_forward(sub_in, sub_out, n_batches, n_out_channels, chunk, latent_hook);
+                offset += chunk;
+            }
+            return;
+        }
+
         auto enc_it = m_impl->companions.find("encode");
         auto dec_it = m_impl->companions.find("decode");
         if (enc_it != m_impl->companions.end() && dec_it != m_impl->companions.end() &&
@@ -959,7 +1051,8 @@ auto OnnxBackend::perform_forward(std::vector<float*>& in_buffer,
                 int in_ch = std::min((int)in_buffer.size(), m_in_channels);
                 if (in_ch <= 0 || n_vec <= 0) return;
 
-                int stream_len = (m_history_samples > 0) ? ((int)m_history_samples + n_vec) : n_vec;
+                int target_vec = (m_buffer_size > 0 && n_vec < m_buffer_size) ? m_buffer_size : n_vec;
+                int stream_len = (m_history_samples > 0) ? ((int)m_history_samples + target_vec) : target_vec;
                 std::vector<float> audio_in((size_t)(in_ch * stream_len), 0.0f);
                 for (int c = 0; c < in_ch; ++c) {
                     float* hist_data = (m_history_samples > 0 && c < (int)m_audio_history.size()) ? m_audio_history[c].data() : nullptr;
@@ -1005,11 +1098,13 @@ auto OnnxBackend::perform_forward(std::vector<float*>& in_buffer,
                     LatentBuffer buf{ latent_ptr, lat_dim, lat_steps };
                     latent_hook(buf);
 
+                    bool is_encodec_sliced = (m_higher_ratio <= 640 && m_latent_dim >= 128 && lat_steps > 6);
                     std::vector<Ort::Value> dec_in_tensors;
-                    if (m_higher_ratio <= 640 && m_latent_dim >= 128 && lat_steps > 6) {
+                    std::vector<int64_t> dec_in_shape = { 1, lat_dim, 6 };
+                    std::vector<float> sliced_lat;
+                    if (is_encodec_sliced) {
                         // EnCodec decode graph requires frames <= 6 to prevent negative reflection padding
-                        std::vector<int64_t> dec_in_shape = { 1, lat_dim, 6 };
-                        std::vector<float> sliced_lat(lat_dim * 6);
+                        sliced_lat.resize(lat_dim * 6);
                         for (int c = 0; c < lat_dim; ++c) {
                             std::memcpy(sliced_lat.data() + (c * 6), latent_ptr + (c * lat_steps), 6 * sizeof(float));
                         }
@@ -1051,6 +1146,44 @@ auto OnnxBackend::perform_forward(std::vector<float*>& in_buffer,
                             }
                             if (copy_samples < n_vec) {
                                 std::memset(out_buffer[c] + copy_samples, 0, (n_vec - copy_samples) * sizeof(float));
+                            }
+                        }
+                    }
+
+                    // For EnCodec 7-frame window (2048 samples), decode trailing frames [lat_steps-6..lat_steps) to fill the remaining 128 samples without a gap
+                    if (is_encodec_sliced && copy_samples < n_vec) {
+                        int64_t tail_start = lat_steps - 6;
+                        for (int c = 0; c < lat_dim; ++c) {
+                            std::memcpy(sliced_lat.data() + (c * 6), latent_ptr + (c * lat_steps) + tail_start, 6 * sizeof(float));
+                        }
+                        std::vector<Ort::Value> tail_in_tensors;
+                        tail_in_tensors.push_back(Ort::Value::CreateTensor<float>(
+                            m_impl->memory_info,
+                            sliced_lat.data(),
+                            sliced_lat.size(),
+                            dec_in_shape.data(),
+                            dec_in_shape.size()
+                        ));
+                        auto tail_outputs = dec_comp.session->Run(
+                            Ort::RunOptions{nullptr},
+                            dec_comp.input_name_ptrs.data(),
+                            tail_in_tensors.data(),
+                            tail_in_tensors.size(),
+                            dec_comp.output_name_ptrs.data(),
+                            dec_comp.output_name_ptrs.size()
+                        );
+                        if (!tail_outputs.empty()) {
+                            float* tail_data = tail_outputs[0].GetTensorMutableData<float>();
+                            auto tail_shape = tail_outputs[0].GetTensorTypeAndShapeInfo().GetShape();
+                            int tail_samples = (tail_shape.size() >= 3 && tail_shape[2] > 0) ? (int)tail_shape[2] : out_samples;
+                            int rem = n_vec - copy_samples;
+                            if (tail_samples >= rem) {
+                                int tail_offset = tail_samples - rem;
+                                for (int c = 0; c < out_ch; ++c) {
+                                    if (out_buffer[c]) {
+                                        std::memcpy(out_buffer[c] + copy_samples, tail_data + (c * tail_samples) + tail_offset, rem * sizeof(float));
+                                    }
+                                }
                             }
                         }
                     }
@@ -1439,6 +1572,9 @@ auto OnnxBackend::get_higher_ratio() -> int {
 }
 
 auto OnnxBackend::get_preferred_buffer_size() -> int {
+    if (m_buffer_size > 0) {
+        return m_buffer_size;
+    }
     if (!m_audio_inputs.empty() && m_audio_inputs[0].shape.size() >= 3) {
         int64_t fixed_len = m_audio_inputs[0].shape.back();
         if (fixed_len > 0) {
@@ -1463,7 +1599,6 @@ auto OnnxBackend::get_layer_weights(std::string layer_name) -> std::vector<float
 }
 
 auto OnnxBackend::get_original_layer_weights(std::string layer_name) -> std::vector<float> {
-    std::lock_guard<std::mutex> lock(m_session_mutex);
     auto it = m_parameters.find(layer_name);
     if (it != m_parameters.end()) {
         return it->second.original_weights;
@@ -1472,7 +1607,6 @@ auto OnnxBackend::get_original_layer_weights(std::string layer_name) -> std::vec
 }
 
 auto OnnxBackend::get_layer_shape(std::string layer_name) -> std::vector<int64_t> {
-    std::lock_guard<std::mutex> lock(m_session_mutex);
     auto it = m_parameters.find(layer_name);
     if (it != m_parameters.end()) {
         return it->second.shape;
