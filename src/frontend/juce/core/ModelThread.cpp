@@ -5,7 +5,7 @@ ModelThread::ModelThread(std::function<void()> compute_fn)
     : juce::Thread("Model Thread"), m_compute_fn(std::move(compute_fn)) {
 }
 
-ModelThread::ModelThread(NNBendingAudioProcessor& processor)
+ModelThread::ModelThread(NetBenderAudioProcessor& processor)
     : juce::Thread("Model Thread"), m_compute_fn([&processor] { processor.runInference(); }) {
 }
 

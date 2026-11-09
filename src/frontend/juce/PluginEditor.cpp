@@ -3,7 +3,7 @@
 #include "ui/UIConstants.h"
 
 //==============================================================================
-NNBendingAudioProcessorEditor::NNBendingAudioProcessorEditor (NNBendingAudioProcessor& p)
+NetBenderAudioProcessorEditor::NetBenderAudioProcessorEditor (NetBenderAudioProcessor& p)
     : AudioProcessorEditor (&p), audioProcessor (p)
 {
     setLookAndFeel (&flatLf);
@@ -28,7 +28,7 @@ NNBendingAudioProcessorEditor::NNBendingAudioProcessorEditor (NNBendingAudioProc
                          audioProcessor.isUsingGpu() ? juce::Colours::lightcyan : UIConstants::Colors::text_light);
     dry_wet_slider.setValue (audioProcessor.getDryWet());
     trigger_mode_combo.setSelectedId ((int)audioProcessor.getTriggerMode() + 1, juce::dontSendNotification);
-    short_circuit_button.setVisible (audioProcessor.getTriggerMode() == NNBendingAudioProcessor::TriggerMode::Momentary);
+    short_circuit_button.setVisible (audioProcessor.getTriggerMode() == NetBenderAudioProcessor::TriggerMode::Momentary);
 
     addAndMakeVisible (headerBar);
 
@@ -69,7 +69,7 @@ NNBendingAudioProcessorEditor::NNBendingAudioProcessorEditor (NNBendingAudioProc
             audioProcessor.setLayerDrawnWeights (currentBendingLayer.toStdString(), baseDrawnWeights);
 
             auto mode = audioProcessor.getTriggerMode();
-            if (mode == NNBendingAudioProcessor::TriggerMode::Continuous)
+            if (mode == NetBenderAudioProcessor::TriggerMode::Continuous)
             {
                 currentWeights = modifiedWeights;
                 audioProcessor.getBackend().set_layer_weights (currentBendingLayer.toStdString(), currentWeights);
@@ -150,14 +150,14 @@ NNBendingAudioProcessorEditor::NNBendingAudioProcessorEditor (NNBendingAudioProc
     startTimerHz (UIConstants::Layout::editor_timer_hz);
 }
 
-NNBendingAudioProcessorEditor::~NNBendingAudioProcessorEditor()
+NetBenderAudioProcessorEditor::~NetBenderAudioProcessorEditor()
 {
     stopTimer();
     setLookAndFeel (nullptr);
 }
 
 //==============================================================================
-auto NNBendingAudioProcessorEditor::paint(juce::Graphics& g) -> void {
+auto NetBenderAudioProcessorEditor::paint(juce::Graphics& g) -> void {
     juce::ColourGradient gradient(UIConstants::Colors::background_gradient_top, 0, 0,
                                    UIConstants::Colors::background_gradient_bottom, 0, (float)getHeight(), false);
     g.setGradientFill(gradient);
@@ -167,7 +167,7 @@ auto NNBendingAudioProcessorEditor::paint(juce::Graphics& g) -> void {
     g.drawHorizontalLine(UIConstants::Layout::header_divider_y, 0.0f, (float)getWidth());
 }
 
-auto NNBendingAudioProcessorEditor::resized() -> void {
+auto NetBenderAudioProcessorEditor::resized() -> void {
     using namespace UIConstants::Layout;
 
     auto area = getLocalBounds().reduced(gap_large);
@@ -196,7 +196,7 @@ auto NNBendingAudioProcessorEditor::resized() -> void {
 }
 
 //==============================================================================
-auto NNBendingAudioProcessorEditor::comboBoxChanged(juce::ComboBox* comboBoxThatHasChanged) -> void {
+auto NetBenderAudioProcessorEditor::comboBoxChanged(juce::ComboBox* comboBoxThatHasChanged) -> void {
     if (comboBoxThatHasChanged == &method_combo)
     {
         audioProcessor.setCurrentMethod (method_combo.getText());
@@ -214,16 +214,16 @@ auto NNBendingAudioProcessorEditor::comboBoxChanged(juce::ComboBox* comboBoxThat
         int id = 1;
         for (const auto& l : layers)
         {
-            auto cat = NNBendingAudioProcessor::classifyLayer (l);
+            auto cat = NetBenderAudioProcessor::classifyLayer (l);
             bool include = false;
             if (catId == 1) include = true; // All
-            else if (catId == 2 && cat == NNBendingAudioProcessor::LayerCategory::Norm) include = true;
-            else if (catId == 3 && cat == NNBendingAudioProcessor::LayerCategory::Conv) include = true;
-            else if (catId == 4 && cat == NNBendingAudioProcessor::LayerCategory::Attention) include = true;
-            else if (catId == 5 && cat == NNBendingAudioProcessor::LayerCategory::Linear) include = true;
-            else if (catId == 6 && cat == NNBendingAudioProcessor::LayerCategory::Activation) include = true;
-            else if (catId == 7 && cat == NNBendingAudioProcessor::LayerCategory::Recurrent) include = true;
-            else if (catId == 8 && cat == NNBendingAudioProcessor::LayerCategory::Bias) include = true;
+            else if (catId == 2 && cat == NetBenderAudioProcessor::LayerCategory::Norm) include = true;
+            else if (catId == 3 && cat == NetBenderAudioProcessor::LayerCategory::Conv) include = true;
+            else if (catId == 4 && cat == NetBenderAudioProcessor::LayerCategory::Attention) include = true;
+            else if (catId == 5 && cat == NetBenderAudioProcessor::LayerCategory::Linear) include = true;
+            else if (catId == 6 && cat == NetBenderAudioProcessor::LayerCategory::Activation) include = true;
+            else if (catId == 7 && cat == NetBenderAudioProcessor::LayerCategory::Recurrent) include = true;
+            else if (catId == 8 && cat == NetBenderAudioProcessor::LayerCategory::Bias) include = true;
 
             if (include)
                 layer_combo.addItem (l, id++);
@@ -237,9 +237,9 @@ auto NNBendingAudioProcessorEditor::comboBoxChanged(juce::ComboBox* comboBoxThat
     else if (comboBoxThatHasChanged == &trigger_mode_combo)
     {
         int modeIdx = trigger_mode_combo.getSelectedId() - 1;
-        auto mode = (NNBendingAudioProcessor::TriggerMode)modeIdx;
+        auto mode = (NetBenderAudioProcessor::TriggerMode)modeIdx;
         audioProcessor.setTriggerMode (mode);
-        short_circuit_button.setVisible (mode == NNBendingAudioProcessor::TriggerMode::Momentary);
+        short_circuit_button.setVisible (mode == NetBenderAudioProcessor::TriggerMode::Momentary);
         resized();
 
         if (currentBendingLayer.isNotEmpty())
@@ -249,7 +249,7 @@ auto NNBendingAudioProcessorEditor::comboBoxChanged(juce::ComboBox* comboBoxThat
     {
         int modeIdx = drift_mode_combo.getSelectedId() - 1;
         if (currentBendingLayer.isNotEmpty())
-            audioProcessor.setLayerDriftMode (currentBendingLayer.toStdString(), (NNBendingAudioProcessor::DriftMode)modeIdx);
+            audioProcessor.setLayerDriftMode (currentBendingLayer.toStdString(), (NetBenderAudioProcessor::DriftMode)modeIdx);
     }
     else if (comboBoxThatHasChanged == &bridge_combo)
     {
@@ -267,13 +267,13 @@ auto NNBendingAudioProcessorEditor::comboBoxChanged(juce::ComboBox* comboBoxThat
     else if (comboBoxThatHasChanged == &latent_mode_combo)
     {
         int modeIdx = latent_mode_combo.getSelectedId() - 1;
-        audioProcessor.setLatentMode ((NNBendingAudioProcessor::LatentMode)modeIdx);
+        audioProcessor.setLatentMode ((NetBenderAudioProcessor::LatentMode)modeIdx);
         updateLatentControlsVisibility();
         resized();
     }
 }
 
-auto NNBendingAudioProcessorEditor::sliderValueChanged(juce::Slider* slider) -> void {
+auto NetBenderAudioProcessorEditor::sliderValueChanged(juce::Slider* slider) -> void {
     if (slider == &harmonic_freq_slider || slider == &harmonic_partials_slider
         || slider == &harmonic_morph_slider || slider == &harmonic_depth_slider)
     {
@@ -346,7 +346,7 @@ auto NNBendingAudioProcessorEditor::sliderValueChanged(juce::Slider* slider) -> 
     }
 }
 
-auto NNBendingAudioProcessorEditor::buttonClicked(juce::Button* button) -> void {
+auto NetBenderAudioProcessorEditor::buttonClicked(juce::Button* button) -> void {
     if (button == &fuse_button)
     {
         audioProcessor.resetFuse();
@@ -516,7 +516,7 @@ auto NNBendingAudioProcessorEditor::buttonClicked(juce::Button* button) -> void 
 }
 
 //==============================================================================
-auto NNBendingAudioProcessorEditor::timerCallback() -> void {
+auto NetBenderAudioProcessorEditor::timerCallback() -> void {
     if (audioProcessor.isModelLoaded() && status_label.getText() == "No model loaded.")
     {
         update_model_info();
@@ -606,7 +606,7 @@ auto NNBendingAudioProcessorEditor::timerCallback() -> void {
     {
         float env = audioProcessor.getMomentaryEnvelope();
         bool bendingActive = false;
-        if (audioProcessor.getTriggerMode() == NNBendingAudioProcessor::TriggerMode::Continuous)
+        if (audioProcessor.getTriggerMode() == NetBenderAudioProcessor::TriggerMode::Continuous)
         {
             bendingActive = audioProcessor.hasActiveBending();
         }
@@ -648,7 +648,7 @@ auto NNBendingAudioProcessorEditor::timerCallback() -> void {
         auto triggerMode = audioProcessor.getTriggerMode();
         auto state = audioProcessor.getLayerState (currentBendingLayer.toStdString());
 
-        if (triggerMode == NNBendingAudioProcessor::TriggerMode::Continuous)
+        if (triggerMode == NetBenderAudioProcessor::TriggerMode::Continuous)
         {
             weightCanvas.setTargetBentWeights ({});
             
@@ -730,7 +730,7 @@ auto NNBendingAudioProcessorEditor::timerCallback() -> void {
     }
 }
 
-auto NNBendingAudioProcessorEditor::update_model_info() -> void {
+auto NetBenderAudioProcessorEditor::update_model_info() -> void {
     bool usingGpu = audioProcessor.isUsingGpu();
     gpu_button.setButtonText (usingGpu ? "GPU" : "CPU");
     gpu_button.setColour (juce::TextButton::buttonColourId,
@@ -770,16 +770,16 @@ auto NNBendingAudioProcessorEditor::update_model_info() -> void {
         id = 1;
         for (const auto& l : layers)
         {
-            auto cat = NNBendingAudioProcessor::classifyLayer (l);
+            auto cat = NetBenderAudioProcessor::classifyLayer (l);
             bool include = false;
             if (catId <= 1) include = true;
-            else if (catId == 2 && cat == NNBendingAudioProcessor::LayerCategory::Norm) include = true;
-            else if (catId == 3 && cat == NNBendingAudioProcessor::LayerCategory::Conv) include = true;
-            else if (catId == 4 && cat == NNBendingAudioProcessor::LayerCategory::Attention) include = true;
-            else if (catId == 5 && cat == NNBendingAudioProcessor::LayerCategory::Linear) include = true;
-            else if (catId == 6 && cat == NNBendingAudioProcessor::LayerCategory::Activation) include = true;
-            else if (catId == 7 && cat == NNBendingAudioProcessor::LayerCategory::Recurrent) include = true;
-            else if (catId == 8 && cat == NNBendingAudioProcessor::LayerCategory::Bias) include = true;
+            else if (catId == 2 && cat == NetBenderAudioProcessor::LayerCategory::Norm) include = true;
+            else if (catId == 3 && cat == NetBenderAudioProcessor::LayerCategory::Conv) include = true;
+            else if (catId == 4 && cat == NetBenderAudioProcessor::LayerCategory::Attention) include = true;
+            else if (catId == 5 && cat == NetBenderAudioProcessor::LayerCategory::Linear) include = true;
+            else if (catId == 6 && cat == NetBenderAudioProcessor::LayerCategory::Activation) include = true;
+            else if (catId == 7 && cat == NetBenderAudioProcessor::LayerCategory::Recurrent) include = true;
+            else if (catId == 8 && cat == NetBenderAudioProcessor::LayerCategory::Bias) include = true;
 
             if (include)
                 layer_combo.addItem (l, id++);
@@ -836,11 +836,11 @@ auto NNBendingAudioProcessorEditor::update_model_info() -> void {
         currentWeights.clear();
         currentBendingLayer = "";
         weightCanvas.setWeights ({}, {});
-        update_knob_context_labels (NNBendingAudioProcessor::LayerCategory::Other);
+        update_knob_context_labels (NetBenderAudioProcessor::LayerCategory::Other);
     }
 }
 
-auto NNBendingAudioProcessorEditor::select_layer(const juce::String& layerName) -> void {
+auto NetBenderAudioProcessorEditor::select_layer(const juce::String& layerName) -> void {
     if (layerName.isEmpty()) return;
     
     currentBendingLayer = layerName;
@@ -937,7 +937,7 @@ auto NNBendingAudioProcessorEditor::select_layer(const juce::String& layerName) 
             }
         }
     }
-    bool isContinuous = (audioProcessor.getTriggerMode() == NNBendingAudioProcessor::TriggerMode::Continuous);
+    bool isContinuous = (audioProcessor.getTriggerMode() == NetBenderAudioProcessor::TriggerMode::Continuous);
     weightCanvas.setShowBridgeVisuals (bridgeEnabled);
     weightCanvas.setBridgeWeights (srcTiled, bridgedBase, bridgeEnabled ? state.bridgeDepth : 0.0f, isContinuous);
 
@@ -956,15 +956,15 @@ auto NNBendingAudioProcessorEditor::select_layer(const juce::String& layerName) 
         weightCanvas.setTargetBentWeights ({});
     }
     
-    auto category = NNBendingAudioProcessor::classifyLayer (currentBendingLayer.toStdString());
+    auto category = NetBenderAudioProcessor::classifyLayer (currentBendingLayer.toStdString());
     juce::String catName = "Other";
-    if (category == NNBendingAudioProcessor::LayerCategory::Norm) catName = "Norm / Dynamics";
-    else if (category == NNBendingAudioProcessor::LayerCategory::Conv) catName = "Conv Kernel";
-    else if (category == NNBendingAudioProcessor::LayerCategory::Attention) catName = "Attention";
-    else if (category == NNBendingAudioProcessor::LayerCategory::Linear) catName = "Linear / Dense";
-    else if (category == NNBendingAudioProcessor::LayerCategory::Activation) catName = "Activation (Snake)";
-    else if (category == NNBendingAudioProcessor::LayerCategory::Recurrent) catName = "Recurrent (LSTM)";
-    else if (category == NNBendingAudioProcessor::LayerCategory::Bias) catName = "Bias";
+    if (category == NetBenderAudioProcessor::LayerCategory::Norm) catName = "Norm / Dynamics";
+    else if (category == NetBenderAudioProcessor::LayerCategory::Conv) catName = "Conv Kernel";
+    else if (category == NetBenderAudioProcessor::LayerCategory::Attention) catName = "Attention";
+    else if (category == NetBenderAudioProcessor::LayerCategory::Linear) catName = "Linear / Dense";
+    else if (category == NetBenderAudioProcessor::LayerCategory::Activation) catName = "Activation (Snake)";
+    else if (category == NetBenderAudioProcessor::LayerCategory::Recurrent) catName = "Recurrent (LSTM)";
+    else if (category == NetBenderAudioProcessor::LayerCategory::Bias) catName = "Bias";
 
     infoBendingLabel.setText ("Trace: [" + catName + "]  |  Layer: " + currentBendingLayer + "  |  " + juce::String (originalWeights.size()) + " params" + (audioProcessor.hasAutoencode() ? "  |  [Latent Hook Ready]" : ""), juce::dontSendNotification);
 
@@ -986,7 +986,7 @@ auto NNBendingAudioProcessorEditor::select_layer(const juce::String& layerName) 
     updateHarmonicGhostPreview();
 }
 
-auto NNBendingAudioProcessorEditor::apply_knob_bending() -> void {
+auto NetBenderAudioProcessorEditor::apply_knob_bending() -> void {
     if (currentBendingLayer.isEmpty()) return;
     if (baseDrawnWeights.empty())
         baseDrawnWeights = audioProcessor.getBackend().get_original_layer_weights (currentBendingLayer.toStdString());
@@ -1022,7 +1022,7 @@ auto NNBendingAudioProcessorEditor::apply_knob_bending() -> void {
     }
 
     auto mode = audioProcessor.getTriggerMode();
-    bool isContinuous = (mode == NNBendingAudioProcessor::TriggerMode::Continuous);
+    bool isContinuous = (mode == NetBenderAudioProcessor::TriggerMode::Continuous);
     weightCanvas.setShowBridgeVisuals (bridgeEnabled);
     weightCanvas.setBridgeWeights (srcTiled, bridgedBase, bridgeEnabled ? state.bridgeDepth : 0.0f, isContinuous);
 
@@ -1050,7 +1050,7 @@ auto NNBendingAudioProcessorEditor::apply_knob_bending() -> void {
     lastBridgeEnabled = bridgeEnabled;
 }
 
-auto NNBendingAudioProcessorEditor::reset_layer_weights() -> void {
+auto NetBenderAudioProcessorEditor::reset_layer_weights() -> void {
     if (currentBendingLayer.isEmpty()) return;
     
     audioProcessor.getBackend().reset_layer_weights (currentBendingLayer.toStdString());
@@ -1098,11 +1098,11 @@ auto NNBendingAudioProcessorEditor::reset_layer_weights() -> void {
 
     weightCanvas.setWeights (originalWeights, currentWeights);
     weightCanvas.setTargetBentWeights ({});
-    weightCanvas.setBridgeWeights ({}, {}, 0.0f, audioProcessor.getTriggerMode() == NNBendingAudioProcessor::TriggerMode::Continuous);
+    weightCanvas.setBridgeWeights ({}, {}, 0.0f, audioProcessor.getTriggerMode() == NetBenderAudioProcessor::TriggerMode::Continuous);
     updateHarmonicGhostPreview();
 }
 
-auto NNBendingAudioProcessorEditor::reset_all_layer_weights() -> void {
+auto NetBenderAudioProcessorEditor::reset_all_layer_weights() -> void {
     audioProcessor.getBackend().reset_all_layer_weights();
     audioProcessor.clearAllLayerBending();
     
@@ -1149,12 +1149,12 @@ auto NNBendingAudioProcessorEditor::reset_all_layer_weights() -> void {
         baseDrawnWeights = originalWeights;
         weightCanvas.setWeights (originalWeights, currentWeights);
         weightCanvas.setTargetBentWeights ({});
-        weightCanvas.setBridgeWeights ({}, {}, 0.0f, audioProcessor.getTriggerMode() == NNBendingAudioProcessor::TriggerMode::Continuous);
+        weightCanvas.setBridgeWeights ({}, {}, 0.0f, audioProcessor.getTriggerMode() == NetBenderAudioProcessor::TriggerMode::Continuous);
         updateHarmonicGhostPreview();
     }
 }
 
-auto NNBendingAudioProcessorEditor::save_model_to_file() -> void {
+auto NetBenderAudioProcessorEditor::save_model_to_file() -> void {
     if (!audioProcessor.isModelLoaded())
     {
         status_label.setText ("Cannot save: No model loaded.", juce::dontSendNotification);
@@ -1194,8 +1194,8 @@ auto NNBendingAudioProcessorEditor::save_model_to_file() -> void {
     });
 }
 
-auto NNBendingAudioProcessorEditor::update_knob_context_labels(NNBendingAudioProcessor::LayerCategory category) -> void {
-    if (category == NNBendingAudioProcessor::LayerCategory::Norm)
+auto NetBenderAudioProcessorEditor::update_knob_context_labels(NetBenderAudioProcessor::LayerCategory category) -> void {
+    if (category == NetBenderAudioProcessor::LayerCategory::Norm)
     {
         // Normalization / Dynamics context: Gamma (Gain) & Beta (Bias)
         scale_label.setText (juce::CharPointer_UTF8 ("Gamma (\xce\xb3)"), juce::dontSendNotification);
@@ -1204,7 +1204,7 @@ auto NNBendingAudioProcessorEditor::update_knob_context_labels(NNBendingAudioPro
         offset_label.setText (juce::CharPointer_UTF8 ("Beta (\xce\xb2)"), juce::dontSendNotification);
         offset_label.setColour (juce::Label::textColourId, UIConstants::Colors::sky_blue);
     }
-    else if (category == NNBendingAudioProcessor::LayerCategory::Activation)
+    else if (category == NetBenderAudioProcessor::LayerCategory::Activation)
     {
         // Snake / periodic activation context: Alpha (Freq scaling) & Offset
         scale_label.setText (juce::CharPointer_UTF8 ("Alpha (\xce\xb1)"), juce::dontSendNotification);
@@ -1224,7 +1224,7 @@ auto NNBendingAudioProcessorEditor::update_knob_context_labels(NNBendingAudioPro
     }
 }
 
-auto NNBendingAudioProcessorEditor::updateHarmonicGhostPreview() -> void {
+auto NetBenderAudioProcessorEditor::updateHarmonicGhostPreview() -> void {
     if (!harmonic_enable_toggle.getToggleState() || currentBendingLayer.isEmpty() || baseDrawnWeights.empty())
     {
         weightCanvas.setHarmonicGhostWeights ({}, false);
@@ -1272,7 +1272,7 @@ auto NNBendingAudioProcessorEditor::updateHarmonicGhostPreview() -> void {
     weightCanvas.setHarmonicGhostWeights (ghost, true);
 }
 
-auto NNBendingAudioProcessorEditor::applyHarmonicWeights() -> void {
+auto NetBenderAudioProcessorEditor::applyHarmonicWeights() -> void {
     if (currentBendingLayer.isEmpty() || baseDrawnWeights.empty())
         return;
 
@@ -1320,13 +1320,13 @@ auto NNBendingAudioProcessorEditor::applyHarmonicWeights() -> void {
     infoBendingLabel.setText ("Harmonic wave stamped to " + currentBendingLayer, juce::dontSendNotification);
 }
 
-auto NNBendingAudioProcessorEditor::set_side_tab(SideTab newTab) -> void {
+auto NetBenderAudioProcessorEditor::set_side_tab(SideTab newTab) -> void {
     currentSideTab = newTab;
     sidePanel.set_side_tab(newTab);
     repaint();
 }
 
-auto NNBendingAudioProcessorEditor::set_view_mode(ViewMode newMode) -> void {
+auto NetBenderAudioProcessorEditor::set_view_mode(ViewMode newMode) -> void {
     currentViewMode = newMode;
 
     bool isWeights = (currentViewMode == ViewMode::Weights);
@@ -1369,7 +1369,7 @@ auto NNBendingAudioProcessorEditor::set_view_mode(ViewMode newMode) -> void {
     repaint();
 }
 
-auto NNBendingAudioProcessorEditor::updateLatentControlsVisibility() -> void {
+auto NetBenderAudioProcessorEditor::updateLatentControlsVisibility() -> void {
     side_panel.latent_panel.resized();
 }
 

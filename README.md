@@ -127,6 +127,14 @@ ExecuTorch exports support two bend promotion modes (`--bend-mode`) and four har
 .venv/bin/python -m python_tools.migrate_ts_to_pte models/stable_audio_1_vae.ts \
     -o models/stable_audio_1_vae_xnnpack.pte --delegate xnnpack --bend-mode delegate
 
+# Export Stable Audio 3 SAME-S directly to XNNPACK, CoreML, or Portable .pte:
+.venv/bin/python python_tools/exporters/same_s_exporter.py \
+    -i models/checkpoints/stable_audio_3_same_s.safetensors \
+    -o models/stable_audio_3_same_s_xnnpack.pte --format pte --delegate xnnpack
+.venv/bin/python python_tools/exporters/same_s_exporter.py \
+    -i models/checkpoints/stable_audio_3_same_s.safetensors \
+    -o models/stable_audio_3_same_s_coreml.pte --format pte --delegate coreml
+
 # Or use the unified export_cli wrapper / custom layer filters:
 .venv/bin/python -m python_tools.export_cli migrate_pte \
     -i models/stable_audio_1_vae.ts \
@@ -165,10 +173,16 @@ ExecuTorch exports support two bend promotion modes (`--bend-mode`) and four har
     -o models/encodec_bendable.onnx \
     --buffer-size 2048 --channels 1
 
-# Export Stable Audio 3 SAME-S (v3) directly from safetensors to .ts and bendable .onnx:
+# Export Stable Audio 3 SAME-S (v3) directly from safetensors:
+# Options: --format {ts, onnx, pte, both, all} and --delegate {xnnpack, coreml, portable}
 .venv/bin/python python_tools/exporters/same_s_exporter.py \
     -i models/checkpoints/stable_audio_3_same_s.safetensors \
     -o models/stable_audio_3_same_s.ts --format both
+
+# Or export all formats (.ts, .onnx, and .pte) in one run:
+.venv/bin/python python_tools/exporters/same_s_exporter.py \
+    -i models/checkpoints/stable_audio_3_same_s.safetensors \
+    --format all --delegate xnnpack
 
 # Export directly from Hugging Face or local checkpoints (Stable Audio, EnCodec, RAVE):
 .venv/bin/python -m python_tools.export_cli stable_audio --onnx -o models/sa_vae.onnx

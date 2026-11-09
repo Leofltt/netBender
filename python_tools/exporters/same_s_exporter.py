@@ -75,6 +75,7 @@ def export_same_s(
     buffer_size: int = 8192,
     promote_for_bending: bool = True,
     methods: Optional[List[str]] = None,
+    delegate: str = "xnnpack",
     verbose: bool = True,
 ) -> Union[str, Tuple[str, ...]]:
     """Exports Stable Audio 3 SAME-S to TorchScript, ONNX, and/or ExecuTorch."""
@@ -86,21 +87,26 @@ def export_same_s(
         os.makedirs(base_dir, exist_ok=True)
         if format == "onnx":
             output_path = os.path.join(base_dir, "stable_audio_3_same_s_bendable.onnx")
+        elif format == "pte":
+            suffix = f"_{delegate}" if delegate in ("xnnpack", "coreml", "portable") else ""
+            output_path = os.path.join(base_dir, f"stable_audio_3_same_s{suffix}.pte")
         else:
             output_path = os.path.join(base_dir, "stable_audio_3_same_s.ts")
 
     base_stem, ext = os.path.splitext(output_path)
-    target_format = format or ("onnx" if ext.lower() == ".onnx" else "ts")
+    target_format = format or ("onnx" if ext.lower() == ".onnx" else ("pte" if ext.lower() == ".pte" else "ts"))
 
     if verbose:
         logging.info(f"Loading SAME-S weights from '{checkpoint_path}'...")
     core = load_same_s_from_safetensors(checkpoint_path, device="cpu")
 
-    ts_path = f"{base_stem}.ts" if target_format in ("ts", "both") else None
+    ts_path = f"{base_stem}.ts" if target_format in ("ts", "both", "all") else None
     onnx_path = output_path if ext.lower() == ".onnx" else f"{base_stem}_bendable.onnx"
+    pte_path = output_path if ext.lower() == ".pte" else f"{base_stem}_{delegate}.pte"
 
     exported_ts = None
     exported_onnx = None
+    exported_pte = None
 
     # 1. Export TorchScript
     if target_format in ("ts", "both"):
@@ -231,8 +237,94 @@ def export_same_s(
                 dynamo=False,
             )
 
+    # 3. Export ExecuTorch (.pte)
+    if target_format in ("pte", "all"):
+        from python_tools.pte_bend_prep import export_bendable_pte
+
+        class CoreForwardPTE(nn.Module):
+            def __init__(self, c):
+                super().__init__()
+                self.core = c
+
+            def forward(self, x):
+                return self.core(x)
+
+        class CoreEncodePTE(nn.Module):
+            def __init__(self, c):
+                super().__init__()
+                self.core = c
+
+            def forward(self, x):
+                return self.core.encode(x)
+
+        class CoreDecodePTE(nn.Module):
+            def __init__(self, c):
+                super().__init__()
+                self.core = c
+
+            def forward(self, z):
+                return self.core.decode(z)
+
+        fwd_mod = CoreForwardPTE(core).eval()
+        enc_mod = CoreEncodePTE(core).eval()
+        dec_mod = CoreDecodePTE(core).eval()
+
+        dummy_audio = torch.zeros(1, 2, buffer_size, dtype=torch.float32)
+        dummy_latent = torch.zeros(1, 256, buffer_size // 4096, dtype=torch.float32)
+
+        companion_modules = {
+            "encode": (enc_mod, dummy_audio),
+            "decode": (dec_mod, dummy_latent),
+        }
+
+        pte_meta = {
+            "sr": 44100,
+            "sample_rate": 44100,
+            "higher_ratio": 4096,
+            "ratio": 4096,
+            "latent_dim": 256,
+            "buffer_size": buffer_size,
+            "in_channels": 2,
+            "out_channels": 2,
+            "history_samples": 0,
+            "output_offset": 0,
+            "latent_scale": 0.25,
+            "decode_latent_steps": 2,
+        }
+
+        # For XNNPACK, filter out linear projection biases to prevent ConvertToLinearPass crash
+        layer_filter = (
+            ["norm", "scale", "snake", "alpha", "beta", "gamma"]
+            if (delegate.lower().strip() == "xnnpack" and promote_for_bending)
+            else None
+        )
+
+        bend_mode = "delegate" if promote_for_bending else "none"
+
+        if verbose:
+            logging.info(f"Exporting ExecuTorch .pte ({delegate}): {pte_path}...")
+        export_bendable_pte(
+            module=fwd_mod,
+            sample_audio_input=dummy_audio,
+            output_pte_path=pte_path,
+            delegate=delegate,
+            bend_mode=bend_mode,
+            layer_filter=layer_filter,
+            companion_modules=companion_modules,
+            extra_metadata=pte_meta,
+            write_sidecar=True,
+            verbose=verbose,
+        )
+        exported_pte = pte_path
+        if verbose:
+            logging.info(f"Exported ExecuTorch .pte successfully: {exported_pte}")
+
+    if target_format == "all":
+        return (exported_ts, exported_onnx, exported_pte)
     if target_format == "both":
         return (exported_ts, exported_onnx)
+    if target_format == "pte":
+        return exported_pte
     return exported_onnx if target_format == "onnx" else exported_ts
 
 
@@ -240,11 +332,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Export Stable Audio 3 SAME-S for NetBender")
     parser.add_argument("-i", "--checkpoint", type=str, default="models/checkpoints/stable_audio_3_same_s.safetensors",
                         help="Path to SAME-S .safetensors checkpoint")
-    parser.add_argument("-o", "--output", type=str, default=None, help="Output path (.ts or .onnx)")
-    parser.add_argument("--format", type=str, choices=["ts", "onnx", "both"], default="both",
+    parser.add_argument("-o", "--output", type=str, default=None, help="Output path (.ts, .onnx, or .pte)")
+    parser.add_argument("--format", type=str, choices=["ts", "onnx", "pte", "both", "all"], default="both",
                         help="Export format (default: both)")
+    parser.add_argument("--delegate", type=str, choices=["xnnpack", "coreml", "portable"], default="xnnpack",
+                        help="ExecuTorch delegate for .pte export (default: xnnpack)")
     parser.add_argument("--buffer-size", type=int, default=8192, help="Buffer size in samples (multiple of 8192)")
-    parser.add_argument("--no-bending", action="store_true", help="Skip promoting initializers for ONNX bending")
+    parser.add_argument("--no-bending", action="store_true", help="Skip promoting initializers for ONNX/PTE bending")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -252,6 +346,7 @@ if __name__ == "__main__":
         checkpoint_path=args.checkpoint,
         output_path=args.output,
         format=args.format,
+        delegate=args.delegate,
         buffer_size=args.buffer_size,
         promote_for_bending=not args.no_bending,
     )

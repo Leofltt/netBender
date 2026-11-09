@@ -9,15 +9,15 @@
 #include "ui/LatentTerrainComponent.h"
 #include <vector>
 
-class NNBendingAudioProcessorEditor  : public juce::AudioProcessorEditor,
+class NetBenderAudioProcessorEditor  : public juce::AudioProcessorEditor,
                                        public juce::ComboBox::Listener,
                                        public juce::Slider::Listener,
                                        public juce::Button::Listener,
                                        private juce::Timer
 {
 public:
-    NNBendingAudioProcessorEditor(NNBendingAudioProcessor&);
-    ~NNBendingAudioProcessorEditor() override;
+    NetBenderAudioProcessorEditor(NetBenderAudioProcessor&);
+    ~NetBenderAudioProcessorEditor() override;
 
     auto paint(juce::Graphics&) -> void override;
     auto resized() -> void override;
@@ -131,7 +131,7 @@ private:
     auto set_view_mode(ViewMode new_mode) -> void;
     auto set_side_tab(SideTab new_tab) -> void;
 
-    NNBendingAudioProcessor& audioProcessor;
+    NetBenderAudioProcessor& audioProcessor;
 
     ViewMode currentViewMode{ViewMode::Weights};
     SideTab currentSideTab{SideTab::Mutate};
@@ -164,5 +164,5 @@ private:
     float lastTargetOffset { -999.0f };
     bool targetCurveDirty { true };
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (NNBendingAudioProcessorEditor)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (NetBenderAudioProcessorEditor)
 };

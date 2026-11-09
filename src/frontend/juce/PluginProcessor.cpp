@@ -4,7 +4,7 @@
 #include <cmath>
 
 //==============================================================================
-NNBendingAudioProcessor::NNBendingAudioProcessor()
+NetBenderAudioProcessor::NetBenderAudioProcessor()
 #ifndef JucePlugin_PreferredChannelConfigurations
      : AudioProcessor (BusesProperties()
                      #if ! JucePlugin_IsMidiEffect
@@ -64,13 +64,13 @@ NNBendingAudioProcessor::NNBendingAudioProcessor()
     m_backend = BackendFactory::create_default();
 }
 
-NNBendingAudioProcessor::~NNBendingAudioProcessor()
+NetBenderAudioProcessor::~NetBenderAudioProcessor()
 {
     m_model_thread.stop();
 }
 
 //==============================================================================
-auto NNBendingAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock) -> void {
+auto NetBenderAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock) -> void {
     juce::ignoreUnused(samplesPerBlock);
     m_hostSampleRate.store(sampleRate);
     if (m_backend)
@@ -83,11 +83,11 @@ auto NNBendingAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlo
     initBuffers();
 }
 
-auto NNBendingAudioProcessor::releaseResources() -> void {
+auto NetBenderAudioProcessor::releaseResources() -> void {
     m_model_thread.stop();
 }
 
-auto NNBendingAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const -> bool {
+auto NetBenderAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const -> bool {
   #if JucePlugin_IsMidiEffect
     juce::ignoreUnused(layouts);
     return true;
@@ -105,7 +105,7 @@ auto NNBendingAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts)
   #endif
 }
 
-auto NNBendingAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages) -> void {
+auto NetBenderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages) -> void {
     juce::ScopedNoDenormals noDenormals;
     auto totalNumInputChannels  = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
@@ -342,7 +342,7 @@ auto NNBendingAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juc
 }
 
 //==============================================================================
-auto NNBendingAudioProcessor::getAvailableModes() const -> std::vector<juce::String> {
+auto NetBenderAudioProcessor::getAvailableModes() const -> std::vector<juce::String> {
     std::vector<juce::String> modes;
     if (!m_modelLoaded.load() || !m_backend)
         return modes;
@@ -353,7 +353,7 @@ auto NNBendingAudioProcessor::getAvailableModes() const -> std::vector<juce::Str
     return modes;
 }
 
-auto NNBendingAudioProcessor::loadModel(const juce::File& file) -> bool {
+auto NetBenderAudioProcessor::loadModel(const juce::File& file) -> bool {
     m_modelLoaded.store(false);
     m_model_thread.stop();
     
@@ -444,7 +444,7 @@ auto NNBendingAudioProcessor::loadModel(const juce::File& file) -> bool {
     return false;
 }
 
-auto NNBendingAudioProcessor::setCurrentMethod(const juce::String& method) -> void {
+auto NetBenderAudioProcessor::setCurrentMethod(const juce::String& method) -> void {
     if (!m_backend) return;
     std::string methodStr = method.toStdString();
     auto modes = m_backend->get_plugin_modes();
@@ -469,14 +469,14 @@ auto NNBendingAudioProcessor::setCurrentMethod(const juce::String& method) -> vo
     }
 }
 
-auto NNBendingAudioProcessor::setBufferSize(int size) -> void {
+auto NetBenderAudioProcessor::setBufferSize(int size) -> void {
     if (size > 0 && (size & (size - 1)) == 0) { // Power of two check
         m_bufferSize = size;
         initBuffers();
     }
 }
 
-auto NNBendingAudioProcessor::setUseGpu(bool enabled) -> void {
+auto NetBenderAudioProcessor::setUseGpu(bool enabled) -> void {
     if (m_useGpu.load() == enabled && m_modelLoaded.load())
         return;
 
@@ -509,7 +509,7 @@ auto NNBendingAudioProcessor::setUseGpu(bool enabled) -> void {
     }
 }
 
-auto NNBendingAudioProcessor::initBuffers() -> void {
+auto NetBenderAudioProcessor::initBuffers() -> void {
     m_model_thread.stop();
     
     const juce::ScopedLock sl (getCallbackLock());
@@ -603,7 +603,7 @@ auto NNBendingAudioProcessor::initBuffers() -> void {
     }
 }
 
-auto NNBendingAudioProcessor::runInference() -> void {
+auto NetBenderAudioProcessor::runInference() -> void {
     if (!m_modelLoaded.load() || m_model_out <= 0)
         return;
 
@@ -699,8 +699,8 @@ auto NNBendingAudioProcessor::runInference() -> void {
 }
 
 //==============================================================================
-auto NNBendingAudioProcessor::getStateInformation(juce::MemoryBlock& destData) -> void {
-    juce::XmlElement xmlState ("NNBendingSettings");
+auto NetBenderAudioProcessor::getStateInformation(juce::MemoryBlock& destData) -> void {
+    juce::XmlElement xmlState ("NetBenderSettings");
     xmlState.setAttribute ("modelPath", m_modelPath);
     xmlState.setAttribute ("currentMethod", m_currentMethod);
     xmlState.setAttribute ("bufferSize", m_bufferSize);
@@ -728,11 +728,11 @@ auto NNBendingAudioProcessor::getStateInformation(juce::MemoryBlock& destData) -
     copyXmlToBinary (xmlState, destData);
 }
 
-auto NNBendingAudioProcessor::setStateInformation(const void* data, int sizeInBytes) -> void {
+auto NetBenderAudioProcessor::setStateInformation(const void* data, int sizeInBytes) -> void {
     std::unique_ptr<juce::XmlElement> xmlState (getXmlFromBinary (data, sizeInBytes));
     if (xmlState != nullptr)
     {
-        if (xmlState->hasTagName ("NNBendingSettings"))
+        if (xmlState->hasTagName ("NetBenderSettings") || xmlState->hasTagName ("NNBendingSettings"))
         {
             m_bufferSize = xmlState->getIntAttribute ("bufferSize", 2048);
             setDryWet ((float)xmlState->getDoubleAttribute ("dryWet", 1.0));
@@ -780,12 +780,12 @@ auto NNBendingAudioProcessor::setStateInformation(const void* data, int sizeInBy
 }
 
 //==============================================================================
-auto NNBendingAudioProcessor::createEditor() -> juce::AudioProcessorEditor* {
-    return new NNBendingAudioProcessorEditor (*this);
+auto NetBenderAudioProcessor::createEditor() -> juce::AudioProcessorEditor* {
+    return new NetBenderAudioProcessorEditor (*this);
 }
 
 //==============================================================================
 // This creates the filter...
 auto JUCE_CALLTYPE createPluginFilter() -> juce::AudioProcessor* {
-    return new NNBendingAudioProcessor();
+    return new NetBenderAudioProcessor();
 }

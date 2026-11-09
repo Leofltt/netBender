@@ -15,7 +15,7 @@
 #include <memory>
 #include <string>
 
-class NNBendingAudioProcessor : public juce::AudioProcessor {
+class NetBenderAudioProcessor : public juce::AudioProcessor {
 public:
     using LayerCategory = ::LayerCategory;
     using DriftMode = ::DriftMode;
@@ -23,8 +23,8 @@ public:
     using LayerBendingState = ::LayerBendingState;
     using LatentMode = ::LatentMode;
 
-    NNBendingAudioProcessor();
-    ~NNBendingAudioProcessor() override;
+    NetBenderAudioProcessor();
+    ~NetBenderAudioProcessor() override;
 
     auto prepareToPlay(double sampleRate, int samplesPerBlock) -> void override;
     auto releaseResources() -> void override;
@@ -227,5 +227,5 @@ private:
 
     void initBuffers();
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (NNBendingAudioProcessor)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (NetBenderAudioProcessor)
 };

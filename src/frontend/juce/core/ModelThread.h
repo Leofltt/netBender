@@ -4,12 +4,12 @@
 #include <atomic>
 #include <functional>
 
-class NNBendingAudioProcessor;
+class NetBenderAudioProcessor;
 
 class ModelThread : public juce::Thread {
 public:
     explicit ModelThread(std::function<void()> compute_fn);
-    explicit ModelThread(NNBendingAudioProcessor& processor);
+    explicit ModelThread(NetBenderAudioProcessor& processor);
     ~ModelThread() override;
 
     auto run() -> void override;
