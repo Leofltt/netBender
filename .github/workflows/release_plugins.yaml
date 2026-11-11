@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-and-package-macos:
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v4.2.2
