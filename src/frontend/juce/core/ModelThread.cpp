@@ -28,7 +28,9 @@ auto ModelThread::run() -> void {
         }
 
         if (m_processing.load()) {
+#if JUCE_MAC || JUCE_IOS
             const juce::ScopedAutoReleasePool pool;
+#endif
             if (m_compute_fn) {
                 m_compute_fn();
             }
