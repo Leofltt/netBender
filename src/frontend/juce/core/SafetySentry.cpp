@@ -2,7 +2,7 @@
 #include <cmath>
 #include <algorithm>
 
-auto SafetySentry::process_channel(float* wet_dest, const float* dry_src, int num_samples, float wet_gain, float dry_gain) -> void {
+auto SafetySentry::process_channel(float* wet_dest, const float* dry_src, int num_samples, float wet_gain, float dry_gain) NETBENDER_NONBLOCKING -> void {
     if (wet_dest == nullptr || dry_src == nullptr || num_samples <= 0) {
         return;
     }
@@ -42,7 +42,7 @@ auto SafetySentry::process_channel(float* wet_dest, const float* dry_src, int nu
     }
 }
 
-auto SafetySentry::tick_recovery(const std::function<void()>& on_reset) -> void {
+auto SafetySentry::tick_recovery(const std::function<void()>& on_reset) NETBENDER_NONBLOCKING -> void {
     if (m_blown_fuse.load() && m_auto_reset.load()) {
         int cooldown = m_cooldown_blocks.fetch_add(1);
         if (cooldown > 40) { // ~0.5-1.0s depending on block size

@@ -49,7 +49,7 @@ auto AudioRingBuffer::init(int size) -> void {
     m_available.store(0);
 }
 
-auto AudioRingBuffer::put(const float* data, int num_samples) -> void {
+auto AudioRingBuffer::put(const float* data, int num_samples) NETBENDER_NONBLOCKING -> void {
     if (m_capacity <= 0 || num_samples <= 0 || m_buffer.empty()) {
         return;
     }
@@ -80,7 +80,7 @@ auto AudioRingBuffer::put(const float* data, int num_samples) -> void {
     }
 }
 
-auto AudioRingBuffer::get(float* dest, int num_samples) -> void {
+auto AudioRingBuffer::get(float* dest, int num_samples) NETBENDER_NONBLOCKING -> void {
     if (m_capacity <= 0 || num_samples <= 0 || dest == nullptr) {
         return;
     }
@@ -103,7 +103,7 @@ auto AudioRingBuffer::get(float* dest, int num_samples) -> void {
     }
 }
 
-auto AudioRingBuffer::peek(float* dest, int num_samples) const -> int {
+auto AudioRingBuffer::peek(float* dest, int num_samples) const NETBENDER_NONBLOCKING -> int {
     if (m_capacity <= 0 || num_samples <= 0 || dest == nullptr || m_buffer.empty()) {
         return 0;
     }
@@ -121,7 +121,7 @@ auto AudioRingBuffer::peek(float* dest, int num_samples) const -> int {
     return to_read;
 }
 
-auto AudioRingBuffer::drop(int num_samples) -> void {
+auto AudioRingBuffer::drop(int num_samples) NETBENDER_NONBLOCKING -> void {
     if (m_capacity <= 0 || num_samples <= 0) {
         return;
     }
@@ -141,11 +141,11 @@ auto AudioRingBuffer::clear() -> void {
     m_available.store(0);
 }
 
-auto AudioRingBuffer::get_available() const -> int {
+auto AudioRingBuffer::get_available() const NETBENDER_NONBLOCKING -> int {
     return std::min(m_available.load(), m_capacity);
 }
 
-auto AudioRingBuffer::get_capacity() const -> int {
+auto AudioRingBuffer::get_capacity() const NETBENDER_NONBLOCKING -> int {
     return m_capacity;
 }
 

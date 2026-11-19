@@ -181,7 +181,7 @@ auto BendingManager::set_transient_threshold(float th) -> void {
     m_transient_threshold.store(std::clamp(th, 0.01f, 1.0f));
 }
 
-auto BendingManager::update_audio_envelope(float peak) -> void {
+auto BendingManager::update_audio_envelope(float peak) NETBENDER_NONBLOCKING -> void {
     float prev = m_audio_envelope.load();
     m_audio_envelope.store(std::max(peak, prev * 0.95f));
 }

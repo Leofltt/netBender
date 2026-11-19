@@ -14,6 +14,7 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include "rtsan_utils.h"
 
 class NetBenderAudioProcessor : public juce::AudioProcessor {
 public:
@@ -29,7 +30,7 @@ public:
     auto prepareToPlay(double sampleRate, int samplesPerBlock) -> void override;
     auto releaseResources() -> void override;
     auto isBusesLayoutSupported(const BusesLayout& layouts) const -> bool override;
-    auto processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) -> void override;
+    auto processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) NETBENDER_NONBLOCKING -> void override;
 
     auto createEditor() -> juce::AudioProcessorEditor* override;
     auto hasEditor() const -> bool override { return true; }
@@ -96,7 +97,7 @@ public:
     auto hasAutoencode() -> bool { return m_backend ? m_backend->has_autoencode() : false; }
 
     // Inference loop
-    auto runInference() -> void;
+    auto run_inference() -> void;
 
     // Dry / Wet control
     auto getDryWet() const -> float { return m_dryWetParam ? m_dryWetParam->get() : m_dryWet.load(); }
@@ -229,7 +230,9 @@ private:
     std::vector<std::vector<float>> m_worker_in;
     std::vector<std::vector<float>> m_worker_out;
 
-    std::mutex m_staging_mutex;
+    static constexpr uint32_t k_reconfiguring_bit = 0x80000000u;
+    std::atomic<uint32_t> m_rt_gate { 0 };
+    std::mutex m_reconfig_mutex;
     mutable std::mutex m_state_mutex;
     std::atomic<bool> m_output_ready { false };
     std::atomic<bool> m_pendingClearFifo { false };
@@ -243,9 +246,9 @@ private:
     std::vector<juce::CatmullRomInterpolator> m_output_resamplers;
     std::vector<std::vector<float>> m_resampled_in_scratch;
     std::vector<std::vector<float>> m_resampled_out_scratch;
-    std::vector<float> m_dryBlockScratch;
+    std::vector<float> m_dry_block_scratch;
 
-    void initBuffers();
+    auto init_buffers() -> void;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (NetBenderAudioProcessor)
 };

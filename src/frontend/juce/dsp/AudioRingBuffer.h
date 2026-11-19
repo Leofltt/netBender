@@ -3,6 +3,7 @@
 #include <vector>
 #include <atomic>
 #include <cstddef>
+#include "rtsan_utils.h"
 
 class AudioRingBuffer {
 public:
@@ -15,14 +16,14 @@ public:
     ~AudioRingBuffer() = default;
 
     auto init(int size) -> void;
-    auto put(const float* data, int num_samples) -> void;
-    auto get(float* dest, int num_samples) -> void;
-    auto peek(float* dest, int num_samples) const -> int;
-    auto drop(int num_samples) -> void;
+    auto put(const float* data, int num_samples) NETBENDER_NONBLOCKING -> void;
+    auto get(float* dest, int num_samples) NETBENDER_NONBLOCKING -> void;
+    auto peek(float* dest, int num_samples) const NETBENDER_NONBLOCKING -> int;
+    auto drop(int num_samples) NETBENDER_NONBLOCKING -> void;
     auto clear() -> void;
 
-    [[nodiscard]] auto get_available() const -> int;
-    [[nodiscard]] auto get_capacity() const -> int;
+    [[nodiscard]] auto get_available() const NETBENDER_NONBLOCKING -> int;
+    [[nodiscard]] auto get_capacity() const NETBENDER_NONBLOCKING -> int;
 
 private:
     std::vector<float> m_buffer;

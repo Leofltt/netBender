@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <mutex>
 #include <atomic>
+#include "rtsan_utils.h"
 
 // Layer classification for Trace Isolation
 enum class LayerCategory {
@@ -101,7 +102,7 @@ public:
     auto set_transient_threshold(float th) -> void;
     [[nodiscard]] auto get_transient_threshold() const -> float { return m_transient_threshold.load(); }
 
-    auto update_audio_envelope(float peak) -> void;
+    auto update_audio_envelope(float peak) NETBENDER_NONBLOCKING -> void;
 
     // Core weight calculation and upload to backend
     auto apply_bending(

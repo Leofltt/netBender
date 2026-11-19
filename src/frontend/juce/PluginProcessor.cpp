@@ -2,6 +2,72 @@
 #include "PluginEditor.h"
 #include <random>
 #include <cmath>
+#include <thread>
+
+namespace {
+
+// Lock-free, syscall-free audio-thread reader guard.
+// Increments the active-reader counter iff k_reconfiguring_bit is clear.
+class scoped_rt_reader {
+public:
+    scoped_rt_reader(std::atomic<uint32_t>& gate, uint32_t reconfiguring_bit) NETBENDER_NONBLOCKING
+        : m_gate(gate) {
+        uint32_t state = m_gate.load(std::memory_order_acquire);
+        while ((state & reconfiguring_bit) == 0u) {
+            if (m_gate.compare_exchange_weak(
+                    state,
+                    state + 1u,
+                    std::memory_order_acquire,
+                    std::memory_order_relaxed)) {
+                m_acquired = true;
+                break;
+            }
+        }
+    }
+
+    ~scoped_rt_reader() NETBENDER_NONBLOCKING {
+        if (m_acquired) {
+            m_gate.fetch_sub(1u, std::memory_order_release);
+        }
+    }
+
+    scoped_rt_reader(const scoped_rt_reader&) = delete;
+    auto operator=(const scoped_rt_reader&) -> scoped_rt_reader& = delete;
+
+    [[nodiscard]] auto is_acquired() const NETBENDER_NONBLOCKING -> bool {
+        return m_acquired;
+    }
+
+private:
+    std::atomic<uint32_t>& m_gate;
+    bool m_acquired { false };
+};
+
+// Non-RT writer guard used by init_buffers() to drain any in-flight processBlock()
+// without timers or audio-thread syscalls.
+class scoped_reconfigure_gate {
+public:
+    scoped_reconfigure_gate(std::atomic<uint32_t>& gate, uint32_t reconfiguring_bit)
+        : m_gate(gate), m_reconfiguring_bit(reconfiguring_bit) {
+        m_gate.fetch_or(m_reconfiguring_bit, std::memory_order_acq_rel);
+        while ((m_gate.load(std::memory_order_acquire) & ~m_reconfiguring_bit) != 0u) {
+            std::this_thread::yield();
+        }
+    }
+
+    ~scoped_reconfigure_gate() {
+        m_gate.fetch_and(~m_reconfiguring_bit, std::memory_order_release);
+    }
+
+    scoped_reconfigure_gate(const scoped_reconfigure_gate&) = delete;
+    auto operator=(const scoped_reconfigure_gate&) -> scoped_reconfigure_gate& = delete;
+
+private:
+    std::atomic<uint32_t>& m_gate;
+    uint32_t m_reconfiguring_bit;
+};
+
+} // namespace
 
 //==============================================================================
 NetBenderAudioProcessor::NetBenderAudioProcessor()
@@ -80,7 +146,7 @@ auto NetBenderAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlo
         m_modelSampleRate.store(modelSr);
         m_resamplingActive.store(std::abs(sampleRate - modelSr) > 1.0);
     }
-    initBuffers();
+    init_buffers();
 }
 
 auto NetBenderAudioProcessor::releaseResources() -> void {
@@ -105,13 +171,13 @@ auto NetBenderAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts)
   #endif
 }
 
-auto NetBenderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages) -> void {
+auto NetBenderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages) NETBENDER_NONBLOCKING -> void {
     juce::ScopedNoDenormals noDenormals;
     auto totalNumInputChannels  = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
 
-    const juce::ScopedTryLock sl (getCallbackLock());
-    if (!sl.isLocked())
+    const scoped_rt_reader rt_guard(m_rt_gate, k_reconfiguring_bit);
+    if (!rt_guard.is_acquired())
     {
         buffer.clear();
         return;
@@ -222,18 +288,15 @@ auto NetBenderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juc
             }
         }
         
-        // Check if we have enough samples to trigger inference and thread is idle
+        // Check if we have enough samples to trigger inference and thread is idle.
+        // SPSC release/acquire handshake on ModelThread::m_processing synchronizes m_staging_in.
         if (!m_model_thread.is_processing() && m_in_buffers[0].get_available() >= m_bufferSize)
         {
-            std::unique_lock<std::mutex> lock(m_staging_mutex, std::try_to_lock);
-            if (lock.owns_lock())
+            for (int c = 0; c < m_model_in; ++c)
             {
-                for (int c = 0; c < m_model_in; ++c)
-                {
-                    m_in_buffers[c].get(m_staging_in[c].data(), m_bufferSize);
-                }
-                m_model_thread.trigger_compute();
+                m_in_buffers[c].get(m_staging_in[c].data(), m_bufferSize);
             }
+            m_model_thread.trigger_compute();
         }
     }
     else
@@ -308,21 +371,34 @@ auto NetBenderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juc
         buffer.clear(c, 0, numSamples);
     }
 
-    // 4. Dry/Wet Blending & Safety Sentry
-    float wetGain = m_dryWet.load();
-    float dryGain = 1.0f - wetGain;
+    // 4. Dry/Wet Blending & Safety Sentry (chunked against pre-allocated scratch; zero heap allocs)
+    float wet_gain = m_dryWet.load();
+    float dry_gain = 1.0f - wet_gain;
+    const int scratch_capacity = static_cast<int>(m_dry_block_scratch.size());
 
-    if ((int)m_dryBlockScratch.size() < numSamples)
-        m_dryBlockScratch.resize(numSamples, 0.0f);
-
-    for (int c = 0; c < (int)totalNumOutputChannels; ++c)
+    if (scratch_capacity > 0)
     {
-        int dryCh = std::min(c, (int)m_dry_delay_buffers.size() - 1);
-        if (dryCh >= 0)
+        for (int c = 0; c < (int)totalNumOutputChannels; ++c)
         {
-            m_dry_delay_buffers[dryCh].get(m_dryBlockScratch.data(), numSamples);
-            float* outPtr = buffer.getWritePointer(c);
-            m_safety_sentry.process_channel(outPtr, m_dryBlockScratch.data(), numSamples, wetGain, dryGain);
+            int dry_ch = std::min(c, (int)m_dry_delay_buffers.size() - 1);
+            if (dry_ch >= 0)
+            {
+                float* out_ptr = buffer.getWritePointer(c);
+                int offset = 0;
+                while (offset < numSamples)
+                {
+                    int chunk = std::min(numSamples - offset, scratch_capacity);
+                    m_dry_delay_buffers[dry_ch].get(m_dry_block_scratch.data(), chunk);
+                    m_safety_sentry.process_channel(
+                        out_ptr + offset,
+                        m_dry_block_scratch.data(),
+                        chunk,
+                        wet_gain,
+                        dry_gain
+                    );
+                    offset += chunk;
+                }
+            }
         }
     }
 
@@ -428,7 +504,7 @@ auto NetBenderAudioProcessor::loadModel(const juce::File& file) -> bool {
             m_resamplingActive.store(std::abs(m_hostSampleRate.load() - modelSr) > 1.0);
 
             m_modelLoaded.store(true);
-            initBuffers();
+            init_buffers();
             return true;
         }
     }
@@ -465,7 +541,7 @@ auto NetBenderAudioProcessor::setCurrentMethod(const juce::String& method) -> vo
         }
 
         if (prevIn != m_model_in || prevOut != m_model_out) {
-            initBuffers();
+            init_buffers();
         } else {
             m_pendingClearFifo.store(true);
             if (!m_model_thread.isThreadRunning() && m_backend) {
@@ -478,7 +554,7 @@ auto NetBenderAudioProcessor::setCurrentMethod(const juce::String& method) -> vo
 auto NetBenderAudioProcessor::setBufferSize(int size) -> void {
     if (size > 0 && (size & (size - 1)) == 0) { // Power of two check
         m_bufferSize = size;
-        initBuffers();
+        init_buffers();
     }
 }
 
@@ -515,36 +591,36 @@ auto NetBenderAudioProcessor::setUseGpu(bool enabled) -> void {
     }
 }
 
-auto NetBenderAudioProcessor::initBuffers() -> void {
+auto NetBenderAudioProcessor::init_buffers() -> void {
+    std::lock_guard<std::mutex> reconfig_lock(m_reconfig_mutex);
+    const scoped_reconfigure_gate reconfig_gate(m_rt_gate, k_reconfiguring_bit);
+
     m_model_thread.stop();
-    
-    const juce::ScopedLock sl (getCallbackLock());
-    std::lock_guard<std::mutex> lock(m_staging_mutex);
-    
+
     int n_in = std::max(1, m_model_in);
     int n_out = std::max(1, m_model_out);
-    
+
     m_in_buffers.resize(n_in);
     m_out_buffers.resize(n_out);
-    
+
     m_staging_in.resize(n_in);
     m_staging_out.resize(n_out);
     m_worker_in.resize(n_in);
     m_worker_out.resize(n_out);
-    
+
     // In forward mode, delay is 2 * m_bufferSize (1 buffer input accumulation + 1 buffer model inference transfer)
-    double hostSr = m_hostSampleRate.load();
-    double modelSr = m_modelSampleRate.load();
-    bool resampling = m_resamplingActive.load() && (hostSr > 0.0) && (modelSr > 0.0);
-    
+    double host_sr = m_hostSampleRate.load();
+    double model_sr = m_modelSampleRate.load();
+    bool resampling = m_resamplingActive.load() && (host_sr > 0.0) && (model_sr > 0.0);
+
     // Scale latency to host sample rate if resampling is active
-    int latencySamples = 0;
+    int latency_samples = 0;
     if (m_model_in > 0)
     {
-        double latencyModel = m_bufferSize * 2.0;
-        latencySamples = resampling ? (int)std::round(latencyModel * (hostSr / modelSr)) : (m_bufferSize * 2);
+        double latency_model = m_bufferSize * 2.0;
+        latency_samples = resampling ? (int)std::round(latency_model * (host_sr / model_sr)) : (m_bufferSize * 2);
     }
-    setLatencySamples(latencySamples);
+    setLatencySamples(latency_samples);
 
     int n_dry = std::max(2, std::max(n_in, n_out));
     m_dry_delay_buffers.resize(n_dry);
@@ -556,16 +632,16 @@ auto NetBenderAudioProcessor::initBuffers() -> void {
     m_output_resamplers.resize(n_out);
     for (auto& r : m_output_resamplers) r.reset();
 
-    int maxScratchSize = std::max(8192, m_bufferSize * 4);
+    int max_scratch_size = std::max(8192, m_bufferSize * 4);
     m_resampled_in_scratch.resize(n_in);
     for (auto& buf : m_resampled_in_scratch)
-        buf.assign(maxScratchSize, 0.0f);
+        buf.assign(max_scratch_size, 0.0f);
 
     m_resampled_out_scratch.resize(n_out);
     for (auto& buf : m_resampled_out_scratch)
-        buf.assign(maxScratchSize, 0.0f);
+        buf.assign(max_scratch_size, 0.0f);
 
-    m_dryBlockScratch.assign(maxScratchSize, 0.0f);
+    m_dry_block_scratch.assign(max_scratch_size, 0.0f);
 
     for (int i = 0; i < n_in; ++i)
     {
@@ -576,14 +652,14 @@ auto NetBenderAudioProcessor::initBuffers() -> void {
 
     for (int i = 0; i < n_dry; ++i)
     {
-        int dryCap = std::max(m_bufferSize, latencySamples);
-        m_dry_delay_buffers[i].init(dryCap);
+        int dry_cap = std::max(m_bufferSize, latency_samples);
+        m_dry_delay_buffers[i].init(dry_cap);
         // Pre-fill dry delay buffer with latency zeros so dry aligns with wet output
-        if (latencySamples > 0)
-            m_dry_delay_buffers[i].put(nullptr, latencySamples);
+        if (latency_samples > 0)
+            m_dry_delay_buffers[i].put(nullptr, latency_samples);
     }
-    
-    int modelLatencySamples = (m_model_in > 0) ? (m_bufferSize * 2) : 0;
+
+    int model_latency_samples = (m_model_in > 0) ? (m_bufferSize * 2) : 0;
     for (int i = 0; i < n_out; ++i)
     {
         m_out_buffers[i].init(m_bufferSize);
@@ -591,26 +667,26 @@ auto NetBenderAudioProcessor::initBuffers() -> void {
         m_worker_out[i].assign(m_bufferSize, 0.0f);
         // Pre-fill output buffer with latency cushion in model sample units
         // to prevent starvation during background model inference and align with dry delay buffer
-        if (modelLatencySamples > 0)
+        if (model_latency_samples > 0)
         {
-            m_out_buffers[i].put(nullptr, modelLatencySamples);
+            m_out_buffers[i].put(nullptr, model_latency_samples);
         }
     }
-    
+
     m_output_ready.store(false);
-    
+
     if (m_backend)
     {
         m_backend->clear_decode_gen_fifo();
     }
-    
+
     if (m_modelLoaded.load())
     {
         m_model_thread.startThread(juce::Thread::Priority::high);
     }
 }
 
-auto NetBenderAudioProcessor::runInference() -> void {
+auto NetBenderAudioProcessor::run_inference() -> void {
     if (!m_modelLoaded.load() || m_model_out <= 0)
         return;
 
@@ -627,7 +703,7 @@ auto NetBenderAudioProcessor::runInference() -> void {
     if (m_pendingClearFifo.exchange(false) && m_backend)
         m_backend->clear_decode_gen_fifo();
 
-    // 1. Update and apply weight bending to backend
+    // Update and apply weight bending to backend
     float scaleVal = m_scaleParam ? m_scaleParam->get() : 1.0f;
     float offsetVal = m_offsetParam ? m_offsetParam->get() : 0.0f;
     float heatVal = m_heatParam ? m_heatParam->get() : 0.0f;
@@ -635,15 +711,13 @@ auto NetBenderAudioProcessor::runInference() -> void {
     bool shortVal = m_shortCircuitParam ? m_shortCircuitParam->get() : false;
     m_bending_manager.apply_bending(m_backend.get(), activeLayerStr, scaleVal, offsetVal, heatVal, memVal, shortVal);
 
-    // 2. Copy audio inputs from staging buffers to local worker buffers under a brief lock
+    // Copy audio inputs from staging buffers to local worker buffers
+    // (synchronized via SPSC acquire/release handshake on ModelThread::m_processing)
+    for (int c = 0; c < m_model_in; ++c)
     {
-        std::lock_guard<std::mutex> lock(m_staging_mutex);
-        for (int c = 0; c < m_model_in; ++c)
+        if (c < (int)m_staging_in.size() && c < (int)m_worker_in.size())
         {
-            if (c < (int)m_staging_in.size() && c < (int)m_worker_in.size())
-            {
-                std::memcpy(m_worker_in[c].data(), m_staging_in[c].data(), m_bufferSize * sizeof(float));
-            }
+            std::memcpy(m_worker_in[c].data(), m_staging_in[c].data(), m_bufferSize * sizeof(float));
         }
     }
     std::vector<float*> in_ptrs;
@@ -702,7 +776,6 @@ auto NetBenderAudioProcessor::runInference() -> void {
             m_backend->perform(in_ptrs, out_ptrs, modeStr, 1, m_model_out, m_bufferSize);
     }
 
-    // 3. Push computed output directly into output ring buffers
     for (int c = 0; c < m_model_out; ++c)
     {
         if (c < (int)m_out_buffers.size() && c < (int)m_worker_out.size())

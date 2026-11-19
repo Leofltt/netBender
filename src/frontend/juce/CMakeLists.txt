@@ -69,6 +69,7 @@ function(configure_nn_bending_target target_name)
 
     # Link dependencies
     target_link_libraries(${target_name} PRIVATE
+        netbender_rtsan
         backend
         "${TORCH_LIBRARIES}"
         onnxruntime

@@ -323,6 +323,7 @@ cmake --build build --target all
 | `-DBUILD_MAXMSP=ON\|OFF` | `ON` | Build Max/MSP externals (`netBender~`, `mc.netBender~`, `mcs.netBender~`, `netBender.info`). |
 | `-DBUILD_PUREDATA=ON\|OFF` | `ON` | Build PureData external (`netBender~`). |
 | `-DENABLE_EXECUTORCH_BACKEND=ON\|OFF` | `ON` | Enable ExecuTorch `.pte` backend discovery and linking (`EXECUTORCH_ROOT`). |
+| `-DENABLE_RTSAN=ON\|OFF` | `OFF` | Enable Clang RealtimeSanitizer (`-fsanitize=realtime`) for audio-thread real-time safety verification (requires upstream LLVM/Clang 20+). |
 | `-DBUNDLE_DEPENDENCIES=ON\|OFF` | `OFF` | Bundle and relocate shared libraries into `support/` for redistributable packages. |
 | `-DSIGN_ID="..."` | `"-"` | macOS codesigning identity (can also be placed in `.env` at the repo root). |
 
@@ -341,7 +342,37 @@ The C++ test harness (`build/tests/test_backends`) verifies loading, streaming `
 ./build/tests/test_backends --gpu models/stable_audio_1_vae_coreml.pte models/encodec_coreml.pte
 ```
 
-### 4. Streaming Metadata Specification
+### 4. Real-Time Safety Verification with RealtimeSanitizer (`test_rtsan`)
+
+NetBender annotates its real-time audio path (`NetBenderAudioProcessor::processBlock`, `AudioRingBuffer`, `SafetySentry`, `ModelThread::trigger_compute`, and `BendingManager::update_audio_envelope`) with `NETBENDER_NONBLOCKING` (`[[clang::nonblocking]]` via `src/shared/rtsan_utils.h`) so [Clang RealtimeSanitizer (RTSan)](https://clang.llvm.org/docs/RealtimeSanitizer.html) can dynamically catch heap allocations, mutex locks, or blocking syscalls on the audio thread.
+
+> [!NOTE]
+> **macOS Compiler Requirement**: Apple Clang does not ship the RTSan runtime library. On macOS, install upstream LLVM 20+ via Homebrew (`brew install llvm`) and pass its compiler paths directly to CMake in a separate build directory (no need to add Homebrew LLVM to `PATH` or `~/.zshrc`).
+
+```bash
+# 1. Configure with RTSan enabled using upstream LLVM/Clang 20+:
+cmake -S src -B build-rtsan \
+    -DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm/bin/clang \
+    -DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++ \
+    -DCMAKE_PREFIX_PATH="$(pwd)/libtorch" \
+    -DENABLE_RTSAN=ON \
+    -DBUILD_MAXMSP=OFF \
+    -DBUILD_PUREDATA=OFF \
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+# 2. Build the headless RTSan test harness (and optionally the Standalone app):
+cmake --build build-rtsan --target test_rtsan -j
+# cmake --build build-rtsan --target standalone -j
+
+# 3. Run in strict mode (exits non-zero on any real-time violation):
+./build-rtsan/tests/test_rtsan_artefacts/RelWithDebInfo/test_rtsan models/darbouka_xnnpack.pte
+
+# Or run in audit mode to report all violations without aborting:
+RTSAN_OPTIONS="halt_on_error=false" \
+    ./build-rtsan/tests/test_rtsan_artefacts/RelWithDebInfo/test_rtsan models/darbouka_xnnpack.pte
+```
+
+### 5. Streaming Metadata Specification
 
 NetBender models configure their streaming buffer, receptive field discard, and latent generation parameters via unified `NBND` v2 `.bin` embedded metadata and ONNX model metadata properties (`netbender.*`):
 

@@ -63,6 +63,7 @@ find_package(Torch REQUIRED PATHS ${torch_dir}/libtorch/lib)
 
 include(${CMAKE_SOURCE_DIR}/cmake/add_onnxruntime.cmake)
 include(${CMAKE_SOURCE_DIR}/cmake/add_executorch.cmake)
+include(${CMAKE_SOURCE_DIR}/cmake/add_rtsan.cmake)
 
 if (APPLE)
   # Automatically strip quarantine and ad-hoc sign torch, onnx, and support dylibs to prevent Gatekeeper popups

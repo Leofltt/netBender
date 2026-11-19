@@ -134,3 +134,4 @@ protected:
   size_t                          m_decode_gen_fifo_read_idx { 0 };
   std::vector<float>              m_decode_gen_latent_state;
 };
+
