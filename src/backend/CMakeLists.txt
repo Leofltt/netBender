@@ -17,7 +17,6 @@ set_property(TARGET netbender_dsp PROPERTY POSITION_INDEPENDENT_CODE ON)
 target_include_directories(netbender_dsp PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}"
   "${CMAKE_CURRENT_SOURCE_DIR}/dsp"
-  "${CMAKE_SOURCE_DIR}/shared"
 )
 target_link_libraries(netbender_dsp PUBLIC netbender_rtsan Threads::Threads)
 if (APPLE)

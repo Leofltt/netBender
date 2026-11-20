@@ -3,7 +3,7 @@
 #include <mutex>
 #include <string>
 #include <torch/script.h>
-#include "../shared/static_buffer.h"
+#include "static_buffer.h"
 #include <torch/torch.h>
 #include <vector>
 #include <functional>

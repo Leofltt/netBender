@@ -17,7 +17,7 @@
 #include "../../../backend/IBackend.h"
 #include "../../../backend/BackendFactory.h"
 #include "../../../shared/circular_buffer.h"
-#include "../../../shared/static_buffer.h"
+#include "static_buffer.h"
 
 #ifndef VERSION
 #define VERSION "UNDEFINED"

@@ -5,7 +5,7 @@
 #include <map>
 #include <functional>
 #include <cstdint>
-#include "../shared/static_buffer.h"
+#include "static_buffer.h"
 
 struct MethodProperties {
     std::string name = "";

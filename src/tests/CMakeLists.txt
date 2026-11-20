@@ -8,10 +8,45 @@ add_executable(test_audio_ring_buffer
 target_compile_features(test_audio_ring_buffer PRIVATE cxx_std_20)
 
 target_link_libraries(test_audio_ring_buffer PRIVATE
-    netbender_dsp
+    NetBender::dsp
 )
 
 add_test(NAME test_audio_ring_buffer COMMAND test_audio_ring_buffer)
+
+add_executable(test_dsp_core
+    test_dsp_core.cpp
+)
+
+target_compile_features(test_dsp_core PRIVATE cxx_std_20)
+
+target_link_libraries(test_dsp_core PRIVATE
+    NetBender::dsp
+)
+
+add_test(NAME test_dsp_core COMMAND test_dsp_core)
+
+add_executable(test_backend_core
+    test_backend_core.cpp
+)
+
+target_include_directories(test_backend_core PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+)
+
+target_compile_features(test_backend_core PRIVATE cxx_std_20)
+
+target_link_libraries(test_backend_core PRIVATE
+    NetBender::backend
+)
+
+if (APPLE)
+    set_target_properties(test_backend_core PROPERTIES
+        BUILD_WITH_INSTALL_RPATH TRUE
+        INSTALL_RPATH "${TORCH_INSTALL_PREFIX}/lib;${torch_dir}/libtorch/lib;${ort_extracted_dir}/lib;${CONDA_ENV_PATH}/lib;/Library/Application Support/NetBender/lib;@loader_path/;@loader_path/../lib"
+    )
+endif()
+
+add_test(NAME test_backend_core COMMAND test_backend_core)
 
 add_executable(test_backends
     test_backends.cpp
@@ -20,7 +55,6 @@ add_executable(test_backends
 target_include_directories(test_backends PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_SOURCE_DIR}/backend"
-    "${CMAKE_SOURCE_DIR}/shared"
     "${ONNXRUNTIME_INCLUDE_DIR}"
 )
 
@@ -56,7 +90,6 @@ if (BUILD_JUCE_PLUGIN)
         "${CMAKE_SOURCE_DIR}/frontend/juce/ui"
         "${CMAKE_SOURCE_DIR}/frontend/juce/core"
         "${CMAKE_SOURCE_DIR}/backend"
-        "${CMAKE_SOURCE_DIR}/shared"
         "${CMAKE_BINARY_DIR}/_deps"
     )
 

@@ -8,7 +8,6 @@
 #include <random>
 #include "parsing_utils.h"
 
-
 #define CPU torch::kCPU
 #define CUDA torch::kCUDA
 #define MPS torch::kMPS
@@ -38,7 +37,15 @@ auto static_buffer_to_tensor(StaticBuffer<float>& buffer) -> torch::Tensor {
 
 }  // namespace
 
-TorchBackend::TorchBackend() : m_loaded(0), m_device(CPU), m_use_gpu(false) {
+TorchBackend::TorchBackend()
+    : m_loaded(0),
+      m_in_dim(0),
+      m_in_ratio(0),
+      m_out_dim(0),
+      m_out_ratio(0),
+      m_device(CPU),
+      m_use_gpu(false),
+      m_sr(44100.0) {
     at::init_num_threads();
 }
 

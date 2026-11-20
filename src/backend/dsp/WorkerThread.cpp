@@ -120,6 +120,7 @@ auto WorkerThread::start() -> void {
     }
     drain_semaphore();
     m_should_exit.store(false, std::memory_order_release);
+    m_pending.store(false, std::memory_order_release);
     m_processing.store(false, std::memory_order_release);
     m_running.store(true, std::memory_order_release);
     m_thread = std::thread(&WorkerThread::run, this);
@@ -128,6 +129,7 @@ auto WorkerThread::start() -> void {
 auto WorkerThread::stop() -> void {
     if (!m_thread.joinable()) {
         m_running.store(false, std::memory_order_release);
+        m_pending.store(false, std::memory_order_release);
         m_processing.store(false, std::memory_order_release);
         return;
     }
@@ -135,12 +137,16 @@ auto WorkerThread::stop() -> void {
     signal_semaphore();
     m_thread.join();
     m_running.store(false, std::memory_order_release);
+    m_pending.store(false, std::memory_order_release);
     m_processing.store(false, std::memory_order_release);
 }
 
 auto WorkerThread::trigger() NETBENDER_NONBLOCKING -> void {
-    m_processing.store(true, std::memory_order_release);
-    signal_semaphore();
+    // Coalesce concurrent triggers into at most one pending wakeup so permits stay bounded
+    // and triggers issued mid-compute never lose a wakeup.
+    if (!m_pending.exchange(true, std::memory_order_acq_rel)) {
+        signal_semaphore();
+    }
 }
 
 auto WorkerThread::run() -> void {
@@ -155,12 +161,16 @@ auto WorkerThread::run() -> void {
             break;
         }
 
-        if (m_processing.load(std::memory_order_acquire)) {
+        if (m_pending.load(std::memory_order_acquire)) {
+            m_processing.store(true, std::memory_order_release);
+            while (!m_should_exit.load(std::memory_order_acquire) &&
+                   m_pending.exchange(false, std::memory_order_acq_rel)) {
 #if defined(__APPLE__)
-            const ScopedAutoreleasePool pool;
+                const ScopedAutoreleasePool pool;
 #endif
-            if (m_compute_fn) {
-                m_compute_fn();
+                if (m_compute_fn) {
+                    m_compute_fn();
+                }
             }
             m_processing.store(false, std::memory_order_release);
         }

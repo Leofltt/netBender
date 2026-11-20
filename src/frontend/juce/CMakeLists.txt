@@ -46,7 +46,6 @@ function(configure_nn_bending_target target_name)
         "${CMAKE_CURRENT_SOURCE_DIR}/ui"
         "${CMAKE_CURRENT_SOURCE_DIR}/core"
         "${CMAKE_SOURCE_DIR}/backend"
-        "${CMAKE_SOURCE_DIR}/shared"
         "${CMAKE_BINARY_DIR}/_deps"
     )
 

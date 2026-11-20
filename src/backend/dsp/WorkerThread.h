@@ -34,7 +34,8 @@ public:
     }
 
     [[nodiscard]] auto is_processing() const NETBENDER_NONBLOCKING -> bool {
-        return m_processing.load(std::memory_order_acquire);
+        return m_processing.load(std::memory_order_acquire) ||
+               m_pending.load(std::memory_order_acquire);
     }
 
 private:
@@ -56,5 +57,6 @@ private:
 #endif
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_should_exit{false};
+    std::atomic<bool> m_pending{false};
     std::atomic<bool> m_processing{false};
 };

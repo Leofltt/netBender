@@ -1,7 +1,7 @@
 #pragma once
 #include "array_tools.h"
 #include "../../../backend/IBackend.h"
-#include "../../../shared/static_buffer.h"
+#include "static_buffer.h"
 #include "c74_min.h"
 
 class BufferManager {
