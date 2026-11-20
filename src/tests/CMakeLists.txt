@@ -183,6 +183,8 @@ if (BUILD_JUCE_PLUGIN)
         )
     endif()
 
+    add_test(NAME test_rtsan COMMAND test_rtsan)
+
     juce_add_console_app(test_resampler_parity
         PRODUCT_NAME "NetBenderResamplerParityTest"
     )
@@ -205,4 +207,49 @@ if (BUILD_JUCE_PLUGIN)
     )
 
     add_test(NAME test_resampler_parity COMMAND test_resampler_parity)
+endif()
+
+# Aggregate target building all model-free CTest unit tests (excludes test_backends)
+set(_nb_unit_test_targets
+    test_audio_ring_buffer
+    test_dsp_core
+    test_backend_core
+    test_resampling_spsc
+    test_streaming_engine
+    test_bending
+)
+if (BUILD_JUCE_PLUGIN)
+    list(APPEND _nb_unit_test_targets
+        test_resampler_parity
+        test_rtsan
+    )
+endif()
+add_custom_target(unit_tests DEPENDS ${_nb_unit_test_targets})
+
+# On Windows, prepend LibTorch and ONNX Runtime DLL directories to PATH for CTest runs
+if (WIN32 AND CMAKE_VERSION VERSION_GREATER_EQUAL "3.22")
+    set(_nb_win_dll_tests
+        test_backend_core
+        test_streaming_engine
+        test_bending
+    )
+    if (BUILD_JUCE_PLUGIN)
+        list(APPEND _nb_win_dll_tests test_rtsan)
+    endif()
+    set(_nb_win_dll_mods "")
+    foreach(_dir IN ITEMS
+        "${TORCH_INSTALL_PREFIX}/lib"
+        "${torch_dir}/libtorch/lib"
+        "${ort_extracted_dir}/lib"
+    )
+        if (_dir AND EXISTS "${_dir}")
+            file(TO_NATIVE_PATH "${_dir}" _native_dir)
+            list(APPEND _nb_win_dll_mods "PATH=path_list_prepend:${_native_dir}")
+        endif()
+    endforeach()
+    if (_nb_win_dll_mods)
+        set_tests_properties(${_nb_win_dll_tests} PROPERTIES
+            ENVIRONMENT_MODIFICATION "${_nb_win_dll_mods}"
+        )
+    endif()
 endif()

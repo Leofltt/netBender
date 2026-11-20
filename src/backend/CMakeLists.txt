@@ -24,6 +24,9 @@ target_link_libraries(netbender_dsp PUBLIC netbender_rtsan Threads::Threads)
 if (APPLE)
   target_link_libraries(netbender_dsp PUBLIC objc)
 endif()
+if (WIN32)
+  target_compile_definitions(netbender_dsp PUBLIC NOMINMAX)
+endif()
 add_library(NetBender::dsp ALIAS netbender_dsp)
 
 # Compile ExecuTorchBackend.cpp in an isolated OBJECT library so ExecuTorch's

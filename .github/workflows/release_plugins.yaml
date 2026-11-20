@@ -84,6 +84,11 @@ jobs:
           cmake --build . --target plugin --config Release
           cmake --build . --target standalone --config Release
 
+      - name: Build & Run Unit Tests
+        run: |
+          cmake --build build --target unit_tests --config Release -j
+          ctest --test-dir build --output-on-failure
+
       - name: Package macOS Installer (.pkg)
         env:
           SIGN_ID: ${{ secrets.SIGN_ID }}
@@ -141,6 +146,20 @@ jobs:
         run: |
           cmake --build build --config Release --target plugin
           cmake --build build --config Release --target standalone
+
+      - name: Build & Run Unit Tests
+        shell: powershell
+        run: |
+          cmake --build build --config Release --target unit_tests -- /m
+          $dllDirs = @(
+            "$PWD\torch\libtorch\lib",
+            "$PWD\libtorch\lib",
+            "$PWD\onnxruntime\onnxruntime-win-x64-1.18.0\lib"
+          ) | Where-Object { Test-Path $_ }
+          if ($dllDirs.Count -gt 0) {
+            $env:PATH = ($dllDirs -join ";") + ";" + $env:PATH
+          }
+          ctest --test-dir build -C Release --output-on-failure
 
       - name: Install Inno Setup
         shell: powershell

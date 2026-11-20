@@ -359,19 +359,15 @@ NetBender includes a fast, self-contained CTest unit test suite that runs in sec
 | `test_streaming_engine` | `NetBender::backend` | End-to-end `StreamingEngine` verification: sync & async streaming (resampling ON/OFF), dry/wet latency compensation cancellation ($> 46\text{ dB}$ null), `double*` batched `RawMethod`, generative `"prior"` & `"decode gen"`, concurrent live reconfiguration, and `SafetySentry` recovery. |
 | `test_bending` | `NetBender::backend` | `Xoshiro128Plus` PRNG determinism, `BendingManager` layer classification/drift/bridging/triggers, `LatentTerrainEngine` (`FourierOrbit`, `LatentSlew`, `Quantize`), `NetBenderSession` streaming & JSON state round-trip, and `NETBENDER_NONBLOCKING` RTSan safety. |
 | `test_resampler_parity` | `NetBender::dsp` + `juce::juce_audio_basics` | Direct bit-exact sample-by-sample parity of `Resampler` against `juce::CatmullRomInterpolator` ($\le 10^{-6}$) and `juce::LinearInterpolator` ($\le 2 \times 10^{-6}$), random block-boundary seam continuity, round-trip impulse group delay, and $10^6$-sample phase accumulation. |
+| `test_rtsan` | `NetBender::dsp` + `NetBenderAudioProcessor` | Headless DSP primitive smoke checks and `NetBenderAudioProcessor::processBlock` bypass + JSON preset save/load round-trip (plus loaded-model streaming when a model path argument is passed). |
 
 ```bash
-# Build and run all CTest unit tests:
-cmake --build build --target \
-    test_audio_ring_buffer \
-    test_dsp_core \
-    test_backend_core \
-    test_resampling_spsc \
-    test_streaming_engine \
-    test_bending \
-    test_resampler_parity
+# Build and run all model-free CTest unit tests:
+cmake --build build --target unit_tests -j
 ctest --test-dir build --output-on-failure
 ```
+
+GitHub Actions (`.github/workflows/ci.yaml`) builds the regular macOS (`macos-latest`) and Windows (`windows-2022`) targets and runs this entire model-free CTest suite automatically on every pull request and push to `main`.
 
 ### 4. Multi-Backend Model Verification & Sentry Suite (`test_backends`)
 
@@ -407,15 +403,7 @@ cmake -S src -B build-rtsan \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo
 
 # 2. Build the CTest unit suite and headless RTSan processor harness:
-cmake --build build-rtsan --target \
-    test_audio_ring_buffer \
-    test_dsp_core \
-    test_backend_core \
-    test_resampling_spsc \
-    test_streaming_engine \
-    test_bending \
-    test_resampler_parity \
-    test_rtsan -j
+cmake --build build-rtsan --target unit_tests -j
 
 # 3. Run all CTest unit tests under RealtimeSanitizer:
 ctest --test-dir build-rtsan --output-on-failure

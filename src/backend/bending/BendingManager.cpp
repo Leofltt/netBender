@@ -2,10 +2,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cctype>
 
 auto BendingManager::classify_layer(const std::string& name) -> LayerCategory {
     std::string lower = name;
-    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (lower.find("norm") != std::string::npos || lower.find("weight_g") != std::string::npos ||
         lower.find("gamma") != std::string::npos) {
         return LayerCategory::Norm;
