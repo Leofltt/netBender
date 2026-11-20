@@ -36,7 +36,7 @@
 
 #include "../../../backend/IBackend.h"
 #include "../../../backend/BackendFactory.h"
-#include "../../../shared/circular_buffer.h"
+#include "../../../backend/engine/StreamingEngine.h"
 #include "../shared/pd_model_download.h"
 #include "../shared/pd_buffer_manager.h"
 
@@ -125,68 +125,58 @@ typedef struct _nn_tilde
   // BACKEND RELATED MEMBERS
   std::unique_ptr<IBackend> m_model;
   std::unique_ptr<PdBufferManager<_nn_tilde>> m_buf_manager;
-  std::vector<float *> m_in_model_ptrs;
-  std::vector<float *> m_out_model_ptrs;
+  StreamingEngine *m_engine;
   std::vector<std::string> settable_attributes;
   t_symbol *m_method, *m_path;
-  std::unique_ptr<std::thread> m_compute_thread;
 
   // BUFFER RELATED MEMBERS
-  int m_head, m_in_dim, m_in_ratio, m_out_dim, m_out_ratio, m_buffer_size;
-
-  std::unique_ptr<circular_buffer<float, float>[]> m_in_buffer;
-  std::unique_ptr<circular_buffer<float, float>[]> m_out_buffer;
-  std::vector<std::unique_ptr<float[]>> m_in_model, m_out_model;
-
+  int m_in_dim, m_in_ratio, m_out_dim, m_out_ratio, m_buffer_size;
   bool m_use_thread;
 
   // DSP RELATED MEMBERS
   int m_dsp_vec_size;
-  std::vector<float *> m_dsp_in_vec;
-  std::vector<float *> m_dsp_out_vec;
+  double m_host_sr;
+  std::vector<const t_sample *> m_dsp_in_vec;
+  std::vector<t_sample *> m_dsp_out_vec;
 
   // DOWNLOAD RELATED MEMBERS
   std::unique_ptr<PdModelDownloader<_nn_tilde>> m_downloader;
 
 } t_nn_tilde;
 
-class PdErrorCatcher
+void configure_pd_engine(t_nn_tilde *x)
 {
-  std::streambuf *old_cerr;
-  std::stringstream error_stream;
-  t_nn_tilde *x; // Store Pd object pointer
+  if (!x || !x->m_engine)
+    return;
 
-public:
-  PdErrorCatcher(t_nn_tilde *obj) : x(obj)
+  if (!x->m_model || !x->m_model->is_loaded() || (x->m_in_dim <= 0 && x->m_out_dim <= 0))
   {
-    old_cerr = std::cerr.rdbuf(error_stream.rdbuf());
+    x->m_engine->detach_backend();
+    return;
   }
 
-  ~PdErrorCatcher()
-  {
-    // Output any caught errors to Pd console
-    std::string errors = error_stream.str();
-    if (!errors.empty())
-    {
-      pd_error(x, "nn~: %s", errors.c_str());
-    }
-    // Restore original stderr
-    std::cerr.rdbuf(old_cerr);
-  }
-};
+  StreamingConfig cfg;
+  cfg.method = (x->m_method && x->m_method->s_name) ? x->m_method->s_name : "forward";
+  cfg.dispatch = InferenceDispatch::RawMethod;
+  cfg.model_in_channels = std::max(0, x->m_in_dim);
+  cfg.model_out_channels = std::max(0, x->m_out_dim);
+  cfg.n_batches = 1;
+  cfg.model_buffer_size = std::max(1, x->m_buffer_size);
+  cfg.host_sample_rate = (x->m_host_sr > 0.0) ? x->m_host_sr
+                                              : (sys_getsr() > 0 ? (double)sys_getsr() : 44100.0);
+  cfg.model_sample_rate = x->m_model->get_sample_rate();
+  cfg.max_host_block_size = std::max(256, x->m_dsp_vec_size);
+  cfg.max_host_channels = std::max(1, std::max(x->m_in_dim, x->m_out_dim));
+  cfg.resample_mode = ResampleMode::Auto;
+  cfg.resample_quality = ResamplerQuality::CatmullRom;
+  cfg.use_worker_thread = x->m_use_thread;
+  cfg.auto_start_worker = true;
+  cfg.enable_dry_delay = false;
+  cfg.enable_safety_sentry = false;
+  cfg.duplicate_mono_input = false;
+  cfg.duplicate_mono_output = false;
 
-void model_perform(t_nn_tilde *x)
-{
-  PdErrorCatcher error_catcher(x);
-  try
-  {
-    x->m_model->perform(x->m_in_model_ptrs, x->m_out_model_ptrs,
-                        x->m_method->s_name, 1, x->m_out_dim, x->m_buffer_size);
-  }
-  catch (const std::exception &e)
-  {
-    pd_error(x, "nn~: model perform error: %s", e.what());
-  }
+  x->m_engine->configure(x->m_model.get(), cfg);
 }
 
 // DSP CALL
@@ -194,44 +184,21 @@ t_int *nn_tilde_perform(t_int *w)
 {
   t_nn_tilde *x = (t_nn_tilde *)(w[1]);
 
-  if (!x->m_model->is_loaded() || !x->m_enabled)
+  if (!x->m_model || !x->m_model->is_loaded() || !x->m_enabled || !x->m_engine ||
+      !x->m_engine->is_configured())
   {
-    for (int c(0); c < x->m_out_dim; c++)
+    for (size_t c(0); c < x->m_dsp_out_vec.size(); c++)
     {
-      float *out = x->m_dsp_out_vec[c];
-      memset(out, 0, x->m_dsp_vec_size * sizeof(float));
+      t_sample *out = x->m_dsp_out_vec[c];
+      if (out)
+        memset(out, 0, x->m_dsp_vec_size * sizeof(t_sample));
     }
     return w + 2;
   }
 
-  // COPY INPUT TO CIRCULAR BUFFER
-  for (int c(0); c < x->m_in_dim; c++)
-    x->m_in_buffer[c].put(x->m_dsp_in_vec[c], x->m_dsp_vec_size);
-
-  if (x->m_in_buffer[0].full())
-  { // BUFFER IS FULL
-    // IF USE THREAD, CHECK THAT COMPUTATION IS OVER
-    if (x->m_compute_thread && x->m_use_thread)
-      x->m_compute_thread->join();
-
-    // TRANSFER MEMORY BETWEEN INPUT CIRCULAR BUFFER AND MODEL BUFFER
-    for (int c(0); c < x->m_in_dim; c++)
-      x->m_in_buffer[c].get(x->m_in_model[c].get(), x->m_buffer_size);
-
-    if (!x->m_use_thread) // PROCESS DATA RIGHT NOW
-      model_perform(x);
-
-    // TRANSFER MEMORY BETWEEN OUTPUT CIRCULAR BUFFER AND MODEL BUFFER
-    for (int c(0); c < x->m_out_dim; c++)
-      x->m_out_buffer[c].put(x->m_out_model[c].get(), x->m_buffer_size);
-
-    if (x->m_use_thread) // PROCESS DATA LATER
-      x->m_compute_thread = std::make_unique<std::thread>(model_perform, x);
-  }
-
-  // COPY CIRCULAR BUFFER TO OUTPUT
-  for (int c(0); c < x->m_out_dim; c++)
-    x->m_out_buffer[c].get(x->m_dsp_out_vec[c], x->m_dsp_vec_size);
+  x->m_engine->process(x->m_dsp_in_vec.data(), static_cast<int>(x->m_dsp_in_vec.size()),
+                       x->m_dsp_out_vec.data(), static_cast<int>(x->m_dsp_out_vec.size()),
+                       x->m_dsp_vec_size);
 
   return w + 2;
 }
@@ -239,6 +206,24 @@ t_int *nn_tilde_perform(t_int *w)
 void nn_tilde_dsp(t_nn_tilde *x, t_signal **sp)
 {
   x->m_dsp_vec_size = sp[0]->s_n;
+  const double dsp_sr = (sp[0]->s_sr > 0) ? static_cast<double>(sp[0]->s_sr)
+                                          : (sys_getsr() > 0 ? static_cast<double>(sys_getsr())
+                                                             : 44100.0);
+  x->m_host_sr = dsp_sr;
+
+  if (x->m_engine && x->m_model && x->m_model->is_loaded())
+  {
+    if (!x->m_engine->is_configured() ||
+        x->m_dsp_vec_size > x->m_engine->get_config().max_host_block_size)
+    {
+      configure_pd_engine(x);
+    }
+    else
+    {
+      x->m_engine->set_host_sample_rate(dsp_sr);
+    }
+  }
+
   x->m_dsp_in_vec.clear();
   x->m_dsp_out_vec.clear();
 
@@ -277,8 +262,21 @@ void nn_tilde_dsp(t_nn_tilde *x, t_signal **sp)
 
 void nn_tilde_free(t_nn_tilde *x)
 {
-  if (x->m_compute_thread)
-    x->m_compute_thread->join();
+  if (x->m_engine)
+  {
+    x->m_engine->detach_backend();
+    delete x->m_engine;
+    x->m_engine = nullptr;
+  }
+  x->m_dsp_in_vec.clear();
+  x->m_dsp_in_vec.shrink_to_fit();
+  x->m_dsp_out_vec.clear();
+  x->m_dsp_out_vec.shrink_to_fit();
+  x->settable_attributes.clear();
+  x->settable_attributes.shrink_to_fit();
+  x->m_buf_manager.reset();
+  x->m_downloader.reset();
+  x->m_model.reset();
 }
 
 std::string resolve_file_path(t_nn_tilde *x, const char *filename)
@@ -324,38 +322,6 @@ std::string resolve_file_path(t_nn_tilde *x, const char *filename)
 
   pd_error(x, "netBender~: could not find file '%s'", fname.c_str());
   return "";
-}
-
-void create_buffers(t_nn_tilde *x, int in_dim, int out_dim)
-{
-  x->m_in_buffer = std::make_unique<circular_buffer<float, float>[]>(in_dim);
-  x->m_out_buffer = std::make_unique<circular_buffer<float, float>[]>(out_dim);
-
-  x->m_in_model.clear();
-  x->m_out_model.clear();
-
-  for (int i(0); i < in_dim; i++)
-  {
-    x->m_in_buffer[i].initialize(x->m_buffer_size);
-    x->m_in_model.push_back(std::make_unique<float[]>(x->m_buffer_size));
-  }
-
-  for (int i(0); i < out_dim; i++)
-  {
-    x->m_out_buffer[i].initialize(x->m_buffer_size);
-    x->m_out_model.push_back(std::make_unique<float[]>(x->m_buffer_size));
-  }
-
-  // Pre-allocate pointer vectors
-  x->m_in_model_ptrs.clear();
-  x->m_out_model_ptrs.clear();
-  x->m_in_model_ptrs.reserve(in_dim);
-  x->m_out_model_ptrs.reserve(out_dim);
-
-  for (int i(0); i < in_dim; i++)
-    x->m_in_model_ptrs.push_back(x->m_in_model[i].get());
-  for (int i(0); i < out_dim; i++)
-    x->m_out_model_ptrs.push_back(x->m_out_model[i].get());
 }
 
 bool nn_tilde_update_model_params(t_nn_tilde *x, t_symbol *method)
@@ -407,14 +373,13 @@ bool nn_tilde_update_model_params(t_nn_tilde *x, t_symbol *method)
     x->m_buffer_size = power_ceil(x->m_buffer_size);
   }
 
-  // Create new buffers if dimensions changed
   x->m_dims_changed = (x->m_in_dim != old_in_dim) || (x->m_out_dim != old_out_dim);
   if (x->m_dims_changed)
   {
-    create_buffers(x, x->m_in_dim, x->m_out_dim);
     post("nn~: dimensions changed: %d in, %d out", x->m_in_dim, x->m_out_dim);
   }
 
+  configure_pd_engine(x);
   return true;
 }
 
@@ -426,9 +391,13 @@ bool nn_tilde_load_model(t_nn_tilde *x, const char *path)
   if (fullpath.empty())
     return false;
 
+  if (x->m_engine)
+    x->m_engine->detach_backend();
+
   // Create and load new backend instance
+  const double host_sr = (x->m_host_sr > 0.0) ? x->m_host_sr : (double)sys_getsr();
   auto new_model = BackendFactory::create_for_file(fullpath);
-  if (new_model->load(fullpath.c_str(), (double)sys_getsr()))
+  if (new_model->load(fullpath.c_str(), host_sr))
   {
     pd_error(x, "error loading model %s", path);
     return false;
@@ -546,8 +515,10 @@ void *nn_tilde_new(t_symbol *s, int argc, t_atom *argv)
 
   x->m_model = BackendFactory::create_default();
   x->m_buf_manager = std::make_unique<PdBufferManager<_nn_tilde>>(x->m_model.get(), x);
-  x->m_head = 0;
-  x->m_compute_thread = nullptr;
+  x->m_engine = new StreamingEngine();
+  x->m_engine->set_error_callback([](const std::string &msg) {
+    std::cerr << "[netBender~] StreamingEngine error: " << msg << std::endl;
+  });
   x->m_in_dim = 1;
   x->m_in_ratio = 1;
   x->m_out_dim = 1;
@@ -559,16 +530,16 @@ void *nn_tilde_new(t_symbol *s, int argc, t_atom *argv)
   x->m_multichannel = false;
   x->m_gpu = false;
   x->m_dims_changed = true;
+  x->m_dsp_vec_size = 64;
+  x->m_host_sr = (sys_getsr() > 0) ? static_cast<double>(sys_getsr()) : 44100.0;
   x->m_canvas = canvas_getcurrent();
 
   // init downloader
   auto canvas_dir = canvas_getdir(x->m_canvas)->s_name;
   x->m_downloader = std::make_unique<PdModelDownloader<_nn_tilde>>(x, canvas_dir);
-  // #endif
 
   // Create minimum outlet (we already have main inlet from CLASS_MAINSIGNALIN)
   outlet_new(&x->x_obj, &s_signal);
-  create_buffers(x, 1, 1); // minimum buffers for one in/out
 
   // CHECK ARGUMENTS
   // First check for optional flags
@@ -642,24 +613,12 @@ void nn_tilde_method(t_nn_tilde *x, t_symbol *s)
     return;
   }
 
-  if (x->m_compute_thread)
-  {
-    x->m_compute_thread->join();
-    x->m_compute_thread = nullptr;
-  }
-
   if (nn_tilde_update_model_params(x, s) && x->m_dims_changed)
     canvas_update_dsp();
 }
 
 void nn_tilde_bufsize(t_nn_tilde *x, t_floatarg size)
 {
-  if (x->m_compute_thread)
-  {
-    x->m_compute_thread->join();
-    x->m_compute_thread = nullptr;
-  }
-
   // Store and validate new size
   x->m_buffer_size = (int)size;
   auto higher_ratio = x->m_model->get_higher_ratio();
@@ -669,18 +628,21 @@ void nn_tilde_bufsize(t_nn_tilde *x, t_floatarg size)
     x->m_use_thread = false;
     x->m_buffer_size = higher_ratio;
   }
-  else if (x->m_buffer_size < higher_ratio)
-  {
-    x->m_buffer_size = higher_ratio;
-    post("nn~: buffer size too small, switching to %d", x->m_buffer_size);
-  }
   else
   {
-    x->m_buffer_size = power_ceil(x->m_buffer_size);
+    x->m_use_thread = true;
+    if (x->m_buffer_size < higher_ratio)
+    {
+      x->m_buffer_size = higher_ratio;
+      post("nn~: buffer size too small, switching to %d", x->m_buffer_size);
+    }
+    else
+    {
+      x->m_buffer_size = power_ceil(x->m_buffer_size);
+    }
   }
 
-  // Recreate buffers with new size
-  create_buffers(x, x->m_in_dim, x->m_out_dim);
+  configure_pd_engine(x);
 }
 
 void nn_tilde_load(t_nn_tilde *x, t_symbol *s)
@@ -689,12 +651,6 @@ void nn_tilde_load(t_nn_tilde *x, t_symbol *s)
   {
     pd_error(x, "nn~: dynamically loading models is only supported in multichannel mode");
     return;
-  }
-
-  if (x->m_compute_thread)
-  {
-    x->m_compute_thread->join();
-    x->m_compute_thread = nullptr;
   }
 
   if (nn_tilde_load_model(x, s->s_name))
@@ -726,12 +682,21 @@ void nn_tilde_gpu(t_nn_tilde *x, t_floatarg arg)
     return;
   }
 
+  if (x->m_engine)
+    x->m_engine->detach_backend();
   x->m_gpu = want_gpu;
   x->m_model->use_gpu(want_gpu);
+  configure_pd_engine(x);
 }
 
 void nn_tilde_enable(t_nn_tilde *x, t_floatarg arg) { x->m_enabled = (bool)arg; }
-void nn_tilde_reload(t_nn_tilde *x) { x->m_model->reload(); }
+void nn_tilde_reload(t_nn_tilde *x)
+{
+  if (x->m_engine)
+    x->m_engine->detach_backend();
+  x->m_model->reload();
+  configure_pd_engine(x);
+}
 
 void nn_tilde_set(t_nn_tilde *x, t_symbol *s, int argc, t_atom *argv)
 {
@@ -1055,7 +1020,8 @@ static void register_netBender_tilde(void)
 #endif
 
   startup_message();
-  nn_tilde_class = class_new(gensym("netBender~"), (t_newmethod)nn_tilde_new, 0,
+  nn_tilde_class = class_new(gensym("netBender~"), (t_newmethod)nn_tilde_new,
+                             (t_method)nn_tilde_free,
                              sizeof(t_nn_tilde), CLASS_MULTICHANNEL, A_GIMME, 0);
   class_addcreator((t_newmethod)nn_tilde_new, gensym("nn~"), A_GIMME, 0);
   class_addmethod(nn_tilde_class, (t_method)nn_tilde_dsp, gensym("dsp"), A_CANT, 0);

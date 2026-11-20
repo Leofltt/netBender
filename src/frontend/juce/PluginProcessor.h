@@ -2,12 +2,9 @@
 
 #include "IBackend.h"
 #include "BackendFactory.h"
-#include "dsp/AudioRingBuffer.h"
-#include "dsp/RtGate.h"
-#include "core/ModelThread.h"
+#include "engine/StreamingEngine.h"
 #include "core/BendingManager.h"
 #include "core/LatentTerrainEngine.h"
-#include "dsp/SafetySentry.h"
 #include <JuceHeader.h>
 #include <mutex>
 #include <atomic>
@@ -66,8 +63,8 @@ public:
     auto getAvailableModes() const -> std::vector<juce::String>;
     auto getBufferSize() const -> int { return m_bufferSize; }
     auto setBufferSize(int size) -> void;
-    auto getModelSampleRate() const -> double { return m_modelSampleRate.load(); }
-    auto isResamplingActive() const -> bool { return m_resamplingActive.load(); }
+    auto getModelSampleRate() const -> double { return m_engine.get_model_sample_rate(); }
+    auto isResamplingActive() const -> bool { return m_engine.is_resampling_active(); }
     auto isUsingGpu() const -> bool { return m_useGpu.load(); }
     auto setUseGpu(bool enabled) -> void;
 
@@ -105,9 +102,6 @@ public:
     auto getLatentSlew() const -> float { return m_latent_engine.get_slew(); }
     auto hasAutoencode() -> bool { return m_backend ? m_backend->has_autoencode() : false; }
 
-    // Inference loop
-    auto run_inference() -> void;
-
     // Dry / Wet control
     auto getDryWet() const -> float {
         return m_dryWetParam ? m_dryWetParam->get() : m_dryWet.load();
@@ -115,6 +109,7 @@ public:
     auto setDryWet(float value) -> void {
         float v = juce::jlimit(0.0f, 1.0f, value);
         m_dryWet.store(v);
+        m_engine.set_dry_wet(v);
         if (m_dryWetParam)
             *m_dryWetParam = v;
     }
@@ -171,24 +166,26 @@ public:
     }
     auto clearLayerBending(const std::string& layerName) -> void {
         m_bending_manager.clear_layer_bending(layerName);
-        if (!m_model_thread.isThreadRunning() && m_backend)
+        if (!m_engine.is_worker_running() && m_backend)
             m_backend->reset_layer_weights(layerName);
     }
     auto clearAllLayerBending() -> void {
         m_bending_manager.clear_all_layer_bending();
-        if (!m_model_thread.isThreadRunning() && m_backend)
+        if (!m_engine.is_worker_running() && m_backend)
             m_backend->reset_all_layer_weights();
     }
     auto hasActiveBending() const -> bool { return m_bending_manager.has_active_bending(); }
 
     // Safety Sentry & Blown Fuse Control
-    auto isFuseBlown() const -> bool { return m_safety_sentry.is_fuse_blown(); }
+    auto isFuseBlown() const -> bool { return m_engine.get_safety_sentry().is_fuse_blown(); }
     auto resetFuse() -> void {
-        m_safety_sentry.reset_fuse();
+        m_engine.get_safety_sentry().reset_fuse();
         clearAllLayerBending();
     }
-    auto setAutoResetFuse(bool enabled) -> void { m_safety_sentry.set_auto_reset(enabled); }
-    auto getAutoResetFuse() const -> bool { return m_safety_sentry.get_auto_reset(); }
+    auto setAutoResetFuse(bool enabled) -> void {
+        m_engine.get_safety_sentry().set_auto_reset(enabled);
+    }
+    auto getAutoResetFuse() const -> bool { return m_engine.get_safety_sentry().get_auto_reset(); }
 
     // Momentary Short-Circuit Gate Control
     auto triggerShortCircuit(bool active) -> void {
@@ -224,7 +221,8 @@ public:
     // Subsystem accessors
     auto getBendingManager() -> BendingManager& { return m_bending_manager; }
     auto getLatentEngine() -> LatentTerrainEngine& { return m_latent_engine; }
-    auto getSafetySentry() -> SafetySentry& { return m_safety_sentry; }
+    auto getSafetySentry() -> SafetySentry& { return m_engine.get_safety_sentry(); }
+    auto getSafetySentry() const -> const SafetySentry& { return m_engine.get_safety_sentry(); }
 
     // Automatable parameters accessors
     auto getDryWetParam() const -> juce::AudioParameterFloat* { return m_dryWetParam; }
@@ -239,8 +237,6 @@ public:
     auto getLatentDepthParam() const -> juce::AudioParameterFloat* { return m_latentDepthParam; }
 
 private:
-    friend class ModelThread;
-
     std::unique_ptr<IBackend> m_backend;
     IBackend::LatentHook m_latentHook{nullptr};
     std::atomic<bool> m_modelLoaded{false};
@@ -253,11 +249,9 @@ private:
 
     std::atomic<float> m_dryWet{1.0f};
 
-    // Subcomponents
+    // Subcomponents (StreamingEngine is declared after backend/bending/state so it stops first)
     BendingManager m_bending_manager;
     LatentTerrainEngine m_latent_engine;
-    SafetySentry m_safety_sentry;
-    ModelThread m_model_thread;
 
     // DAW Automatable parameters
     juce::AudioParameterFloat* m_dryWetParam{nullptr};
@@ -271,36 +265,14 @@ private:
     juce::AudioParameterFloat* m_latentDepthParam{nullptr};
 
     juce::String m_activeLayerName;
-
-    // Buffers and synchronization
-    std::vector<AudioRingBuffer> m_in_buffers;
-    std::vector<AudioRingBuffer> m_out_buffers;
-    std::vector<AudioRingBuffer> m_dry_delay_buffers;
-
-    std::vector<std::vector<float>> m_staging_in;
-    std::vector<std::vector<float>> m_staging_out;
-
-    std::vector<std::vector<float>> m_worker_in;
-    std::vector<std::vector<float>> m_worker_out;
-
-    RtGate m_rt_gate;
-    std::mutex m_reconfig_mutex;
     mutable std::mutex m_state_mutex;
-    std::atomic<bool> m_output_ready{false};
-    std::atomic<bool> m_pendingClearFifo{false};
 
-    // Resampling infrastructure (Host SR <-> Model SR)
     std::atomic<double> m_hostSampleRate{44100.0};
-    std::atomic<double> m_modelSampleRate{44100.0};
-    std::atomic<bool> m_resamplingActive{false};
+    std::atomic<int> m_maxHostBlockSize{2048};
 
-    std::vector<juce::CatmullRomInterpolator> m_input_resamplers;
-    std::vector<juce::CatmullRomInterpolator> m_output_resamplers;
-    std::vector<std::vector<float>> m_resampled_in_scratch;
-    std::vector<std::vector<float>> m_resampled_out_scratch;
-    std::vector<float> m_dry_block_scratch;
+    StreamingEngine m_engine;
 
-    auto init_buffers() -> void;
+    auto configure_engine() -> void;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(NetBenderAudioProcessor)
 };

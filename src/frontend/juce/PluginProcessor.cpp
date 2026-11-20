@@ -14,8 +14,7 @@ NetBenderAudioProcessor::NetBenderAudioProcessor()
 #endif
                          .withOutput("Output", juce::AudioChannelSet::stereo(), true)
 #endif
-                         ),
-      m_model_thread(*this)
+      )
 #endif
 {
     addParameter(m_dryWetParam = new juce::AudioParameterFloat(
@@ -54,28 +53,72 @@ NetBenderAudioProcessor::NetBenderAudioProcessor()
                      juce::NormalisableRange<float>(0.0f, 2.0f, 0.01f), 0.5f));
 
     m_backend = BackendFactory::create_default();
+
+    m_engine.set_pre_inference_callback([this](IBackend& backend) {
+        std::string activeLayerStr;
+        {
+            std::lock_guard<std::mutex> stateLock(m_state_mutex);
+            activeLayerStr = m_activeLayerName.toStdString();
+        }
+        const float scaleVal = m_scaleParam ? m_scaleParam->get() : 1.0f;
+        const float offsetVal = m_offsetParam ? m_offsetParam->get() : 0.0f;
+        const float heatVal = m_heatParam ? m_heatParam->get() : 0.0f;
+        const float memVal = m_memoryParam ? m_memoryParam->get() : -1.0f;
+        const bool shortVal = m_shortCircuitParam ? m_shortCircuitParam->get() : false;
+        m_bending_manager.apply_bending(&backend, activeLayerStr, scaleVal, offsetVal, heatVal,
+                                        memVal, shortVal);
+    });
+
+    m_engine.set_latent_hook_provider([this]() -> IBackend::LatentHook {
+        std::string modeStr;
+        IBackend::LatentHook userHook;
+        {
+            std::lock_guard<std::mutex> stateLock(m_state_mutex);
+            modeStr = m_currentMethod.toStdString();
+            userHook = m_latentHook;
+        }
+        if (userHook) {
+            return userHook;
+        }
+        if (modeStr == "decode gen" || m_latent_engine.is_enabled()) {
+            const float lx = m_latentXParam ? m_latentXParam->get() : -999.0f;
+            const float ly = m_latentYParam ? m_latentYParam->get() : -999.0f;
+            const float depth = m_latentDepthParam ? m_latentDepthParam->get() : -999.0f;
+            return [this, lx, ly, depth](IBackend::LatentBuffer& buf) {
+                m_latent_engine.apply_hook(buf, lx, ly, depth);
+            };
+        }
+        return nullptr;
+    });
+
+    m_engine.set_fuse_reset_callback([this] {
+        m_engine.get_safety_sentry().reset_fuse();
+        m_bending_manager.request_audio_thread_reset_all();
+    });
+
+    m_engine.set_error_callback([](const std::string& msg) {
+        juce::ignoreUnused(msg);
+        DBG("StreamingEngine error: " << msg);
+    });
 }
 
 NetBenderAudioProcessor::~NetBenderAudioProcessor() {
-    m_model_thread.stop();
+    m_engine.detach_backend();
 }
 
 //==============================================================================
 auto NetBenderAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock) -> void {
-    juce::ignoreUnused(samplesPerBlock);
-    m_hostSampleRate.store(sampleRate);
-    if (m_backend)
+    m_engine.stop();
+    m_hostSampleRate.store(sampleRate > 0.0 ? sampleRate : 44100.0);
+    m_maxHostBlockSize.store(std::max(256, samplesPerBlock));
+    if (m_backend) {
         m_backend->set_sample_rate(sampleRate);
-    if (m_modelLoaded.load() && m_backend) {
-        double modelSr = m_backend->get_sample_rate();
-        m_modelSampleRate.store(modelSr);
-        m_resamplingActive.store(std::abs(sampleRate - modelSr) > 1.0);
     }
-    init_buffers();
+    configure_engine();
 }
 
 auto NetBenderAudioProcessor::releaseResources() -> void {
-    m_model_thread.stop();
+    m_engine.stop();
 }
 
 auto NetBenderAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const -> bool {
@@ -103,12 +146,6 @@ auto NetBenderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     auto totalNumInputChannels = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
 
-    const ScopedRtReader rt_guard(m_rt_gate);
-    if (!rt_guard.is_acquired()) {
-        buffer.clear();
-        return;
-    }
-
     // Process incoming MIDI triggers (Note On kicks momentary glitch; Note Off releases)
     for (const auto metadata : midiMessages) {
         auto msg = metadata.getMessage();
@@ -123,173 +160,28 @@ auto NetBenderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear(i, 0, buffer.getNumSamples());
 
-    if (!m_modelLoaded.load() || m_model_out <= 0) {
+    if (!m_modelLoaded.load() || !m_engine.is_configured()) {
         for (auto i = 0; i < buffer.getNumChannels(); ++i)
             buffer.clear(i, 0, buffer.getNumSamples());
         return;
     }
 
-    auto numSamples = buffer.getNumSamples();
+    const int numSamples = buffer.getNumSamples();
 
     // Sidechain Audio Envelope Follower for Transient Triggering
     if (totalNumInputChannels > 0 && numSamples > 0) {
         float maxPeak = 0.0f;
         for (int c = 0; c < totalNumInputChannels; ++c) {
-            float peak = buffer.getMagnitude(c, 0, numSamples);
+            const float peak = buffer.getMagnitude(c, 0, numSamples);
             if (peak > maxPeak)
                 maxPeak = peak;
         }
         m_bending_manager.update_audio_envelope(maxPeak);
     }
 
-    // 2. Feed incoming audio into dry delay buffers (for all modes) and model inputs (for forward
-    // mode)
-    int numDryChannels = (int)m_dry_delay_buffers.size();
-    for (int c = 0; c < numDryChannels; ++c) {
-        const float* inPtr = nullptr;
-        if (c < totalNumInputChannels)
-            inPtr = buffer.getReadPointer(c);
-        else if (totalNumInputChannels > 0)
-            inPtr = buffer.getReadPointer(0);
-
-        m_dry_delay_buffers[c].put(inPtr, numSamples);
-    }
-
-    bool resampling = m_resamplingActive.load();
-    double hostSr = m_hostSampleRate.load();
-    double modelSr = m_modelSampleRate.load();
-
-    if (m_model_in > 0) {
-        if (resampling && hostSr > 0.0 && modelSr > 0.0) {
-            // Resample host input -> model sample rate
-            double inRatio = hostSr / modelSr;
-            int numModelSamples = (int)std::ceil(numSamples / inRatio);
-            if (numModelSamples > 0) {
-                for (int c = 0; c < m_model_in; ++c) {
-                    const float* inPtr = nullptr;
-                    if (c < totalNumInputChannels)
-                        inPtr = buffer.getReadPointer(c);
-                    else if (totalNumInputChannels > 0)
-                        inPtr = buffer.getReadPointer(0);
-
-                    if (c < (int)m_input_resamplers.size() &&
-                        c < (int)m_resampled_in_scratch.size()) {
-                        int targetSamples =
-                            std::min(numModelSamples, (int)m_resampled_in_scratch[c].size());
-
-                        m_input_resamplers[c].process(
-                            inRatio, inPtr, m_resampled_in_scratch[c].data(), targetSamples);
-
-                        m_in_buffers[c].put(m_resampled_in_scratch[c].data(), targetSamples);
-                    }
-                }
-            }
-        } else {
-            // Direct transfer without resampling
-            for (int c = 0; c < m_model_in; ++c) {
-                const float* inPtr = nullptr;
-                if (c < totalNumInputChannels)
-                    inPtr = buffer.getReadPointer(c);
-                else if (totalNumInputChannels > 0)
-                    inPtr = buffer.getReadPointer(0);
-
-                m_in_buffers[c].put(inPtr, numSamples);
-            }
-        }
-
-        // Check if we have enough samples to trigger inference and thread is idle.
-        // SPSC release/acquire handshake on ModelThread::m_processing synchronizes m_staging_in.
-        if (!m_model_thread.is_processing() && m_in_buffers[0].get_available() >= m_bufferSize) {
-            for (int c = 0; c < m_model_in; ++c) {
-                m_in_buffers[c].get(m_staging_in[c].data(), m_bufferSize);
-            }
-            m_model_thread.trigger_compute();
-        }
-    } else {
-        // Generative model (0 audio inputs): trigger inference whenever output buffer needs filling
-        if (!m_model_thread.is_processing() &&
-            m_out_buffers[0].get_available() < m_bufferSize * 3) {
-            m_model_thread.trigger_compute();
-        }
-    }
-
-    // 3. Pull processed samples from output circular buffers (resampling model SR -> host SR if
-    // active)
-    int n_outs = std::min((int)totalNumOutputChannels, m_model_out);
-    if (resampling && hostSr > 0.0 && modelSr > 0.0) {
-        double outRatio = modelSr / hostSr;
-        int requiredModelSamples = (int)std::ceil(numSamples * outRatio) + 2;
-        int masterConsumed = 0;
-
-        for (int c = 0; c < n_outs; ++c) {
-            if (c < (int)m_output_resamplers.size() && c < (int)m_resampled_out_scratch.size()) {
-                int peekCount =
-                    std::min(requiredModelSamples, (int)m_resampled_out_scratch[c].size());
-                int avail = m_out_buffers[c].peek(m_resampled_out_scratch[c].data(), peekCount);
-                if (avail < peekCount) {
-                    std::fill(m_resampled_out_scratch[c].begin() + avail,
-                              m_resampled_out_scratch[c].begin() + peekCount, 0.0f);
-                }
-
-                int consumed =
-                    m_output_resamplers[c].process(outRatio, m_resampled_out_scratch[c].data(),
-                                                   buffer.getWritePointer(c), numSamples);
-
-                if (c == 0)
-                    masterConsumed = std::min(consumed, avail);
-            } else {
-                buffer.clear(c, 0, numSamples);
-            }
-        }
-
-        // Lock sample consumption across all channels to maintain strict stereo phase alignment
-        for (int c = 0; c < n_outs; ++c) {
-            if (c < (int)m_output_resamplers.size() && c < (int)m_resampled_out_scratch.size()) {
-                m_out_buffers[c].drop(masterConsumed);
-            }
-        }
-    } else {
-        for (int c = 0; c < n_outs; ++c) {
-            m_out_buffers[c].get(buffer.getWritePointer(c), numSamples);
-        }
-    }
-
-    // If model is mono (1 out) and host is stereo (2 out), duplicate Left to Right channel
-    if (m_model_out == 1 && totalNumOutputChannels >= 2) {
-        buffer.copyFrom(1, 0, buffer, 0, 0, numSamples);
-    }
-    // Clear any extra output channels beyond model outputs
-    for (int c = std::max(n_outs, (m_model_out == 1 ? 2 : 1)); c < totalNumOutputChannels; ++c) {
-        buffer.clear(c, 0, numSamples);
-    }
-
-    // 4. Dry/Wet Blending & Safety Sentry (chunked against pre-allocated scratch; zero heap allocs)
-    float wet_gain = m_dryWet.load();
-    float dry_gain = 1.0f - wet_gain;
-    const int scratch_capacity = static_cast<int>(m_dry_block_scratch.size());
-
-    if (scratch_capacity > 0) {
-        for (int c = 0; c < (int)totalNumOutputChannels; ++c) {
-            int dry_ch = std::min(c, (int)m_dry_delay_buffers.size() - 1);
-            if (dry_ch >= 0) {
-                float* out_ptr = buffer.getWritePointer(c);
-                int offset = 0;
-                while (offset < numSamples) {
-                    int chunk = std::min(numSamples - offset, scratch_capacity);
-                    m_dry_delay_buffers[dry_ch].get(m_dry_block_scratch.data(), chunk);
-                    m_safety_sentry.process_channel(out_ptr + offset, m_dry_block_scratch.data(),
-                                                    chunk, wet_gain, dry_gain);
-                    offset += chunk;
-                }
-            }
-        }
-    }
-
-    // Auto-recovery handling if enabled (lock-free & allocation-free on audio thread)
-    m_safety_sentry.tick_recovery([this] {
-        m_safety_sentry.reset_fuse();
-        m_bending_manager.request_audio_thread_reset_all();
-    });
+    m_engine.set_dry_wet(m_dryWetParam ? m_dryWetParam->get() : m_dryWet.load());
+    m_engine.process(buffer.getArrayOfReadPointers(), totalNumInputChannels,
+                     buffer.getArrayOfWritePointers(), totalNumOutputChannels, numSamples);
 }
 
 //==============================================================================
@@ -306,7 +198,7 @@ auto NetBenderAudioProcessor::getAvailableModes() const -> std::vector<juce::Str
 
 auto NetBenderAudioProcessor::loadModel(const juce::File& file) -> bool {
     m_modelLoaded.store(false);
-    m_model_thread.stop();
+    m_engine.detach_backend();
 
     std::string path = file.getFullPathName().toStdString();
 
@@ -372,15 +264,13 @@ auto NetBenderAudioProcessor::loadModel(const juce::File& file) -> bool {
                 m_activeLayerName = "";
             }
 
-            // Query model sample rate vs host sample rate
-            double hostSr = getSampleRate();
-            m_hostSampleRate.store(hostSr > 0.0 ? hostSr : 44100.0);
-            double modelSr = m_backend->get_sample_rate();
-            m_modelSampleRate.store(modelSr);
-            m_resamplingActive.store(std::abs(m_hostSampleRate.load() - modelSr) > 1.0);
+            const double hostSr = getSampleRate();
+            if (hostSr > 0.0) {
+                m_hostSampleRate.store(hostSr);
+            }
 
             m_modelLoaded.store(true);
-            init_buffers();
+            configure_engine();
             return true;
         }
     } catch (const std::exception& e) {
@@ -414,10 +304,10 @@ auto NetBenderAudioProcessor::setCurrentMethod(const juce::String& method) -> vo
         }
 
         if (prevIn != m_model_in || prevOut != m_model_out) {
-            init_buffers();
+            configure_engine();
         } else {
-            m_pendingClearFifo.store(true);
-            if (!m_model_thread.isThreadRunning() && m_backend) {
+            m_engine.set_method(methodStr);
+            if (!m_engine.is_worker_running() && m_backend) {
                 m_backend->clear_decode_gen_fifo();
             }
         }
@@ -427,7 +317,7 @@ auto NetBenderAudioProcessor::setCurrentMethod(const juce::String& method) -> vo
 auto NetBenderAudioProcessor::setBufferSize(int size) -> void {
     if (size > 0 && (size & (size - 1)) == 0) {  // Power of two check
         m_bufferSize = size;
-        init_buffers();
+        configure_engine();
     }
 }
 
@@ -465,186 +355,39 @@ auto NetBenderAudioProcessor::setUseGpu(bool enabled) -> void {
     }
 }
 
-auto NetBenderAudioProcessor::init_buffers() -> void {
-    std::lock_guard<std::mutex> reconfig_lock(m_reconfig_mutex);
-    const ScopedReconfigureGate reconfig_gate(m_rt_gate);
-
-    m_model_thread.stop();
-
-    int n_in = std::max(1, m_model_in);
-    int n_out = std::max(1, m_model_out);
-
-    m_in_buffers.resize(n_in);
-    m_out_buffers.resize(n_out);
-
-    m_staging_in.resize(n_in);
-    m_staging_out.resize(n_out);
-    m_worker_in.resize(n_in);
-    m_worker_out.resize(n_out);
-
-    // In forward mode, delay is 2 * m_bufferSize (1 buffer input accumulation + 1 buffer model
-    // inference transfer)
-    double host_sr = m_hostSampleRate.load();
-    double model_sr = m_modelSampleRate.load();
-    bool resampling = m_resamplingActive.load() && (host_sr > 0.0) && (model_sr > 0.0);
-
-    // Scale latency to host sample rate if resampling is active
-    int latency_samples = 0;
-    if (m_model_in > 0) {
-        double latency_model = m_bufferSize * 2.0;
-        latency_samples =
-            resampling ? (int)std::round(latency_model * (host_sr / model_sr)) : (m_bufferSize * 2);
-    }
-    setLatencySamples(latency_samples);
-
-    int n_dry = std::max(2, std::max(n_in, n_out));
-    m_dry_delay_buffers.resize(n_dry);
-
-    // Initialize resamplers and scratch storage
-    m_input_resamplers.resize(n_in);
-    for (auto& r : m_input_resamplers)
-        r.reset();
-
-    m_output_resamplers.resize(n_out);
-    for (auto& r : m_output_resamplers)
-        r.reset();
-
-    int max_scratch_size = std::max(8192, m_bufferSize * 4);
-    m_resampled_in_scratch.resize(n_in);
-    for (auto& buf : m_resampled_in_scratch)
-        buf.assign(max_scratch_size, 0.0f);
-
-    m_resampled_out_scratch.resize(n_out);
-    for (auto& buf : m_resampled_out_scratch)
-        buf.assign(max_scratch_size, 0.0f);
-
-    m_dry_block_scratch.assign(max_scratch_size, 0.0f);
-
-    for (int i = 0; i < n_in; ++i) {
-        m_in_buffers[i].init(m_bufferSize);
-        m_staging_in[i].assign(m_bufferSize, 0.0f);
-        m_worker_in[i].assign(m_bufferSize, 0.0f);
-    }
-
-    for (int i = 0; i < n_dry; ++i) {
-        int dry_cap = std::max(m_bufferSize, latency_samples);
-        m_dry_delay_buffers[i].init(dry_cap);
-        // Pre-fill dry delay buffer with latency zeros so dry aligns with wet output
-        if (latency_samples > 0)
-            m_dry_delay_buffers[i].put(nullptr, latency_samples);
-    }
-
-    int model_latency_samples = (m_model_in > 0) ? (m_bufferSize * 2) : 0;
-    for (int i = 0; i < n_out; ++i) {
-        m_out_buffers[i].init(m_bufferSize);
-        m_staging_out[i].assign(m_bufferSize, 0.0f);
-        m_worker_out[i].assign(m_bufferSize, 0.0f);
-        // Pre-fill output buffer with latency cushion in model sample units
-        // to prevent starvation during background model inference and align with dry delay buffer
-        if (model_latency_samples > 0) {
-            m_out_buffers[i].put(nullptr, model_latency_samples);
-        }
-    }
-
-    m_output_ready.store(false);
-
-    if (m_backend) {
-        m_backend->clear_decode_gen_fifo();
-    }
-
-    if (m_modelLoaded.load()) {
-        m_model_thread.startThread(juce::Thread::Priority::high);
-    }
-}
-
-auto NetBenderAudioProcessor::run_inference() -> void {
-    if (!m_modelLoaded.load() || m_model_out <= 0)
+auto NetBenderAudioProcessor::configure_engine() -> void {
+    if (!m_modelLoaded.load() || !m_backend || m_model_out <= 0) {
+        m_engine.detach_backend();
+        setLatencySamples(0);
         return;
+    }
 
-    std::string activeLayerStr;
-    std::string modeStr;
-    IBackend::LatentHook userLatentHook;
+    StreamingConfig cfg;
     {
         std::lock_guard<std::mutex> stateLock(m_state_mutex);
-        activeLayerStr = m_activeLayerName.toStdString();
-        modeStr = m_currentMethod.toStdString();
-        userLatentHook = m_latentHook;
+        cfg.method = m_currentMethod.toStdString();
     }
+    cfg.dispatch = InferenceDispatch::PluginMode;
+    cfg.model_in_channels = m_model_in;
+    cfg.model_out_channels = m_model_out;
+    cfg.n_batches = 1;
+    cfg.model_buffer_size = m_bufferSize;
+    cfg.host_sample_rate = m_hostSampleRate.load();
+    cfg.model_sample_rate = m_backend->get_sample_rate();
+    cfg.max_host_block_size = std::max(256, m_maxHostBlockSize.load());
+    cfg.max_host_channels =
+        std::max(2, std::max(getTotalNumInputChannels(), getTotalNumOutputChannels()));
+    cfg.resample_mode = ResampleMode::Auto;
+    cfg.resample_quality = ResamplerQuality::CatmullRom;
+    cfg.use_worker_thread = true;
+    cfg.auto_start_worker = true;
+    cfg.enable_dry_delay = true;
+    cfg.enable_safety_sentry = true;
+    cfg.duplicate_mono_input = true;
+    cfg.duplicate_mono_output = true;
 
-    if (m_pendingClearFifo.exchange(false) && m_backend)
-        m_backend->clear_decode_gen_fifo();
-
-    // Update and apply weight bending to backend
-    float scaleVal = m_scaleParam ? m_scaleParam->get() : 1.0f;
-    float offsetVal = m_offsetParam ? m_offsetParam->get() : 0.0f;
-    float heatVal = m_heatParam ? m_heatParam->get() : 0.0f;
-    float memVal = m_memoryParam ? m_memoryParam->get() : -1.0f;
-    bool shortVal = m_shortCircuitParam ? m_shortCircuitParam->get() : false;
-    m_bending_manager.apply_bending(m_backend.get(), activeLayerStr, scaleVal, offsetVal, heatVal,
-                                    memVal, shortVal);
-
-    // Copy audio inputs from staging buffers to local worker buffers
-    // (synchronized via SPSC acquire/release handshake on ModelThread::m_processing)
-    for (int c = 0; c < m_model_in; ++c) {
-        if (c < (int)m_staging_in.size() && c < (int)m_worker_in.size()) {
-            std::memcpy(m_worker_in[c].data(), m_staging_in[c].data(),
-                        m_bufferSize * sizeof(float));
-        }
-    }
-    std::vector<float*> in_ptrs;
-    std::vector<float*> out_ptrs;
-
-    int numIn = std::min(m_model_in, (int)m_worker_in.size());
-    for (int c = 0; c < numIn; ++c)
-        in_ptrs.emplace_back(m_worker_in[c].data());
-
-    int numOut = std::min(m_model_out, (int)m_worker_out.size());
-    for (int c = 0; c < numOut; ++c)
-        out_ptrs.emplace_back(m_worker_out[c].data());
-
-    if (modeStr == "forward") {
-        // Compose latent hook: if user hook is set, use it; otherwise if latent terrain is enabled,
-        // execute it!
-        IBackend::LatentHook activeHook = userLatentHook;
-        if (!activeHook && m_latent_engine.is_enabled()) {
-            float lx = m_latentXParam ? m_latentXParam->get() : -999.0f;
-            float ly = m_latentYParam ? m_latentYParam->get() : -999.0f;
-            float depth = m_latentDepthParam ? m_latentDepthParam->get() : -999.0f;
-            activeHook = [this, lx, ly, depth](IBackend::LatentBuffer& buf) {
-                m_latent_engine.apply_hook(buf, lx, ly, depth);
-            };
-        }
-
-        if (m_backend)
-            m_backend->perform_forward(in_ptrs, out_ptrs, 1, m_model_out, m_bufferSize, activeHook);
-    } else if (modeStr == "decode gen") {
-        // Autonomous neural synthesis: generate latent trajectory with Pad/Drift/Harmonics and
-        // decode
-        IBackend::LatentHook activeHook = userLatentHook;
-        if (!activeHook) {
-            float lx = m_latentXParam ? m_latentXParam->get() : -999.0f;
-            float ly = m_latentYParam ? m_latentYParam->get() : -999.0f;
-            float depth = m_latentDepthParam ? m_latentDepthParam->get() : -999.0f;
-            activeHook = [this, lx, ly, depth](IBackend::LatentBuffer& buf) {
-                m_latent_engine.apply_hook(buf, lx, ly, depth);
-            };
-        }
-
-        if (m_backend)
-            m_backend->perform_decode_gen(out_ptrs, 1, m_model_out, m_bufferSize, activeHook);
-    } else if (modeStr == "prior" || modeStr == "generate") {
-        if (m_backend)
-            m_backend->perform_prior_decode(out_ptrs, 1, m_model_out, m_bufferSize);
-    } else {
-        if (m_backend)
-            m_backend->perform(in_ptrs, out_ptrs, modeStr, 1, m_model_out, m_bufferSize);
-    }
-
-    for (int c = 0; c < m_model_out; ++c) {
-        if (c < (int)m_out_buffers.size() && c < (int)m_worker_out.size()) {
-            m_out_buffers[c].put(m_worker_out[c].data(), m_bufferSize);
-        }
-    }
+    m_engine.configure(m_backend.get(), cfg);
+    setLatencySamples(m_engine.get_latency_samples());
 }
 
 //==============================================================================

@@ -1,68 +1,6 @@
 #include "../shared/nn_base.h"
 #include "c74_min.h"
 
-
-template <typename nn_class>
-void model_perform(nn_class* nn_instance) {
-  std::vector<float *> in_model, out_model;
-  for (int c(0); c < nn_instance->m_model_in * nn_instance->n_batches; c++)
-    in_model.push_back(nn_instance->m_in_model[c].get());
-  for (int c(0); c < nn_instance->m_model_out * nn_instance->n_batches; c++)
-    out_model.push_back(nn_instance->m_out_model[c].get());
-
-  if (nn_instance->had_buffer_reset) {
-    nn_instance->had_buffer_reset = false; 
-  }
-
-  nn_instance->m_model->perform(in_model, out_model, nn_instance->m_method, 
-                                nn_instance->n_inlets, nn_instance->m_model_out, nn_instance->m_buffer_size);
-}
-
-template <typename nn_class>
-void model_perform_async(nn_class* nn_instance) {
-  
-  while (!nn_instance->can_perform()){
-    std::this_thread::sleep_for(std::chrono::milliseconds(REFRESH_THREAD_INTERVAL));
-    if (nn_instance->m_should_stop_perform_thread) {
-      return;
-    }
-  }
-
-  if (nn_instance->wait_for_buffer_reset) {
-    nn_instance->init_buffers();
-  }
-  std::vector<float *> in_model, out_model;
-  for (int c(0); c < nn_instance->m_model_in * nn_instance->n_batches; c++)
-    in_model.push_back(nn_instance->m_in_model[c].get());
-  for (int c(0); c < nn_instance->m_model_out * nn_instance->n_batches; c++)
-    out_model.push_back(nn_instance->m_out_model[c].get());
-
-  while (!nn_instance->m_should_stop_perform_thread) {
-    if (nn_instance->wait_for_buffer_reset) {
-      nn_instance->init_buffers();
-    }
-    if (nn_instance->had_buffer_reset) {
-      in_model.clear(); 
-      for (int c(0); c < nn_instance->m_model_in * nn_instance->n_batches; c++) {
-        in_model.push_back(nn_instance->m_in_model[c].get());
-      }
-      out_model.clear(); 
-      for (int c(0); c < nn_instance->m_model_out * nn_instance->n_batches; c++) {
-        out_model.push_back(nn_instance->m_out_model[c].get());
-      }
-      nn_instance->had_buffer_reset = false; 
-    }
-
-    if (nn_instance->m_data_available_lock.try_acquire_for(
-            std::chrono::milliseconds(REFRESH_THREAD_INTERVAL))) {
-      nn_instance->m_model->perform(in_model, out_model, nn_instance->m_method, 
-                                    nn_instance->n_inlets, nn_instance->m_model_out, nn_instance->m_buffer_size);
-      nn_instance->m_result_available_lock.release();
-    }
-  }
-}
-
-
 long simplemc_multichanneloutputs(c74::max::t_object *x, long index,
                                   long count);
 long simplemc_inputchanged(c74::max::t_object *x, long index, long count);
@@ -91,7 +29,6 @@ public:
         if (!args.size()) { return; } 
         init_inputs_and_outputs(args);
         init_inlets_and_outlets();
-        // init_buffers(); 
         wait_for_buffer_reset = true; 
         init_process();
     } 
@@ -106,6 +43,9 @@ public:
     } 
     bool check_inputs(); 
     std::vector<long> channel_map;
+    std::vector<long> m_configured_channel_map;
+    int m_configured_batches{1};
+    int m_configured_out_channels{1};
 
     void init_inputs_and_outputs(const atoms& atoms) override; 
     void init_inlets_and_outlets() override; 
@@ -152,6 +92,7 @@ public:
             if (in_chans > 0) {
               m_out_channels_arg = in_chans;
               m_out_channels = in_chans;
+              wait_for_buffer_reset = true;
               DEBUG_PRINT("setting out channels to %d", in_chans);
             }
             return args;
@@ -207,8 +148,9 @@ void mcs_nn::init_inputs_and_outputs(const atoms &args) {
     channel_map = std::vector<long>(n_batches, 1); 
     DEBUG_PRINT("loading model..."); 
     load_model(m_path);
-    if (m_ready) {
-      m_out_channels = m_model_out; 
+    if (m_ready.load(std::memory_order_acquire)) {
+      update_method();
+      m_out_channels = (m_out_channels_arg > 0) ? m_out_channels_arg : m_model_out;
     } 
   }
   if (m_buffer_size == -1) {
@@ -219,8 +161,11 @@ void mcs_nn::init_inputs_and_outputs(const atoms &args) {
 
 bool mcs_nn::update_channel_map(const long& index, const long& count)
 {
-  if (channel_map[index] != count) {
-    channel_map[index] = count;
+  if (index < 0 || static_cast<size_t>(index) >= channel_map.size()) {
+    return false;
+  }
+  if (channel_map[static_cast<size_t>(index)] != count) {
+    channel_map[static_cast<size_t>(index)] = count;
     wait_for_buffer_reset = true; 
     if (count != m_model_in) {
       return false;
@@ -258,14 +203,23 @@ void mcs_nn::init_inlets_and_outlets() {
 }
 
 void mcs_nn::init_buffers() {
+  if (!m_ready.load(std::memory_order_acquire)) { return; }
+  m_engine.detach_backend();
+  const ScopedReconfigureGate fe_gate(m_perform_gate);
 
   update_method(); 
-
-  if (m_out_channels == 0) {
-    error("could not retrieve number of output channels");
+  if (!m_ready.load(std::memory_order_acquire)) {
+    m_can_perform.store(false, std::memory_order_release);
+    return;
   }
+
+  if (m_out_channels <= 0) {
+    m_can_perform.store(false, std::memory_order_release);
+    error("could not retrieve number of output channels");
+    return;
+  }
+
   DEBUG_PRINT("initializing buffers...");
-  if (!m_ready) { return; }
   if (m_buffer_size == -1) {
     // NO THREAD MODE
     m_buffer_size = DEFAULT_BUFFER_SIZE;
@@ -283,38 +237,23 @@ void mcs_nn::init_buffers() {
     }
   }
 
-  m_buffer_in = n_mc_inputs(); 
-  DEBUG_PRINT("initializing with n_mc_inputs : %d", m_buffer_in); 
-  if (m_in_buffer.get() != nullptr) { m_in_buffer.release(); }
-  m_in_buffer = std::make_unique<circular_buffer<double, float>[]>(m_buffer_in); 
-  for (int i = 0; i < m_buffer_in; i++) {
-    m_in_buffer[i].initialize(m_buffer_size);
-  }
+  #ifdef _WIN32
+  m_use_thread = false;
+  #endif
 
-  DEBUG_PRINT("initializing with outputs : %d x %d", n_outlets, m_out_channels);
-  if (m_out_buffer.get() != nullptr) { m_out_buffer.release(); }
-  m_buffer_out = n_outlets * m_out_channels;
-  m_out_buffer = std::make_unique<circular_buffer<float, double>[]>(m_buffer_out); 
-  for (int i = 0; i < m_buffer_out; i++) {
-    m_out_buffer[i].initialize(m_buffer_size);
-  }
+  m_configured_batches = std::max(1, n_batches);
+  m_configured_out_channels = m_out_channels;
+  m_configured_channel_map = channel_map;
 
-  DEBUG_PRINT("initializing with model buffer inputs : %d x %d", m_model_in, n_inlets);
-  m_in_model.clear(); 
-  for (int i = 0; i < m_model_in * n_inlets; i++) {
-    m_in_model.push_back(std::make_unique<float[]>(m_buffer_size));
-    std::fill(m_in_model[i].get(), m_in_model[i].get() + m_buffer_size, 0.); 
-  }
+  m_in_ptrs_scratch.assign(
+      static_cast<size_t>(std::max(1, std::max(0, m_model_in) * m_configured_batches)), nullptr);
+  m_out_ptrs_scratch.assign(
+      static_cast<size_t>(std::max(1, std::max(0, m_model_out) * m_configured_batches)), nullptr);
 
-  DEBUG_PRINT("initializing with model buffer outputs : %d x %d", m_model_out, n_outlets);
-  m_out_model.clear(); 
-  for (int i = 0; i < m_model_out * n_outlets; i++) {
-    m_out_model.push_back(std::make_unique<float[]>(m_buffer_size));
-    std::fill(m_out_model[i].get(), m_out_model[i].get() + m_buffer_size, 0.); 
-  }
+  configure_streaming_engine(m_configured_batches);
+
   DEBUG_PRINT("buffers initialized");
   wait_for_buffer_reset = false; 
-  had_buffer_reset = true; 
   buffer_initialised = true; 
 }
 
@@ -324,12 +263,17 @@ void mcs_nn::update_method(std::string method) {
   if (!method.empty()) {
       set_method(method);
   }
-  if (!m_model->is_loaded()) {
+  if (!m_model || !m_model->is_loaded()) {
     cerr << "no model is set yet" << endl;
     return; 
   }
   if (m_model->has_method(m_method)) {
     auto params = m_model->get_method_params(m_method);
+    if (params.empty()) {
+      m_ready.store(false, std::memory_order_release);
+      m_can_perform.store(false, std::memory_order_release);
+      return;
+    }
     // input parameters
     m_model_in = params[0];
     m_in_ratio = params[1];
@@ -340,106 +284,78 @@ void mcs_nn::update_method(std::string method) {
     if (m_out_channels == 0) { 
       m_out_channels = m_model_out; 
     } 
+    m_can_perform.store(true, std::memory_order_release);
     wait_for_buffer_reset = true; 
   } else {
-    cerr << "method " << method << " not present in model" << endl;
-    m_ready = false; 
+    cerr << "method " << m_method << " not present in model" << endl;
+    m_ready.store(false, std::memory_order_release);
+    m_can_perform.store(false, std::memory_order_release);
   }
 }
 
 void mcs_nn::init_process() {
-    nn_base<mcs_nn, mc_operator<>>::init_process(); 
-    if (m_use_thread) {
-        m_compute_thread = std::make_unique<std::thread>(model_perform_async<mcs_nn>, this);
-    }
+  nn_base<mcs_nn, mc_operator<>>::init_process();
 }
 
 void mcs_nn::perform(audio_bundle input, audio_bundle output) {
-  auto chan_size = input.channel_count(); 
-  auto vec_size = input.frame_count();
+  const int vec_size = static_cast<int>(input.frame_count());
+  if (!m_ready.load(std::memory_order_acquire) || !m_engine.is_configured()) {
+    return;
+  }
 
-  // if (buffer_initialised) {
-    int current_batch = 0; 
-    int current_channel = 0; 
-    int n_channels_in = std::min<int>(chan_size, m_buffer_in);
-    for (int in_c(0); in_c < n_channels_in; in_c++) {
-      auto in = input.samples(in_c);
-      m_in_buffer[in_c].put(in, vec_size);
+  std::fill(m_in_ptrs_scratch.begin(), m_in_ptrs_scratch.end(), nullptr);
+  std::fill(m_out_ptrs_scratch.begin(), m_out_ptrs_scratch.end(), nullptr);
+
+  const int chan_in = static_cast<int>(input.channel_count());
+  int in_idx = 0;
+  for (size_t b = 0; b < m_configured_channel_map.size() && in_idx < chan_in; ++b) {
+    const long ch_count = std::max<long>(1, m_configured_channel_map[b]);
+    for (long c = 0; c < ch_count && in_idx < chan_in; ++c) {
+      if (static_cast<int>(b) < m_configured_batches && static_cast<int>(c) < m_model_in) {
+        const int model_in_idx =
+            static_cast<int>(c) * m_configured_batches + static_cast<int>(b);
+        if (model_in_idx < static_cast<int>(m_in_ptrs_scratch.size())) {
+          m_in_ptrs_scratch[static_cast<size_t>(model_in_idx)] = input.samples(in_idx);
+        }
+      }
+      ++in_idx;
     }
+  }
 
-    if (m_in_buffer[0].full()) { // BUFFER IS FULL
-      if (!m_use_thread) {
-        // TRANSFER MEMORY BETWEEN INPUT CIRCULAR BUFFER AND MODEL BUFFER
-        int current_chan = 0; 
-        int current_batch = 0; 
-        for (int i(0); i < m_buffer_in; i++) {
-          if (current_chan < m_model_in) {
-            auto c_idx = current_chan * n_batches + current_batch; 
-            m_in_buffer[i].get(m_in_model[c_idx].get(), m_buffer_size);
-          }
-          current_chan++; 
-          if (current_chan >= channel_map[current_batch]) {
-            current_batch += 1;
-            current_chan = 0;
-          }
-        }
-
-        // CALL MODEL PERFORM IN CURRENT THREAD
-        model_perform(this);
-
-        // TRANSFER MEMORY BETWEEN OUTPUT CIRCULAR BUFFER AND MODEL BUFFER
-        auto current_idx = 0; 
-        for (int c(0); c < n_outlets * m_model_out; c++){ 
-            m_out_buffer[c].put(m_out_model[c].get(), m_buffer_size);
-        }
-
-      } else if (m_result_available_lock.try_acquire()) {
-
-        // TRANSFER MEMORY BETWEEN INPUT CIRCULAR BUFFER AND MODEL BUFFER
-        // for (int c(0); c < m_model_in * get_batches(); c++)
-        int current_chan = 0; 
-        int current_batch = 0; 
-        int i = 0;
-        while (i < n_channels_in) {
-          if (current_chan >= m_model_in) {
-            i += (channel_map[current_batch] - current_chan); 
-            current_batch += 1; 
-            current_chan = 0; 
-          } else { 
-            if (current_chan < m_model_in) {
-              auto c_idx = current_chan * n_batches + current_batch; 
-              m_in_buffer[i].get(m_in_model[c_idx].get(), m_buffer_size);
-            } 
-            current_chan++; 
-            if (current_chan >= channel_map[current_batch]) {
-              current_batch += 1;
-              current_chan = 0;
-            }
-            i++; 
-          }
-        }
-
-        // TRANSFER MEMORY BETWEEN OUTPUT CIRCULAR BUFFER AND MODEL BUFFER
-        auto current_idx = 0; 
-        auto n_channels = std::min(m_model_out, m_out_channels);
-        for (int b(0); b < n_outlets; b++) {
-          for (int c(0); c < n_channels; c++){ 
-              m_out_buffer[b * m_out_channels + c].put(m_out_model[b * m_model_out + c].get(), m_buffer_size);
-          }
-        }
-
-        // SIGNAL PERFORM THREAD THAT DATA IS AVAILABLE
-        m_data_available_lock.release();
+  const int chan_out = static_cast<int>(output.channel_count());
+  const int active_batches_out = std::min(std::max(0, n_outlets), m_configured_batches);
+  const int active_chans_out = std::min(std::max(0, m_model_out), m_configured_out_channels);
+  for (int b = 0; b < active_batches_out; ++b) {
+    for (int c = 0; c < active_chans_out; ++c) {
+      const int max_out_idx = b * m_configured_out_channels + c;
+      const int model_out_idx = b * m_model_out + c;
+      if (max_out_idx < chan_out &&
+          model_out_idx < static_cast<int>(m_out_ptrs_scratch.size())) {
+        m_out_ptrs_scratch[static_cast<size_t>(model_out_idx)] = output.samples(max_out_idx);
       }
     }
-    
-    // for (int b(0); b < n_outlets; b++) {
-    //   for (int c(0); c < n_channels; c++) {
-    for (int i(0); i < m_buffer_out; i++) {
-        auto out = output.samples(i); 
-        m_out_buffer[i].get(out, vec_size); 
+  }
+
+  const int expected_in = std::max(0, m_model_in) * m_configured_batches;
+  const int expected_out = std::max(0, m_model_out) * m_configured_batches;
+  m_engine.process(m_in_ptrs_scratch.data(), expected_in,
+                   m_out_ptrs_scratch.data(), expected_out, vec_size);
+
+  const int total_mapped_out = std::max(0, n_outlets) * m_configured_out_channels;
+  for (int idx = 0; idx < chan_out; ++idx) {
+    bool is_bound = false;
+    if (m_configured_out_channels > 0 && idx < total_mapped_out) {
+      const int b = idx / m_configured_out_channels;
+      const int c = idx % m_configured_out_channels;
+      is_bound = (b < active_batches_out) && (c < active_chans_out);
     }
-  // }
+    if (!is_bound) {
+      auto *out = output.samples(idx);
+      if (out != nullptr && vec_size > 0) {
+        std::fill(out, out + vec_size, 0.0);
+      }
+    }
+  }
 }
 
 long simplemc_multichanneloutputs(c74::max::t_object *x, long index,

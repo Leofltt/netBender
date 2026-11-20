@@ -11,8 +11,6 @@ function(configure_nn_bending_target target_name)
         PluginProcessor.h
         PluginEditor.cpp
         PluginEditor.h
-        core/ModelThread.cpp
-        core/ModelThread.h
         core/BendingManager.cpp
         core/BendingManager.h
         core/LatentTerrainEngine.cpp
