@@ -8,6 +8,8 @@ find_package(Threads REQUIRED)
 # Frontend-agnostic, zero-ML real-time audio DSP primitives
 add_library(netbender_dsp STATIC
   dsp/AudioRingBuffer.cpp
+  dsp/Resampler.cpp
+  dsp/ResamplingRingBuffer.cpp
   dsp/SafetySentry.cpp
   dsp/WorkerThread.cpp
 )
@@ -44,9 +46,13 @@ add_library(netbender_backend STATIC
   BackendFactory.cpp
   TorchBackend.cpp
   OnnxBackend.cpp
+  engine/StreamingEngine.cpp
   $<TARGET_OBJECTS:executorch_backend_obj>
 )
-target_include_directories(netbender_backend PRIVATE "${ONNXRUNTIME_INCLUDE_DIR}")
+target_include_directories(netbender_backend
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/engine"
+  PRIVATE "${ONNXRUNTIME_INCLUDE_DIR}"
+)
 target_link_libraries(netbender_backend PUBLIC
   netbender_dsp
   "${TORCH_LIBRARIES}"

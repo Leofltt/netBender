@@ -2,9 +2,12 @@
 #include "BackendFactory.h"
 #include "IBackend.h"
 #include "MockBackend.h"
+#include "Resampler.h"
+#include "ResamplingRingBuffer.h"
 #include "RtGate.h"
 #include "SafetySentry.h"
 #include "WorkerThread.h"
+#include "engine/StreamingEngine.h"
 #include "parsing_utils.h"
 #include "rtsan_utils.h"
 #include "static_buffer.h"
@@ -379,31 +382,122 @@ auto test_parsing_utils_and_static_buffer() -> void {
     CHECK(shared_copy.at(1, 1) == 0.0f);
 }
 
+auto test_streaming_engine_optional_resampling_smoke() -> void {
+    MockBackend backend;
+    backend.in_channels = 1;
+    backend.out_channels = 1;
+    backend.higher_ratio = 64;
+    backend.preferred_buffer_size = 64;
+    backend.gain = 1.0f;
+    CHECK(backend.load("virtual/stream_smoke.mock", 24000.0) == 0);
+
+    StreamingEngine engine;
+    StreamingConfig cfg;
+    cfg.method = "forward";
+    cfg.dispatch = InferenceDispatch::PluginMode;
+    cfg.model_in_channels = 1;
+    cfg.model_out_channels = 1;
+    cfg.n_batches = 1;
+    cfg.model_buffer_size = 64;
+    cfg.host_sample_rate = 48000.0;
+    cfg.model_sample_rate = 24000.0;
+    cfg.max_host_block_size = 256;
+    cfg.max_host_channels = 1;
+    cfg.use_worker_thread = false;
+    cfg.auto_start_worker = false;
+
+    // 1. ResampleMode::Disabled bypass at mismatched rates (48 kHz vs 24 kHz)
+    cfg.resample_mode = ResampleMode::Disabled;
+    engine.configure(&backend, cfg);
+    CHECK(engine.is_configured());
+    CHECK(!engine.is_resampling_active());
+    CHECK(engine.get_latency_samples() == 64);
+
+    constexpr int k_block = 32;
+    std::array<float, k_block> f_in{};
+    std::array<float, k_block> f_out{};
+    f_in.fill(0.5f);
+    const float* f_in_ptrs[1]{f_in.data()};
+    float* f_out_ptrs[1]{f_out.data()};
+
+    float post_latency_max_f = 0.0f;
+    for (int blk = 0; blk < 12; ++blk) {
+        engine.process(f_in_ptrs, 1, f_out_ptrs, 1, k_block);
+        if (blk >= 4) {
+            for (float v : f_out) {
+                CHECK(std::isfinite(v));
+                post_latency_max_f = std::max(post_latency_max_f, std::abs(v));
+            }
+        }
+    }
+    CHECK(engine.get_inference_count() > 0);
+    CHECK(post_latency_max_f > 0.4f);
+
+    // 2. ResampleMode::Auto active at 48 kHz <-> 24 kHz with double* host buffers
+    cfg.resample_mode = ResampleMode::Auto;
+    engine.configure(&backend, cfg);
+    CHECK(engine.is_configured());
+    CHECK(engine.is_resampling_active());
+    CHECK(engine.get_latency_samples() == 128);
+
+    const uint64_t inf_before = engine.get_inference_count();
+    std::array<double, k_block> d_in{};
+    std::array<double, k_block> d_out{};
+    d_in.fill(0.4);
+    const double* d_in_ptrs[1]{d_in.data()};
+    double* d_out_ptrs[1]{d_out.data()};
+
+    double post_latency_max_d = 0.0;
+    for (int blk = 0; blk < 16; ++blk) {
+        engine.process(d_in_ptrs, 1, d_out_ptrs, 1, k_block);
+        if (blk >= 8) {
+            for (double v : d_out) {
+                CHECK(std::isfinite(v));
+                post_latency_max_d = std::max(post_latency_max_d, std::abs(v));
+            }
+        }
+    }
+    CHECK(engine.get_inference_count() > inf_before);
+    CHECK(post_latency_max_d > 0.3);
+
+    // 3. ResampleMode::Auto deactivates cleanly when sample rates match (48 kHz == 48 kHz)
+    engine.set_model_sample_rate(48000.0);
+    CHECK(engine.is_configured());
+    CHECK(!engine.is_resampling_active());
+    CHECK(engine.get_latency_samples() == 64);
+
+    engine.detach_backend();
+    CHECK(!engine.is_configured());
+}
+
 }  // namespace
 
 auto main() -> int {
     std::cout << "=== NetBender Backend Core Unit Tests ===\n";
 
     test_factory_extension_dispatch();
-    std::cout << "  [1/7] BackendFactory extension dispatch: PASS\n";
+    std::cout << "  [1/8] BackendFactory extension dispatch: PASS\n";
 
     test_factory_runtime_queries();
-    std::cout << "  [2/7] BackendFactory runtime queries: PASS\n";
+    std::cout << "  [2/8] BackendFactory runtime queries: PASS\n";
 
     test_factory_invalid_path_and_unloaded_errors();
-    std::cout << "  [3/7] Unloaded/invalid path handling across backends: PASS\n";
+    std::cout << "  [3/8] Unloaded/invalid path handling across backends: PASS\n";
 
     test_mock_backend_lifecycle_and_introspection();
-    std::cout << "  [4/7] MockBackend IBackend lifecycle & introspection: PASS\n";
+    std::cout << "  [4/8] MockBackend IBackend lifecycle & introspection: PASS\n";
 
     test_mock_backend_inference_and_latent_hook();
-    std::cout << "  [5/7] MockBackend inference & LatentHook: PASS\n";
+    std::cout << "  [5/8] MockBackend inference & LatentHook: PASS\n";
 
     test_mock_backend_weight_bending_and_attributes();
-    std::cout << "  [6/7] MockBackend weight bending & attributes: PASS\n";
+    std::cout << "  [6/8] MockBackend weight bending & attributes: PASS\n";
 
     test_parsing_utils_and_static_buffer();
-    std::cout << "  [7/7] parsing_utils & StaticBuffer: PASS\n";
+    std::cout << "  [7/8] parsing_utils & StaticBuffer: PASS\n";
+
+    test_streaming_engine_optional_resampling_smoke();
+    std::cout << "  [8/8] StreamingEngine optional resampling smoke: PASS\n";
 
     std::cout << "All Backend Core tests passed.\n";
     return 0;
