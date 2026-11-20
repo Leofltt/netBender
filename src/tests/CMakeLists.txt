@@ -226,6 +226,32 @@ if (BUILD_JUCE_PLUGIN)
 endif()
 add_custom_target(unit_tests DEPENDS ${_nb_unit_test_targets})
 
+# On Windows, copy ONNX Runtime DLLs next to test executables so they are loaded
+# ahead of any older preinstalled C:\Windows\System32\onnxruntime.dll.
+if (WIN32)
+    file(GLOB _nb_ort_win_dlls "${ort_extracted_dir}/lib/*.dll")
+    if (_nb_ort_win_dlls)
+        set(_nb_ort_dll_targets
+            test_backend_core
+            test_streaming_engine
+            test_bending
+            test_backends
+        )
+        if (BUILD_JUCE_PLUGIN)
+            list(APPEND _nb_ort_dll_targets test_rtsan)
+        endif()
+        foreach(_t IN LISTS _nb_ort_dll_targets)
+            add_custom_command(
+                TARGET ${_t} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    ${_nb_ort_win_dlls}
+                    "$<TARGET_FILE_DIR:${_t}>"
+                COMMENT "Copying ONNX Runtime DLLs next to ${_t}"
+            )
+        endforeach()
+    endif()
+endif()
+
 # On Windows, prepend LibTorch and ONNX Runtime DLL directories to PATH for CTest runs
 if (WIN32 AND CMAKE_VERSION VERSION_GREATER_EQUAL "3.22")
     set(_nb_win_dll_tests

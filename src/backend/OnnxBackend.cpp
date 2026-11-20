@@ -26,8 +26,19 @@ ORT_EXPORT ORT_API_STATUS(OrtSessionOptionsAppendExecutionProvider_CoreML,
 #endif
 #endif
 
+namespace {
+
+auto shared_ort_env() -> Ort::Env& {
+    // ONNX Runtime expects a single process-wide Ort::Env; destroying and recreating
+    // Ort::Env (or tearing it down during Windows DLL unload) can crash onnxruntime.dll.
+    static Ort::Env* s_env = new Ort::Env(ORT_LOGGING_LEVEL_WARNING, "NetBender_OnnxBackend");
+    return *s_env;
+}
+
+}  // namespace
+
 struct OnnxBackend::Impl {
-    Ort::Env env{ORT_LOGGING_LEVEL_WARNING, "NetBender_OnnxBackend"};
+    Ort::Env& env{shared_ort_env()};
     Ort::SessionOptions session_options;
     std::unique_ptr<Ort::Session> session;
     Ort::AllocatorWithDefaultOptions allocator;
@@ -83,6 +94,18 @@ auto OnnxBackend::load(std::string path, double sample_rate, const std::string* 
     m_history_samples = 0;
     m_output_offset = 0;
     m_impl->companions.clear();
+
+    if (path.empty()) {
+        m_last_error = "Model path is empty";
+        return -1;
+    }
+    {
+        std::ifstream check_file(path, std::ios::binary);
+        if (!check_file.good()) {
+            m_last_error = "Model file does not exist: " + path;
+            return -1;
+        }
+    }
 
     try {
 #if defined(_WIN32)

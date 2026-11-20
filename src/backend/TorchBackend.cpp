@@ -767,6 +767,8 @@ auto TorchBackend::get_sample_rate() -> double {
 }
 
 auto TorchBackend::reload() -> int {
+    if (m_path.empty())
+        return -1;
     auto return_code = load(m_path, m_sr);
     return return_code;
 }
