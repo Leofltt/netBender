@@ -160,6 +160,7 @@ add_subdirectory(backend) # DEEP LEARNING BACKEND
 option(BUILD_MAXMSP "Build MaxMSP targets" ON)
 option(BUILD_PUREDATA "Build PureData targets" ON)
 option(BUILD_JUCE_PLUGIN "Build JUCE VST3/AU audio plugin" ON)
+option(BUILD_CSOUND "Build Csound 7 opcode targets" ON)
 option(BUNDLE_DEPENDENCIES "Bundle and relocate shared dependencies for standalone package distribution" OFF)
 
 if (NOT DEFINED NO_PUREDATA)
@@ -228,6 +229,22 @@ if (BUILD_JUCE_PLUGIN)
         add_dependencies(standalone ${standalone_formats})
     else()
         add_dependencies(standalone nn_bending_standalone)
+    endif()
+endif()
+
+if (BUILD_CSOUND)
+    include(${CMAKE_SOURCE_DIR}/cmake/add_csound.cmake)
+    if (NETBENDER_CSOUND_FOUND)
+        add_subdirectory(frontend/csound)
+
+        add_custom_target(csound)
+        add_dependencies(csound netbender_csound)
+
+        add_custom_target(install_csound
+            COMMAND "${CMAKE_COMMAND}" --install "${CMAKE_BINARY_DIR}" --component csound
+            DEPENDS netbender_csound
+            COMMENT "Installing NetBender Csound 7 opcodes to ${CSOUND_PLUGIN_INSTALL_DIR}"
+        )
     endif()
 endif()
 

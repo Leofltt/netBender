@@ -4,7 +4,6 @@
 #include <cctype>
 #include <cmath>
 #include <exception>
-#include <filesystem>
 #include <nlohmann/json.hpp>
 
 namespace {

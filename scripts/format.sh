@@ -14,14 +14,14 @@ else
     exit 1
 fi
 
-echo "Running clang-format on src/backend (dsp, engine, bending), src/shared, src/tests, and src/frontend/juce..."
+echo "Running clang-format on src/backend (dsp, engine, bending), src/shared, src/tests, src/frontend/csound, and src/frontend/juce..."
 
 find "$ROOT_DIR/src/backend" "$ROOT_DIR/src/shared" "$ROOT_DIR/src/tests" \
     -type f \( -name "*.h" -o -name "*.hpp" -o -name "*.c" -o -name "*.cpp" \) \
     -exec "$CLANG_FORMAT_BIN" -i -style=file:"$ROOT_DIR/.clang-format" {} +
 
 # Run on custom frontend code, strictly excluding vendor/framework trees
-find "$ROOT_DIR/src/frontend/juce" \
+find "$ROOT_DIR/src/frontend/juce" "$ROOT_DIR/src/frontend/csound" \
     -type f \( -name "*.h" -o -name "*.hpp" -o -name "*.c" -o -name "*.cpp" \) \
     ! -path "*/JuceLibraryCode/*" \
     ! -path "*/juce_source/*" \

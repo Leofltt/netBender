@@ -4,7 +4,6 @@
 #include <fstream>
 #include <cmath>
 #include <algorithm>
-#include <numeric>
 #include <cstdint>
 #include <cstring>
 #include <random>
