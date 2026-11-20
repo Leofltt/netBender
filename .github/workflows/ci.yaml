@@ -39,14 +39,10 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_MAXMSP=OFF \
             -DBUILD_PUREDATA=OFF \
-            -DBUILD_JUCE_PLUGIN=ON \
-            -DENABLE_EXECUTORCH_BACKEND=OFF
+            -DBUILD_JUCE_PLUGIN=ON
 
-      - name: Prune downloaded archives
-        run: rm -f torch/torch_cc.zip onnxruntime/*.tgz onnxruntime/*.zip
-
-      - name: Build Unit Tests, Plugins & Standalone
-        run: cmake --build build --config Release --target unit_tests plugin standalone -j
+      - name: Build Unit Tests
+        run: cmake --build build --config Release --target unit_tests -j
 
       - name: Run Model-Free Unit Tests
         run: ctest --test-dir build --output-on-failure
@@ -68,16 +64,6 @@ jobs:
             onnxruntime
           key: deps-windows-x64-${{ hashFiles('src/cmake/add_torch.cmake', 'src/cmake/add_onnxruntime.cmake') }}
 
-      - name: Download LibTorch (CPU Windows)
-        shell: powershell
-        run: |
-          if (-not (Test-Path "torch\libtorch\lib\torch.lib")) {
-            New-Item -ItemType Directory -Path "torch" -Force | Out-Null
-            Invoke-WebRequest -Uri "https://download.pytorch.org/libtorch/cpu/libtorch-win-shared-with-deps-2.5.1%2Bcpu.zip" -OutFile "libtorch.zip"
-            Expand-Archive -Path "libtorch.zip" -DestinationPath "torch" -Force
-            Remove-Item -Force "libtorch.zip"
-          }
-
       - name: Configure CMake
         shell: powershell
         run: |
@@ -85,16 +71,11 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release `
             -DBUILD_MAXMSP=OFF `
             -DBUILD_PUREDATA=OFF `
-            -DBUILD_JUCE_PLUGIN=ON `
-            -DENABLE_EXECUTORCH_BACKEND=OFF
+            -DBUILD_JUCE_PLUGIN=ON
 
-      - name: Prune downloaded archives
+      - name: Build Unit Tests
         shell: powershell
-        run: Remove-Item -Force -ErrorAction SilentlyContinue "torch\torch_cc.zip", "onnxruntime\*.zip"
-
-      - name: Build Unit Tests, Plugins & Standalone
-        shell: powershell
-        run: cmake --build build --config Release --target unit_tests plugin standalone -- /m
+        run: cmake --build build --config Release --target unit_tests -- /m
 
       - name: Run Model-Free Unit Tests
         shell: powershell

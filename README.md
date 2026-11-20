@@ -367,7 +367,7 @@ cmake --build build --target unit_tests -j
 ctest --test-dir build --output-on-failure
 ```
 
-GitHub Actions (`.github/workflows/ci.yaml`) builds the regular macOS (`macos-latest`) and Windows (`windows-2022`) targets and runs this entire model-free CTest suite automatically on every pull request and push to `main`.
+GitHub Actions (`.github/workflows/ci.yaml`) builds `unit_tests` and runs this entire model-free CTest suite on `macos-latest` and `windows-2022` automatically on every pull request and push to `main` (without building plugins or installer packages).
 
 ### 4. Multi-Backend Model Verification & Sentry Suite (`test_backends`)
 

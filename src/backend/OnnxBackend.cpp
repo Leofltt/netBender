@@ -13,7 +13,17 @@
 // Include official ONNX Runtime C++ API
 #include <onnxruntime_cxx_api.h>
 #if defined(__APPLE__)
+#if defined(__has_include) && __has_include(<coreml_provider_factory.h>)
 #include <coreml_provider_factory.h>
+#else
+enum COREMLFlags {
+    COREML_FLAG_ENABLE_ON_SUBGRAPH = 0x002,
+};
+extern "C" {
+ORT_EXPORT ORT_API_STATUS(OrtSessionOptionsAppendExecutionProvider_CoreML,
+                          _In_ OrtSessionOptions* options, uint32_t coreml_flags);
+}
+#endif
 #endif
 
 struct OnnxBackend::Impl {
