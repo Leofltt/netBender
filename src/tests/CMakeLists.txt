@@ -226,6 +226,34 @@ if (BUILD_JUCE_PLUGIN)
 endif()
 add_custom_target(unit_tests DEPENDS ${_nb_unit_test_targets})
 
+if (BUILD_CSOUND AND NETBENDER_CSOUND_FOUND)
+    add_executable(test_csound_adapter
+        test_csound_adapter.cpp
+        "${CMAKE_SOURCE_DIR}/frontend/csound/CsoundSessionAdapter.cpp"
+    )
+
+    target_include_directories(test_csound_adapter PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_SOURCE_DIR}/frontend/csound"
+    )
+
+    target_compile_features(test_csound_adapter PRIVATE cxx_std_20)
+
+    target_link_libraries(test_csound_adapter PRIVATE
+        NetBender::backend
+    )
+
+    if (APPLE)
+        set_target_properties(test_csound_adapter PROPERTIES
+            BUILD_WITH_INSTALL_RPATH TRUE
+            INSTALL_RPATH "${TORCH_INSTALL_PREFIX}/lib;${torch_dir}/libtorch/lib;${ort_extracted_dir}/lib;${CONDA_ENV_PATH}/lib;/Library/Application Support/NetBender/lib;@loader_path/;@loader_path/../lib"
+        )
+    endif()
+
+    add_test(NAME test_csound_adapter COMMAND test_csound_adapter)
+    add_custom_target(csound_tests DEPENDS test_csound_adapter)
+endif()
+
 # On Windows, copy ONNX Runtime DLLs next to test executables so they are loaded
 # ahead of any older preinstalled C:\Windows\System32\onnxruntime.dll.
 if (WIN32)
@@ -239,6 +267,9 @@ if (WIN32)
         )
         if (BUILD_JUCE_PLUGIN)
             list(APPEND _nb_ort_dll_targets test_rtsan)
+        endif()
+        if (BUILD_CSOUND AND NETBENDER_CSOUND_FOUND)
+            list(APPEND _nb_ort_dll_targets test_csound_adapter)
         endif()
         foreach(_t IN LISTS _nb_ort_dll_targets)
             add_custom_command(
@@ -261,6 +292,9 @@ if (WIN32 AND CMAKE_VERSION VERSION_GREATER_EQUAL "3.22")
     )
     if (BUILD_JUCE_PLUGIN)
         list(APPEND _nb_win_dll_tests test_rtsan)
+    endif()
+    if (BUILD_CSOUND AND NETBENDER_CSOUND_FOUND)
+        list(APPEND _nb_win_dll_tests test_csound_adapter)
     endif()
     set(_nb_win_dll_mods "")
     foreach(_dir IN ITEMS
