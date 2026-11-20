@@ -1,6 +1,6 @@
 #include "SafetySentry.h"
-#include <cmath>
 #include <algorithm>
+#include <cmath>
 
 auto SafetySentry::process_channel(float* wet_dest, const float* dry_src, int num_samples,
                                    float wet_gain, float dry_gain) NETBENDER_NONBLOCKING -> void {

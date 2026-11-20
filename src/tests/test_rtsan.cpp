@@ -1,6 +1,6 @@
 #include "PluginProcessor.h"
 #include "dsp/AudioRingBuffer.h"
-#include "core/SafetySentry.h"
+#include "dsp/SafetySentry.h"
 #include "rtsan_utils.h"
 
 #include <JuceHeader.h>

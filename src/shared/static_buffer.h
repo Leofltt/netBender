@@ -4,9 +4,6 @@
 #include <memory>
 #include <algorithm>
 #include <cstddef>
-#if !defined(NETBENDER_NO_TORCH_HEADERS)
-#include <torch/torch.h>
-#endif
 
 template <typename data_type>
 class StaticBuffer {
@@ -52,14 +49,8 @@ public:
 
     auto reset() -> void { std::fill(_data.get()->begin(), _data.get()->end(), 0.0f); }
 
-#if !defined(NETBENDER_NO_TORCH_HEADERS)
-    auto to_tensor() -> torch::Tensor {
-        auto obj = torch::from_blob(
-            _data.get()->data(),
-            {static_cast<long long>(_dims[0]), static_cast<long long>(_dims[1])}, torch::kFloat);
-        return obj;
-    }
-#endif
+    auto data() -> data_type* { return _data ? _data->data() : nullptr; }
+    auto data() const -> const data_type* { return _data ? _data->data() : nullptr; }
 
     auto at(const size_t dim1, const size_t dim2) -> float& {
         return _data.get()->at(dim1 * _dims[0] + dim2);

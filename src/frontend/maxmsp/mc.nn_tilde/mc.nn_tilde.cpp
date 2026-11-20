@@ -112,8 +112,8 @@ public:
     message<> maxclass_setup{
       this, "maxclass_setup",
       [this](const c74::min::atoms &args, const int inlet) -> c74::min::atoms {
-        cout << "mc.netBender~ " << VERSION << " (ExecuTorch / ONNX / Torch " << TORCH_VERSION
-             << ") - NetBender / ACIDS" << endl;
+        cout << "mc.netBender~ " << VERSION << " (ExecuTorch / ONNX / Torch "
+             << BackendFactory::get_torch_version() << ") - NetBender / ACIDS" << endl;
         c74::max::t_class *c = args[0];
         c74::max::class_addmethod(
             c, (c74::max::method)simplemc_multichanneloutputs,

@@ -1,12 +1,13 @@
 #include "TorchBackend.h"
 #include <exception>
-#include "parsing_utils.h"
 #include <algorithm>
 #include <iostream>
 #include <exception>
 #include <stdio.h>
 #include <stdlib.h>
 #include <random>
+#include "parsing_utils.h"
+
 
 #define CPU torch::kCPU
 #define CUDA torch::kCUDA
@@ -25,6 +26,17 @@ auto tensor_to_str(torch::Tensor& tsr) -> std::string {
     ss << ")";
     return ss.str();
 }
+
+namespace {
+
+auto static_buffer_to_tensor(StaticBuffer<float>& buffer) -> torch::Tensor {
+    auto dims = buffer.dims();
+    return torch::from_blob(buffer.data(),
+                            {static_cast<long long>(dims[0]), static_cast<long long>(dims[1])},
+                            torch::kFloat);
+}
+
+}  // namespace
 
 TorchBackend::TorchBackend() : m_loaded(0), m_device(CPU), m_use_gpu(false) {
     at::init_num_threads();
@@ -997,7 +1009,7 @@ auto TorchBackend::set_attribute(std::string attribute_name,
                         std::string(" not found. Did you initialise it?");
                 } else {
                     auto buffer = buffer_array.at(buffer_name);
-                    auto buf_tensor = buffer.to_tensor().index({0});
+                    auto buf_tensor = static_buffer_to_tensor(buffer).index({0});
                     setter_inputs.push_back(buf_tensor.clone());
                 }
                 break;
@@ -1206,7 +1218,7 @@ auto TorchBackend::update_buffer(std::string buffer_name, StaticBuffer<float>& b
     std::string setter_method = "set_buffer_attribute";
     auto args = empty_args();
     auto kwargs = empty_kwargs();
-    auto tensor = buffer.to_tensor().to(m_device);
+    auto tensor = static_buffer_to_tensor(buffer).to(m_device);
     auto sr = static_cast<int>(buffer.sr());
     // auto tensor_min = tensor.min(); auto tensor_max = tensor.max();
     auto tensor_size = {tensor.size(0), tensor.size(1)};

@@ -4,66 +4,6 @@
 #include <cmath>
 #include <thread>
 
-namespace {
-
-// Lock-free, syscall-free audio-thread reader guard.
-// Increments the active-reader counter iff k_reconfiguring_bit is clear.
-class scoped_rt_reader {
-public:
-    scoped_rt_reader(std::atomic<uint32_t>& gate, uint32_t reconfiguring_bit) NETBENDER_NONBLOCKING
-        : m_gate(gate) {
-        uint32_t state = m_gate.load(std::memory_order_acquire);
-        while ((state & reconfiguring_bit) == 0u) {
-            if (m_gate.compare_exchange_weak(state, state + 1u, std::memory_order_acquire,
-                                             std::memory_order_relaxed)) {
-                m_acquired = true;
-                break;
-            }
-        }
-    }
-
-    ~scoped_rt_reader() NETBENDER_NONBLOCKING {
-        if (m_acquired) {
-            m_gate.fetch_sub(1u, std::memory_order_release);
-        }
-    }
-
-    scoped_rt_reader(const scoped_rt_reader&) = delete;
-    auto operator=(const scoped_rt_reader&) -> scoped_rt_reader& = delete;
-
-    [[nodiscard]] auto is_acquired() const NETBENDER_NONBLOCKING -> bool { return m_acquired; }
-
-private:
-    std::atomic<uint32_t>& m_gate;
-    bool m_acquired{false};
-};
-
-// Non-RT writer guard used by init_buffers() to drain any in-flight processBlock()
-// without timers or audio-thread syscalls.
-class scoped_reconfigure_gate {
-public:
-    scoped_reconfigure_gate(std::atomic<uint32_t>& gate, uint32_t reconfiguring_bit)
-        : m_gate(gate), m_reconfiguring_bit(reconfiguring_bit) {
-        m_gate.fetch_or(m_reconfiguring_bit, std::memory_order_acq_rel);
-        while ((m_gate.load(std::memory_order_acquire) & ~m_reconfiguring_bit) != 0u) {
-            std::this_thread::yield();
-        }
-    }
-
-    ~scoped_reconfigure_gate() {
-        m_gate.fetch_and(~m_reconfiguring_bit, std::memory_order_release);
-    }
-
-    scoped_reconfigure_gate(const scoped_reconfigure_gate&) = delete;
-    auto operator=(const scoped_reconfigure_gate&) -> scoped_reconfigure_gate& = delete;
-
-private:
-    std::atomic<uint32_t>& m_gate;
-    uint32_t m_reconfiguring_bit;
-};
-
-}  // namespace
-
 //==============================================================================
 NetBenderAudioProcessor::NetBenderAudioProcessor()
 #ifndef JucePlugin_PreferredChannelConfigurations
@@ -163,7 +103,7 @@ auto NetBenderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     auto totalNumInputChannels = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
 
-    const scoped_rt_reader rt_guard(m_rt_gate, k_reconfiguring_bit);
+    const ScopedRtReader rt_guard(m_rt_gate);
     if (!rt_guard.is_acquired()) {
         buffer.clear();
         return;
@@ -527,7 +467,7 @@ auto NetBenderAudioProcessor::setUseGpu(bool enabled) -> void {
 
 auto NetBenderAudioProcessor::init_buffers() -> void {
     std::lock_guard<std::mutex> reconfig_lock(m_reconfig_mutex);
-    const scoped_reconfigure_gate reconfig_gate(m_rt_gate, k_reconfiguring_bit);
+    const ScopedReconfigureGate reconfig_gate(m_rt_gate);
 
     m_model_thread.stop();
 

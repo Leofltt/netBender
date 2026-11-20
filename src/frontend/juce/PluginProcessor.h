@@ -1,13 +1,13 @@
 #pragma once
 
 #include "IBackend.h"
-#include "TorchBackend.h"
 #include "BackendFactory.h"
 #include "dsp/AudioRingBuffer.h"
+#include "dsp/RtGate.h"
 #include "core/ModelThread.h"
 #include "core/BendingManager.h"
 #include "core/LatentTerrainEngine.h"
-#include "core/SafetySentry.h"
+#include "dsp/SafetySentry.h"
 #include <JuceHeader.h>
 #include <mutex>
 #include <atomic>
@@ -54,7 +54,6 @@ public:
     // Backend methods
     auto loadModel(const juce::File& file) -> bool;
     auto getBackend() -> IBackend& { return *m_backend; }
-    auto getTorchBackend() -> TorchBackend* { return dynamic_cast<TorchBackend*>(m_backend.get()); }
     auto isModelLoaded() const -> bool { return m_modelLoaded.load(); }
     auto getModelPath() const -> juce::String { return m_modelPath; }
     auto getCurrentMethod() const -> juce::String {
@@ -284,8 +283,7 @@ private:
     std::vector<std::vector<float>> m_worker_in;
     std::vector<std::vector<float>> m_worker_out;
 
-    static constexpr uint32_t k_reconfiguring_bit = 0x80000000u;
-    std::atomic<uint32_t> m_rt_gate{0};
+    RtGate m_rt_gate;
     std::mutex m_reconfig_mutex;
     mutable std::mutex m_state_mutex;
     std::atomic<bool> m_output_ready{false};

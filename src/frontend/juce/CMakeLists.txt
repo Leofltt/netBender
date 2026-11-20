@@ -17,8 +17,6 @@ function(configure_nn_bending_target target_name)
         core/BendingManager.h
         core/LatentTerrainEngine.cpp
         core/LatentTerrainEngine.h
-        core/SafetySentry.cpp
-        core/SafetySentry.h
         ui/FlatLookAndFeel.cpp
         ui/FlatLookAndFeel.h
         ui/HeaderComponent.cpp

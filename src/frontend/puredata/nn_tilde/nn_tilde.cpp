@@ -439,11 +439,7 @@ bool nn_tilde_load_model(t_nn_tilde *x, const char *path)
   x->m_path = gensym(fullpath.c_str());
   x->settable_attributes = x->m_model->get_settable_attributes();
 
-#if defined(__APPLE__)
-  bool gpu_supported = true;
-#else
-  bool gpu_supported = (torch::hasCUDA() || torch::hasMPS());
-#endif
+  bool gpu_supported = BackendFactory::has_gpu_support();
   if (x->m_gpu && !gpu_supported)
   {
     post("netBender~: GPU mode not available");
@@ -451,8 +447,8 @@ bool nn_tilde_load_model(t_nn_tilde *x, const char *path)
   }
   else if (x->m_gpu)
   {
-    const char *gputype = torch::hasCUDA() ? "CUDA" : "MPS/CoreML";
-    post("netBender~: %s enabled", gputype);
+    const std::string gputype = BackendFactory::gpu_backend_label();
+    post("netBender~: %s enabled", gputype.c_str());
   }
 
   if (x->m_gpu)
@@ -722,11 +718,7 @@ void nn_tilde_gpu(t_nn_tilde *x, t_floatarg arg)
     return;
   }
 
-#if defined(__APPLE__)
-  bool gpu_supported = true;
-#else
-  bool gpu_supported = (torch::hasCUDA() || torch::hasMPS());
-#endif
+  bool gpu_supported = BackendFactory::has_gpu_support();
   if (want_gpu && !gpu_supported)
   {
     post("netBender~: GPU mode not available");
@@ -1010,7 +1002,7 @@ void startup_message()
   std::string startmessage = "netBender~ - ";
   startmessage += VERSION;
   startmessage += " (ExecuTorch / ONNX / Torch ";
-  startmessage += TORCH_VERSION;
+  startmessage += BackendFactory::get_torch_version();
   startmessage += ") - NetBender / ACIDS";
   post(startmessage.c_str());
 }
