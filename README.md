@@ -66,19 +66,33 @@ All multi-byte numeric fields are encoded in **little-endian** byte order:
 | | `num_elements` | `uint64` | Total number of elements $E = \prod \text{shape}$. |
 | | `weights` | `float32[E]` | IEEE 754 32-bit floating point tensor weights ($E \times 4$ bytes). |
 
+### Unified Real-Time DSP & Streaming Engine (`netbender_dsp` & `netbender_backend`)
+
+All frontends (JUCE VST3/AU/Standalone, Max/MSP, and PureData) share a single standalone C++20 backend and real-time DSP stack (`NetBender::backend` and `NetBender::dsp`) with zero UI framework dependencies:
+
+| Layer / Component | Location | Responsibility |
+| --- | --- | --- |
+| **`StreamingEngine`** | `src/backend/engine/StreamingEngine.*` | Frontend-agnostic real-time streaming orchestrator handling lock-free SPSC audio buffering, automatic host $\leftrightarrow$ model fractional sample-rate conversion, asynchronous worker-thread or synchronous (`bufsize 0`) inference dispatch, dry/wet latency compensation (`dry_delay`), `SafetySentry` circuit breaking, and generative modes (`forward`, `encode`, `decode`, `prior`, `decode gen`). |
+| **`Resampler` & `ResamplingRingBufferBank`** | `src/backend/dsp/Resampler.h`, `src/backend/dsp/ResamplingRingBuffer.h` | Real-time safe fractional sample-rate conversion (Catmull-Rom 4-point cubic Hermite & linear interpolation, bit-exact with JUCE's `CatmullRomInterpolator` / `LinearInterpolator`) integrated directly into multi-channel lock-free SPSC ring buffers (`float*` and `double*` host I/O). Gives **Max/MSP, PureData, and JUCE** automatic sample-rate adaptation whenever the host sample rate differs from the model's native rate. |
+| **`AudioRingBuffer`** | `src/backend/dsp/AudioRingBuffer.h` | Wait-free, cache-line-aligned single-producer / single-consumer (SPSC) ring buffer with zero-pad underflow and drop-newest overflow semantics. |
+| **`SafetySentry`** | `src/backend/dsp/SafetySentry.h` | Real-time output circuit breaker: `NaN`/`Inf` scrubbing, hard peak clamping ($\pm 4.0$), consecutive runaway frame detection ($\ge 16.0$), instant fuse trip, and automatic recovery after clean frames. |
+| **`RtGate` & `WorkerThread`** | `src/backend/dsp/RtGate.h`, `src/backend/dsp/WorkerThread.h` | Lock-free audio-thread gate with deterministic callback drain (`wait_until_closed()`) for safe hot-reconfiguration, plus a condition-variable inference worker thread with a `NETBENDER_NONBLOCKING` atomic wake trigger. |
+
 ---
 
 ## Frontends & Build Targets
 
-NetBender provides native frontends for DAWs, standalone desktop performance, and modular patching environments:
+NetBender provides native frontends for DAWs, standalone desktop performance, and modular patching environments, built on top of the modular `netbender_dsp` and `netbender_backend` CMake targets:
 
 | Target | Description | Output / Installation |
 | --- | --- | --- |
+| `netbender_dsp` | **Header-Only Real-Time DSP Library** (`NetBender::dsp`) | `AudioRingBuffer`, `Resampler`, `ResamplingRingBufferBank`, `SafetySentry`, `RtGate`, `WorkerThread`, `rtsan_utils.h`. |
+| `netbender_backend` | **Core Multi-Backend & Streaming Library** (`NetBender::backend`) | `IBackend`, `BackendFactory`, `TorchBackend`, `OnnxBackend`, `ExecuTorchBackend`, and `StreamingEngine`. |
 | `plugin` | **JUCE VST3 & AudioUnit (AU)** (`NetBender`) | Bundled dylibs, signed with `SIGN_ID`, installed to `~/Library/Audio/Plug-Ins/VST3` and `~/Library/Audio/Plug-Ins/Components` (macOS). |
 | `standalone` | **JUCE Standalone Application** (`NetBender`) | Desktop app with direct audio/MIDI I/O and full interactive circuit-bending UI. |
 | `maxmsp` | **Max/MSP Externals** (`netBender~`, `mc.netBender~`, `mcs.netBender~`, `netBender.info`) | Built as `.mxo` / `.mxe64` bundles for Max 8+. |
 | `puredata` | **PureData External** (`netBender~`, with legacy `nn~` alias) | Built as `netBender~.pd_darwin` / `netBender~.pd_linux` / `netBender~.dll`. |
-| `all` (default) | Builds all enabled frontend targets | Builds all configured targets. |
+| `all` (default) | Builds all enabled library, frontend, and test targets | Builds all configured targets. |
 
 ---
 
@@ -241,7 +255,7 @@ export_bendable_pte(
 
 ## Using `netBender~` in Max/MSP & PureData
 
-All Max/MSP (`netBender~`, `mc.netBender~`, `mcs.netBender~`, `netBender.info`) and PureData (`netBender~`, also aliased to `nn~` for backward compatibility) externals share the same multi-backend engine as the JUCE plugin.
+All Max/MSP (`netBender~`, `mc.netBender~`, `mcs.netBender~`, `netBender.info`) and PureData (`netBender~`, also aliased to `nn~` for backward compatibility) externals are powered by `StreamingEngine` (`NetBender::backend`), giving them the same lock-free SPSC buffering, automatic Catmull-Rom fractional sample-rate conversion (when the host patcher sample rate differs from the model's native sample rate), and `SafetySentry` protection as the JUCE plugin.
 
 ### Instantiation
 
@@ -251,7 +265,7 @@ netBender~ <model_path> [method] [buffer_size]
 
 - **`<model_path>`**: Path or filename of a `.pte`, `.onnx`, or `.ts` model (if you omit the extension, `netBender~` automatically searches for `<name>.pte`, `<name>.onnx`, and `<name>.ts` in order).
 - **`[method]`**: Synthesis method to run (`forward` by default; `encode`, `decode`, or `prior` when companion graphs/methods are available).
-- **`[buffer_size]`**: Internal circular buffer size in samples (must be $\ge$ model's `higher_ratio`; `0` disables the worker thread).
+- **`[buffer_size]`**: Internal streaming block size in samples (rounded to the next multiple of the model's `higher_ratio`; `0` runs synchronous inline inference on the DSP thread without a worker thread).
 
 **Examples:**
 
@@ -275,7 +289,7 @@ Connect a message box to the left inlet of `netBender~` and route the rightmost 
 | `method` | `<method_name>` | Switches active synthesis method (`forward`, `encode`, `decode`, `prior`). |
 | `dump` | *(none)* | Prints model path, active backend (`ExecuTorch`, `ONNX Runtime`, `TorchScript`), dimensions, ratios, methods, and attributes to the console. |
 | `enable` | `0` or `1` | Enables or bypasses audio processing. |
-| `gpu` / `@gpu` | `0` or `1` | Enables hardware acceleration (CoreML Execution Provider for `.onnx`,MPS/CUDA for `.ts`, or built-in delegate for `.pte`). |
+| `gpu` / `@gpu` | `0` or `1` | Enables hardware acceleration (CoreML Execution Provider for `.onnx`, MPS/CUDA for `.ts`, or built-in delegate for `.pte`). |
 
 ---
 
@@ -299,6 +313,9 @@ cmake -S src -B build \
 ### 2. Build Targets
 
 ```bash
+# Build the core C++20 DSP & multi-backend libraries:
+cmake --build build --target netbender_dsp netbender_backend
+
 # Build the JUCE VST3 and AU plugins:
 cmake --build build --target plugin
 
@@ -327,9 +344,34 @@ cmake --build build --target all
 | `-DBUNDLE_DEPENDENCIES=ON\|OFF` | `OFF` | Bundle and relocate shared libraries into `support/` for redistributable packages. |
 | `-DSIGN_ID="..."` | `"-"` | macOS codesigning identity (can also be placed in `.env` at the repo root). |
 
-### 3. Multi-Backend Verification & Sentry Suite (`test_backends`)
+### 3. Fast C++ Unit Test Suite (`ctest`)
 
-The C++ test harness (`build/tests/test_backends`) verifies loading, streaming `forward` passes, `decode gen`, `prior` synthesis, NaN/Inf/fuse sentry protection, and real-time weight bending across `.ts`, `.onnx`, and `.pte` models:
+NetBender includes a fast, self-contained CTest unit test suite that runs in seconds without requiring external model files on disk:
+
+| Test Target | Library Under Test | Coverage |
+| --- | --- | --- |
+| `test_audio_ring_buffer` | `NetBender::dsp` | Wait-free SPSC ring FIFO fidelity, wraparound, zero-pad underflow, drop-newest overflow, 2-thread SPSC stress, and `NETBENDER_NONBLOCKING` safety. |
+| `test_dsp_core` | `NetBender::dsp` | `SafetySentry` (`NaN`/`Inf` scrubbing, $\pm 4.0$ hard clamp, runaway fuse trip & auto-recovery), `RtGate` (`ScopedEnter` & `wait_until_closed()`), and `WorkerThread` coalescing. |
+| `test_backend_core` | `NetBender::backend` | `BackendFactory` extension dispatch, `static_buffer` move/index semantics, `parsing_utils`, and `MockBackend` + `StreamingEngine` contract tests. |
+| `test_resampling_spsc` | `NetBender::dsp` | `ResamplingRingBuffer` & `ResamplingRingBufferBank` (`Bypass`, `OnPush`, `OnPull`), round-trip SNR ($> 55\text{ dB}$), chunked pulls exceeding scratch size, 4-ch quadrature phase lock, `double*` host I/O, and 2-thread SPSC stress. |
+| `test_streaming_engine` | `NetBender::backend` | End-to-end `StreamingEngine` verification: sync & async streaming (resampling ON/OFF), dry/wet latency compensation cancellation ($> 46\text{ dB}$ null), `double*` batched `RawMethod`, generative `"prior"` & `"decode gen"`, concurrent live reconfiguration, and `SafetySentry` recovery. |
+| `test_resampler_parity` | `NetBender::dsp` + `juce::juce_audio_basics` | Direct bit-exact sample-by-sample parity of `netbender::dsp::Resampler` against `juce::CatmullRomInterpolator` ($\le 10^{-6}$) and `juce::LinearInterpolator` ($\le 2 \times 10^{-6}$), random block-boundary seam continuity, round-trip impulse group delay, and $10^6$-sample phase accumulation. |
+
+```bash
+# Build and run all CTest unit tests:
+cmake --build build --target \
+    test_audio_ring_buffer \
+    test_dsp_core \
+    test_backend_core \
+    test_resampling_spsc \
+    test_streaming_engine \
+    test_resampler_parity
+ctest --test-dir build --output-on-failure
+```
+
+### 4. Multi-Backend Model Verification & Sentry Suite (`test_backends`)
+
+The model integration harness (`build/tests/test_backends`) verifies loading, `StreamingEngine` host-callback streaming `forward` passes (including fractional sample-rate conversion), `decode gen`, `prior` synthesis, NaN/Inf/fuse sentry protection, and real-time weight bending across `.ts`, `.onnx`, and `.pte` models:
 
 ```bash
 # Run the full CPU test suite (.ts CPU, .onnx CPU, and *_xnnpack.pte) -> test_report_cpu.md:
@@ -342,12 +384,12 @@ The C++ test harness (`build/tests/test_backends`) verifies loading, streaming `
 ./build/tests/test_backends --gpu models/stable_audio_1_vae_coreml.pte models/encodec_coreml.pte
 ```
 
-### 4. Real-Time Safety Verification with RealtimeSanitizer (`test_rtsan`)
+### 5. Real-Time Safety Verification with RealtimeSanitizer (`test_rtsan` & `ctest`)
 
-NetBender annotates its real-time audio path (`NetBenderAudioProcessor::processBlock`, `AudioRingBuffer`, `SafetySentry`, `ModelThread::trigger_compute`, and `BendingManager::update_audio_envelope`) with `NETBENDER_NONBLOCKING` (`[[clang::nonblocking]]` via `src/shared/rtsan_utils.h`) so [Clang RealtimeSanitizer (RTSan)](https://clang.llvm.org/docs/RealtimeSanitizer.html) can dynamically catch heap allocations, mutex locks, or blocking syscalls on the audio thread.
+NetBender annotates its real-time audio path (`NetBenderAudioProcessor::processBlock`, `StreamingEngine::process`, `Resampler`, `ResamplingRingBuffer`, `AudioRingBuffer`, `SafetySentry`, `RtGate`, `WorkerThread::trigger`, and `BendingManager::update_audio_envelope`) with `NETBENDER_NONBLOCKING` (`[[clang::nonblocking]]` via `src/backend/dsp/rtsan_utils.h`) so [Clang RealtimeSanitizer (RTSan)](https://clang.llvm.org/docs/RealtimeSanitizer.html) can dynamically catch heap allocations, mutex locks, or blocking syscalls on the audio thread.
 
 > [!NOTE]
-> **macOS Compiler Requirement**: Apple Clang does not ship the RTSan runtime library. On macOS, install upstream LLVM 20+ via Homebrew (`brew install llvm`) and pass its compiler paths directly to CMake in a separate build directory (no need to add Homebrew LLVM to `PATH` or `~/.zshrc`).
+> **macOS Compiler Requirement**: Apple Clang does not ship the RTSan runtime library. On macOS, install upstream LLVM 20+ via Homebrew (`brew install llvm`) and pass its compiler paths directly to CMake in a separate build directory (no need to add Homebrew LLVM to `PATH` or `~/.zshrc`). Build the RTSan test targets directly rather than target `all` (LLVM 23's C++20 `<atomic>` header conflicts with `<stdatomic.h>` inside the third-party VST3 SDK `.mm` wrapper).
 
 ```bash
 # 1. Configure with RTSan enabled using upstream LLVM/Clang 20+:
@@ -360,11 +402,20 @@ cmake -S src -B build-rtsan \
     -DBUILD_PUREDATA=OFF \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo
 
-# 2. Build the headless RTSan test harness (and optionally the Standalone app):
-cmake --build build-rtsan --target test_rtsan -j
-# cmake --build build-rtsan --target standalone -j
+# 2. Build the CTest unit suite and headless RTSan processor harness:
+cmake --build build-rtsan --target \
+    test_audio_ring_buffer \
+    test_dsp_core \
+    test_backend_core \
+    test_resampling_spsc \
+    test_streaming_engine \
+    test_resampler_parity \
+    test_rtsan -j
 
-# 3. Run in strict mode (exits non-zero on any real-time violation):
+# 3. Run all CTest unit tests under RealtimeSanitizer:
+ctest --test-dir build-rtsan --output-on-failure
+
+# 4. Run the full JUCE processor RTSan harness in strict mode (exits non-zero on any RT violation):
 ./build-rtsan/tests/test_rtsan_artefacts/RelWithDebInfo/test_rtsan models/darbouka_xnnpack.pte
 
 # Or run in audit mode to report all violations without aborting:
@@ -372,7 +423,7 @@ RTSAN_OPTIONS="halt_on_error=false" \
     ./build-rtsan/tests/test_rtsan_artefacts/RelWithDebInfo/test_rtsan models/darbouka_xnnpack.pte
 ```
 
-### 5. Streaming Metadata Specification
+### 6. Streaming Metadata Specification
 
 NetBender models configure their streaming buffer, receptive field discard, and latent generation parameters via unified `NBND` v2 `.bin` embedded metadata and ONNX model metadata properties (`netbender.*`):
 
