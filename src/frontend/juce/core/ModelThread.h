@@ -34,12 +34,11 @@ private:
 
     std::function<void()> m_compute_fn;
 #if defined(__APPLE__)
-    dispatch_semaphore_t m_sem { nullptr };
+    dispatch_semaphore_t m_sem{nullptr};
 #elif defined(_WIN32)
-    void* m_sem { nullptr };
+    void* m_sem{nullptr};
 #else
-    sem_t m_sem {};
+    sem_t m_sem{};
 #endif
-    std::atomic<bool> m_processing { false };
+    std::atomic<bool> m_processing{false};
 };
-

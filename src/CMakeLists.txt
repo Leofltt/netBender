@@ -232,6 +232,7 @@ if (BUILD_JUCE_PLUGIN)
 endif()
 
 # Unit tests
+enable_testing()
 add_subdirectory(tests)
 
 # Code Formatting Target

@@ -49,8 +49,10 @@ auto LatentTerrainComponent::paint(juce::Graphics& g) -> void {
     if (!m_hasBottleneck) {
         g.setColour(UIConstants::Colors::text_dimmed);
         g.setFont(juce::FontOptions(UIConstants::Typography::font_heading));
-        g.drawText("Current model has no autoencode / latent bottleneck.\n(Requires paired encode + decode methods, e.g. RAVE)",
-                   padArea.toNearestInt(), juce::Justification::centred, true);
+        g.drawText(
+            "Current model has no autoencode / latent bottleneck.\n(Requires paired encode + "
+            "decode methods, e.g. RAVE)",
+            padArea.toNearestInt(), juce::Justification::centred, true);
         return;
     }
 
@@ -97,8 +99,8 @@ auto LatentTerrainComponent::paint(juce::Graphics& g) -> void {
 
         g.setColour(juce::Colours::white.withAlpha(0.28f));
         g.setFont(juce::FontOptions(9.0f));
-        g.drawText(juce::String(step * 0.25f, 2),
-                   static_cast<int>(cx + 4), static_cast<int>(cy - r - 6), 30, 12, juce::Justification::centredLeft);
+        g.drawText(juce::String(step * 0.25f, 2), static_cast<int>(cx + 4),
+                   static_cast<int>(cy - r - 6), 30, 12, juce::Justification::centredLeft);
     }
 
     {
@@ -114,7 +116,8 @@ auto LatentTerrainComponent::paint(juce::Graphics& g) -> void {
 
     {
         float distFromOrigin = std::sqrt(m_x * m_x + m_y * m_y);
-        juce::Colour rayColour = m_isEnabled ? UIConstants::Latent::active_ray : UIConstants::Latent::inactive;
+        juce::Colour rayColour =
+            m_isEnabled ? UIConstants::Latent::active_ray : UIConstants::Latent::inactive;
         g.setColour(rayColour.withAlpha(0.40f));
         g.drawLine(cx, cy, cursorX, cursorY, 1.0f);
         if (distFromOrigin > 0.15f) {
@@ -123,7 +126,8 @@ auto LatentTerrainComponent::paint(juce::Graphics& g) -> void {
             g.setColour(UIConstants::Colors::cyan.withAlpha(0.85f));
             g.setFont(juce::FontOptions(9.0f));
             g.drawText(juce::String::formatted("r=%.2f", distFromOrigin),
-                       static_cast<int>(midX + 4), static_cast<int>(midY - 6), 40, 12, juce::Justification::centredLeft);
+                       static_cast<int>(midX + 4), static_cast<int>(midY - 6), 40, 12,
+                       juce::Justification::centredLeft);
         }
     }
 
@@ -134,7 +138,8 @@ auto LatentTerrainComponent::paint(juce::Graphics& g) -> void {
             trailPath.lineTo(m_trail[i].x, m_trail[i].y);
         }
 
-        juce::Colour trailColour = m_isEnabled ? UIConstants::Latent::active_trail : UIConstants::Latent::inactive;
+        juce::Colour trailColour =
+            m_isEnabled ? UIConstants::Latent::active_trail : UIConstants::Latent::inactive;
         g.setColour(trailColour.withAlpha(0.35f));
         g.strokePath(trailPath, juce::PathStrokeType(1.2f));
         for (size_t i = 0; i < m_trail.size(); ++i) {
@@ -144,12 +149,11 @@ auto LatentTerrainComponent::paint(juce::Graphics& g) -> void {
         }
     }
 
-    juce::Colour glowColour = m_isEnabled ? UIConstants::Latent::active_trail : UIConstants::Latent::inactive;
+    juce::Colour glowColour =
+        m_isEnabled ? UIConstants::Latent::active_trail : UIConstants::Latent::inactive;
 
-    juce::ColourGradient glowGrad(
-        glowColour.withAlpha(0.40f), cursorX, cursorY,
-        glowColour.withAlpha(0.0f), cursorX, cursorY + 32.0f, true
-    );
+    juce::ColourGradient glowGrad(glowColour.withAlpha(0.40f), cursorX, cursorY,
+                                  glowColour.withAlpha(0.0f), cursorX, cursorY + 32.0f, true);
     g.setGradientFill(glowGrad);
     g.fillEllipse(cursorX - 32.0f, cursorY - 32.0f, 64.0f, 64.0f);
 
@@ -171,12 +175,15 @@ auto LatentTerrainComponent::paint(juce::Graphics& g) -> void {
         angleDeg += 360.0f;
     }
 
-    juce::String coordsText = juce::String::formatted("X: %+.3f   Y: %+.3f   |   Mag: %.3f   θ: %.1f°", m_x, m_y, mag, angleDeg);
-    g.drawText(coordsText, padArea.reduced(10.0f, 6.0f).toNearestInt(), juce::Justification::bottomLeft, true);
+    juce::String coordsText = juce::String::formatted(
+        "X: %+.3f   Y: %+.3f   |   Mag: %.3f   θ: %.1f°", m_x, m_y, mag, angleDeg);
+    g.drawText(coordsText, padArea.reduced(10.0f, 6.0f).toNearestInt(),
+               juce::Justification::bottomLeft, true);
 
     juce::String modeText = m_isEnabled ? "LATENT HOOK: ACTIVE" : "STANDBY (Click to Modulate)";
     g.setColour(m_isEnabled ? UIConstants::Latent::active_trail : UIConstants::Colors::text_dimmed);
-    g.drawText(modeText, padArea.reduced(10.0f, 6.0f).toNearestInt(), juce::Justification::topRight, true);
+    g.drawText(modeText, padArea.reduced(10.0f, 6.0f).toNearestInt(), juce::Justification::topRight,
+               true);
 }
 
 auto LatentTerrainComponent::mouseDown(const juce::MouseEvent& e) -> void {
@@ -199,7 +206,8 @@ auto LatentTerrainComponent::update_background_terrain_image(int w, int h) -> vo
         return;
     }
     constexpr int steps = 36;
-    if (!m_backgroundTerrainImage.isValid() || m_backgroundTerrainImage.getWidth() != steps || m_backgroundTerrainImage.getHeight() != steps) {
+    if (!m_backgroundTerrainImage.isValid() || m_backgroundTerrainImage.getWidth() != steps ||
+        m_backgroundTerrainImage.getHeight() != steps) {
         m_backgroundTerrainImage = juce::Image(juce::Image::ARGB, steps, steps, false);
         juce::Image::BitmapData bmp(m_backgroundTerrainImage, juce::Image::BitmapData::writeOnly);
 
@@ -211,7 +219,8 @@ auto LatentTerrainComponent::update_background_terrain_image(int w, int h) -> vo
                 float pxNorm = 2.0f * ((sx + 0.5f) / static_cast<float>(steps)) - 1.0f;
                 float dOrigin = std::sqrt(pxNorm * pxNorm + pyNorm * pyNorm);
 
-                float field1 = std::sin(pxNorm * 3.14159f * 1.5f) * std::cos(pyNorm * 3.14159f * 1.5f);
+                float field1 =
+                    std::sin(pxNorm * 3.14159f * 1.5f) * std::cos(pyNorm * 3.14159f * 1.5f);
                 float field2 = 0.5f * std::cos(dOrigin * 6.28318f);
                 float field = 0.5f * (field1 + field2);
                 float val = juce::jlimit(0.0f, 1.0f, 0.45f + field * 0.35f);
@@ -219,13 +228,16 @@ auto LatentTerrainComponent::update_background_terrain_image(int w, int h) -> vo
                 juce::Colour cellCol;
                 if (val < 0.45f) {
                     float t = val / 0.45f;
-                    cellCol = UIConstants::Latent::terrain_low.interpolatedWith(UIConstants::Latent::terrain_mid_low, t);
+                    cellCol = UIConstants::Latent::terrain_low.interpolatedWith(
+                        UIConstants::Latent::terrain_mid_low, t);
                 } else if (val < 0.70f) {
                     float t = (val - 0.45f) / 0.25f;
-                    cellCol = UIConstants::Latent::terrain_mid_low.interpolatedWith(UIConstants::Latent::terrain_mid_high, t);
+                    cellCol = UIConstants::Latent::terrain_mid_low.interpolatedWith(
+                        UIConstants::Latent::terrain_mid_high, t);
                 } else {
                     float t = (val - 0.70f) / 0.30f;
-                    cellCol = UIConstants::Latent::terrain_mid_high.interpolatedWith(UIConstants::Latent::terrain_high, t);
+                    cellCol = UIConstants::Latent::terrain_mid_high.interpolatedWith(
+                        UIConstants::Latent::terrain_high, t);
                 }
                 line[sx] = cellCol.withAlpha(0.70f).getARGB();
             }
@@ -234,7 +246,7 @@ auto LatentTerrainComponent::update_background_terrain_image(int w, int h) -> vo
 }
 
 auto LatentTerrainComponent::record_trail_point(float px, float py) -> void {
-    m_trail.push_back({ px, py });
+    m_trail.push_back({px, py});
     if (m_trail.size() > 24) {
         m_trail.erase(m_trail.begin());
     }

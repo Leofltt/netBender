@@ -26,7 +26,7 @@ IncludeBlocks: Preserve
 BreakBeforeBraces: Attach
 AllowShortFunctionsOnASingleLine: Inline
 AllowShortIfStatementsOnASingleLine: Never
-AllowShortLoopsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
 AllowShortBlocksOnASingleLine: Never
 
 # Pointer & Reference Alignment (Modern C++: type* var)

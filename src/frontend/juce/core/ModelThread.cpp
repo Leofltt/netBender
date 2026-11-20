@@ -72,7 +72,8 @@ auto ModelThread::wait_semaphore() -> void {
         WaitForSingleObject(static_cast<HANDLE>(m_sem), INFINITE);
     }
 #else
-    while (sem_wait(&m_sem) == -1 && errno == EINTR) {}
+    while (sem_wait(&m_sem) == -1 && errno == EINTR) {
+    }
 #endif
 }
 

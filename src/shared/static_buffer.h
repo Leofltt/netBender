@@ -8,21 +8,19 @@
 #include <torch/torch.h>
 #endif
 
-template <typename data_type> 
+template <typename data_type>
 class StaticBuffer {
 public:
     using BufferData = std::vector<data_type>;
     using BufferShape = std::array<size_t, 2>;
 
 private:
-    std::shared_ptr<BufferData> _data; 
+    std::shared_ptr<BufferData> _data;
     BufferShape _dims;
-    double _samplingRate; 
-    
-public: 
-    StaticBuffer() {
-        _dims = BufferShape({0, 0});
-    }
+    double _samplingRate;
+
+public:
+    StaticBuffer() { _dims = BufferShape({0, 0}); }
 
     StaticBuffer(const size_t dim1, const size_t dim2, const double samplingRate = -1) {
         _dims = BufferShape({dim1, dim2});
@@ -37,34 +35,28 @@ public:
     }
 
     StaticBuffer(const StaticBuffer& buffer) {
-        _dims = buffer._dims; 
+        _dims = buffer._dims;
         _data = buffer._data;
         _samplingRate = buffer._samplingRate;
     }
 
-    auto dims() -> BufferShape {
-        return _dims;
-    }
+    auto dims() -> BufferShape { return _dims; }
 
-    auto sr() -> double {
-        return _samplingRate;
-    }
+    auto sr() -> double { return _samplingRate; }
 
     static auto get_empty_buffer(const size_t dim1, const size_t dim2) -> BufferData {
         return BufferData(dim1 * dim2, 0.f);
     }
 
-    auto clear() -> void {
-        _data.get()->clear();
-    }
+    auto clear() -> void { _data.get()->clear(); }
 
-    auto reset() -> void {
-        std::fill(_data.get()->begin(), _data.get()->end(), 0.0f);
-    }
+    auto reset() -> void { std::fill(_data.get()->begin(), _data.get()->end(), 0.0f); }
 
 #if !defined(NETBENDER_NO_TORCH_HEADERS)
     auto to_tensor() -> torch::Tensor {
-        auto obj = torch::from_blob(_data.get()->data(), {static_cast<long long>(_dims[0]), static_cast<long long>(_dims[1])}, torch::kFloat);
+        auto obj = torch::from_blob(
+            _data.get()->data(),
+            {static_cast<long long>(_dims[0]), static_cast<long long>(_dims[1])}, torch::kFloat);
         return obj;
     }
 #endif

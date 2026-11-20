@@ -23,7 +23,8 @@ auto LatentTerrainEngine::reset() -> void {
     m_cached_latent_dim = 0;
 }
 
-auto LatentTerrainEngine::apply_hook(IBackend::LatentBuffer& buf, float override_x, float override_y, float override_depth) -> void {
+auto LatentTerrainEngine::apply_hook(IBackend::LatentBuffer& buf, float override_x,
+                                     float override_y, float override_depth) -> void {
     if (buf.data == nullptr || buf.channels <= 0 || buf.length <= 0) {
         return;
     }
@@ -39,7 +40,8 @@ auto LatentTerrainEngine::apply_hook(IBackend::LatentBuffer& buf, float override
 
     if (mode == LatentMode::FourierOrbit) {
         int64_t num_harmonics = std::max(static_cast<int64_t>(1), latent_dim / 2);
-        if (m_rff_matrix.size() != static_cast<size_t>(num_harmonics * 2) || m_cached_latent_dim != static_cast<int>(latent_dim)) {
+        if (m_rff_matrix.size() != static_cast<size_t>(num_harmonics * 2) ||
+            m_cached_latent_dim != static_cast<int>(latent_dim)) {
             std::mt19937 rng(42);
             std::normal_distribution<float> dist(0.0f, 2.5f);
             m_rff_matrix.resize(static_cast<size_t>(num_harmonics * 2));
@@ -49,10 +51,13 @@ auto LatentTerrainEngine::apply_hook(IBackend::LatentBuffer& buf, float override
             m_cached_latent_dim = static_cast<int>(latent_dim);
         }
 
-        float norm_depth = depth * (std::sqrt(16.0f) / std::sqrt(static_cast<float>(std::max(static_cast<int64_t>(1), latent_dim))));
+        float norm_depth =
+            depth * (std::sqrt(16.0f) /
+                     std::sqrt(static_cast<float>(std::max(static_cast<int64_t>(1), latent_dim))));
 
         for (int64_t h = 0; h < num_harmonics; ++h) {
-            float proj = m_rff_matrix[static_cast<size_t>(h * 2)] * lx + m_rff_matrix[static_cast<size_t>(h * 2 + 1)] * ly;
+            float proj = m_rff_matrix[static_cast<size_t>(h * 2)] * lx +
+                         m_rff_matrix[static_cast<size_t>(h * 2 + 1)] * ly;
             float cos_offset = norm_depth * std::cos(proj);
             float sin_offset = norm_depth * std::sin(proj);
 
@@ -86,4 +91,3 @@ auto LatentTerrainEngine::apply_hook(IBackend::LatentBuffer& buf, float override
         }
     }
 }
-

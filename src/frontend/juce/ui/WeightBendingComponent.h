@@ -5,10 +5,7 @@
 
 class WeightBendingComponent : public juce::Component {
 public:
-    enum class RenderMode {
-        Curve,
-        Matrix
-    };
+    enum class RenderMode { Curve, Matrix };
 
     WeightBendingComponent();
     ~WeightBendingComponent() override = default;
@@ -25,20 +22,31 @@ public:
     auto setLayerShape(const std::vector<int64_t>& shape) -> void { set_layer_shape(shape); }
 
     auto set_weights(const std::vector<float>& original, const std::vector<float>& current) -> void;
-    auto setWeights(const std::vector<float>& original, const std::vector<float>& current) -> void { set_weights(original, current); }
+    auto setWeights(const std::vector<float>& original, const std::vector<float>& current) -> void {
+        set_weights(original, current);
+    }
 
     auto update_current_weights(const std::vector<float>& current) -> void;
-    auto updateCurrentWeights(const std::vector<float>& current) -> void { update_current_weights(current); }
+    auto updateCurrentWeights(const std::vector<float>& current) -> void {
+        update_current_weights(current);
+    }
 
     auto set_target_bent_weights(const std::vector<float>& target) -> void;
-    auto setTargetBentWeights(const std::vector<float>& target) -> void { set_target_bent_weights(target); }
+    auto setTargetBentWeights(const std::vector<float>& target) -> void {
+        set_target_bent_weights(target);
+    }
 
-    auto set_bridge_weights(const std::vector<float>& source_weights, const std::vector<float>& mix_weights, float depth, bool is_continuous) -> void;
-    auto setBridgeWeights(const std::vector<float>& sourceWeights, const std::vector<float>& mixWeights, float depth, bool isContinuous) -> void {
+    auto set_bridge_weights(const std::vector<float>& source_weights,
+                            const std::vector<float>& mix_weights, float depth, bool is_continuous)
+        -> void;
+    auto setBridgeWeights(const std::vector<float>& sourceWeights,
+                          const std::vector<float>& mixWeights, float depth, bool isContinuous)
+        -> void {
         set_bridge_weights(sourceWeights, mixWeights, depth, isContinuous);
     }
 
-    auto set_harmonic_ghost_weights(const std::vector<float>& ghost_weights, bool show_ghost) -> void;
+    auto set_harmonic_ghost_weights(const std::vector<float>& ghost_weights, bool show_ghost)
+        -> void;
     auto setHarmonicGhostWeights(const std::vector<float>& ghostWeights, bool showGhost) -> void {
         set_harmonic_ghost_weights(ghostWeights, showGhost);
     }
@@ -84,7 +92,8 @@ public:
 
     auto paint(juce::Graphics& g) -> void override;
     auto mouseMagnify(const juce::MouseEvent& e, float scaleFactor) -> void override;
-    auto mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) -> void override;
+    auto mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
+        -> void override;
     auto mouseDoubleClick(const juce::MouseEvent& e) -> void override;
     auto mouseMove(const juce::MouseEvent& e) -> void override;
     auto mouseExit(const juce::MouseEvent& e) -> void override;
@@ -116,7 +125,8 @@ private:
     auto recalculate_stats() -> void;
     auto value_to_y(float val, float height) const -> float;
     auto y_to_value(float y, float height) const -> float;
-    auto build_path_for_weights(juce::Path& p, const std::vector<float>& weights, float w, float h) -> void;
+    auto build_path_for_weights(juce::Path& p, const std::vector<float>& weights, float w, float h)
+        -> void;
     auto apply_drawing_segment(float x0, float y0, float x1, float y1) -> void;
     auto start_h_scroll_drag(const juce::MouseEvent& e) -> void;
     auto start_v_scroll_drag(const juce::MouseEvent& e) -> void;

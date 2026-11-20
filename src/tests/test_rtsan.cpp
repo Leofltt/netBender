@@ -13,12 +13,8 @@
 
 namespace {
 
-auto run_ring_buffer_rt(
-    AudioRingBuffer& rb,
-    const float* input,
-    float* output,
-    int block_size
-) NETBENDER_NONBLOCKING -> void {
+auto run_ring_buffer_rt(AudioRingBuffer& rb, const float* input, float* output,
+                        int block_size) NETBENDER_NONBLOCKING -> void {
     for (int i = 0; i < 64; ++i) {
         rb.put(input, block_size);
         (void)rb.get_available();
@@ -28,12 +24,8 @@ auto run_ring_buffer_rt(
     }
 }
 
-auto run_safety_sentry_rt(
-    SafetySentry& sentry,
-    float* wet,
-    const float* dry,
-    int block_size
-) NETBENDER_NONBLOCKING -> void {
+auto run_safety_sentry_rt(SafetySentry& sentry, float* wet, const float* dry,
+                          int block_size) NETBENDER_NONBLOCKING -> void {
     // Normal signal + soft saturation
     sentry.process_channel(wet, dry, block_size, 0.8f, 0.2f);
 
@@ -158,7 +150,7 @@ auto test_processor_with_model(const juce::File& model_file) -> bool {
     return true;
 }
 
-} // namespace
+}  // namespace
 
 int main(int argc, char** argv) {
     juce::ScopedJuceInitialiser_GUI juce_init;

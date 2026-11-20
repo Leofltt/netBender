@@ -18,7 +18,8 @@ HarmonicsPanel::HarmonicsPanel() {
     harmonic_freq_slider.setRange(0.5, 32.0, 0.1);
     harmonic_freq_slider.setValue(2.0);
     harmonic_freq_slider.setSliderStyle(juce::Slider::LinearBar);
-    harmonic_freq_slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, slider_box_width_standard, slider_box_height_standard);
+    harmonic_freq_slider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                                         slider_box_width_standard, slider_box_height_standard);
     harmonic_freq_slider.setColour(juce::Slider::trackColourId, amber);
     addAndMakeVisible(harmonic_freq_slider);
 
@@ -30,7 +31,8 @@ HarmonicsPanel::HarmonicsPanel() {
     harmonic_partials_slider.setRange(1.0, 8.0, 1.0);
     harmonic_partials_slider.setValue(1.0);
     harmonic_partials_slider.setSliderStyle(juce::Slider::LinearBar);
-    harmonic_partials_slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, slider_box_width_standard, slider_box_height_standard);
+    harmonic_partials_slider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                                             slider_box_width_standard, slider_box_height_standard);
     harmonic_partials_slider.setColour(juce::Slider::trackColourId, amber);
     addAndMakeVisible(harmonic_partials_slider);
 
@@ -42,7 +44,8 @@ HarmonicsPanel::HarmonicsPanel() {
     harmonic_morph_slider.setRange(0.0, 6.2831853, 0.01);
     harmonic_morph_slider.setValue(0.0);
     harmonic_morph_slider.setSliderStyle(juce::Slider::LinearBar);
-    harmonic_morph_slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, slider_box_width_standard, slider_box_height_standard);
+    harmonic_morph_slider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                                          slider_box_width_standard, slider_box_height_standard);
     harmonic_morph_slider.setColour(juce::Slider::trackColourId, amber);
     addAndMakeVisible(harmonic_morph_slider);
 
@@ -54,7 +57,8 @@ HarmonicsPanel::HarmonicsPanel() {
     harmonic_depth_slider.setRange(0.0, 2.0, 0.01);
     harmonic_depth_slider.setValue(0.5);
     harmonic_depth_slider.setSliderStyle(juce::Slider::LinearBar);
-    harmonic_depth_slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, slider_box_width_standard, slider_box_height_standard);
+    harmonic_depth_slider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                                          slider_box_width_standard, slider_box_height_standard);
     harmonic_depth_slider.setColour(juce::Slider::trackColourId, amber);
     addAndMakeVisible(harmonic_depth_slider);
 

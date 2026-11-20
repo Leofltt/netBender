@@ -2,7 +2,8 @@
 #include <cmath>
 #include <algorithm>
 
-auto SafetySentry::process_channel(float* wet_dest, const float* dry_src, int num_samples, float wet_gain, float dry_gain) NETBENDER_NONBLOCKING -> void {
+auto SafetySentry::process_channel(float* wet_dest, const float* dry_src, int num_samples,
+                                   float wet_gain, float dry_gain) NETBENDER_NONBLOCKING -> void {
     if (wet_dest == nullptr || dry_src == nullptr || num_samples <= 0) {
         return;
     }
@@ -33,7 +34,7 @@ auto SafetySentry::process_channel(float* wet_dest, const float* dry_src, int nu
         // Hard cutoff safety check for runaway signals
         if (std::isnan(sample) || std::isinf(sample) || std::abs(sample) > 2.0f) {
             m_blown_fuse.store(true);
-            sample = 0.0f; // Instantly silence runaway sample
+            sample = 0.0f;  // Instantly silence runaway sample
         } else {
             // Soft clamp to +/- 1.5 to protect output converters
             sample = std::clamp(sample, -1.5f, 1.5f);
@@ -42,10 +43,11 @@ auto SafetySentry::process_channel(float* wet_dest, const float* dry_src, int nu
     }
 }
 
-auto SafetySentry::tick_recovery(const std::function<void()>& on_reset) NETBENDER_NONBLOCKING -> void {
+auto SafetySentry::tick_recovery(const std::function<void()>& on_reset) NETBENDER_NONBLOCKING
+    -> void {
     if (m_blown_fuse.load() && m_auto_reset.load()) {
         int cooldown = m_cooldown_blocks.fetch_add(1);
-        if (cooldown > 40) { // ~0.5-1.0s depending on block size
+        if (cooldown > 40) {  // ~0.5-1.0s depending on block size
             m_cooldown_blocks.store(0);
             if (on_reset) {
                 on_reset();
@@ -53,4 +55,3 @@ auto SafetySentry::tick_recovery(const std::function<void()>& on_reset) NETBENDE
         }
     }
 }
-

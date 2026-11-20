@@ -1,9 +1,20 @@
 cmake_minimum_required(VERSION 3.15)
 project(nn_bending_tests VERSION ${CMAKE_PROJECT_VERSION})
 
+add_executable(test_audio_ring_buffer
+    test_audio_ring_buffer.cpp
+)
+
+target_compile_features(test_audio_ring_buffer PRIVATE cxx_std_20)
+
+target_link_libraries(test_audio_ring_buffer PRIVATE
+    netbender_dsp
+)
+
+add_test(NAME test_audio_ring_buffer COMMAND test_audio_ring_buffer)
+
 add_executable(test_backends
     test_backends.cpp
-    "${CMAKE_SOURCE_DIR}/frontend/juce/dsp/AudioRingBuffer.cpp"
     "${CMAKE_SOURCE_DIR}/frontend/juce/core/SafetySentry.cpp"
 )
 
@@ -11,7 +22,6 @@ target_include_directories(test_backends PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_SOURCE_DIR}/backend"
     "${CMAKE_SOURCE_DIR}/shared"
-    "${CMAKE_SOURCE_DIR}/frontend/juce/dsp"
     "${CMAKE_SOURCE_DIR}/frontend/juce/core"
     "${ONNXRUNTIME_INCLUDE_DIR}"
 )
@@ -47,7 +57,6 @@ if (BUILD_JUCE_PLUGIN)
         "${CMAKE_SOURCE_DIR}/frontend/juce"
         "${CMAKE_SOURCE_DIR}/frontend/juce/ui"
         "${CMAKE_SOURCE_DIR}/frontend/juce/core"
-        "${CMAKE_SOURCE_DIR}/frontend/juce/dsp"
         "${CMAKE_SOURCE_DIR}/backend"
         "${CMAKE_SOURCE_DIR}/shared"
         "${CMAKE_BINARY_DIR}/_deps"
