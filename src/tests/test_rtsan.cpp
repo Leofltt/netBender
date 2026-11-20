@@ -1,6 +1,8 @@
 #include "PluginProcessor.h"
 #include "dsp/AudioRingBuffer.h"
 #include "dsp/SafetySentry.h"
+#include "dsp/Resampler.h"
+#include "dsp/ResamplingRingBuffer.h"
 #include "rtsan_utils.h"
 
 #include <JuceHeader.h>
@@ -24,6 +26,21 @@ auto run_ring_buffer_rt(AudioRingBuffer& rb, const float* input, float* output,
     }
 }
 
+auto run_resampler_rt(Resampler& resampler, ResamplingRingBufferBank& bank, const float* input,
+                      float* output, int block_size, int oversized_block) NETBENDER_NONBLOCKING
+    -> void {
+    (void)resampler.process_for_output(48000.0 / 44100.0, input, block_size, output,
+                                       block_size / 2);
+    (void)resampler.process_for_input(48000.0 / 44100.0, input, block_size / 2, output, block_size);
+
+    (void)bank.push_channel(0, input, oversized_block);
+    (void)bank.push_channel(1, input, oversized_block);
+    float* dst_ptrs[2]{output, output};
+    if (bank.can_pull(oversized_block / 2)) {
+        (void)bank.pull(dst_ptrs, 2, oversized_block / 2);
+    }
+}
+
 auto run_safety_sentry_rt(SafetySentry& sentry, float* wet, const float* dry,
                           int block_size) NETBENDER_NONBLOCKING -> void {
     // Normal signal + soft saturation
@@ -40,7 +57,8 @@ auto run_safety_sentry_rt(SafetySentry& sentry, float* wet, const float* dry,
 }
 
 auto test_dsp_primitives() -> void {
-    std::cout << "[1/3] Checking AudioRingBuffer & SafetySentry under RTSan...\n";
+    std::cout << "[1/3] Checking AudioRingBuffer, Resampler, ResamplingRingBufferBank & "
+                 "SafetySentry under RTSan...\n";
 
     constexpr int k_block_size = 512;
     AudioRingBuffer rb;
@@ -49,6 +67,17 @@ auto test_dsp_primitives() -> void {
     std::vector<float> input(k_block_size, 0.25f);
     std::vector<float> output(k_block_size, 0.0f);
     run_ring_buffer_rt(rb, input.data(), output.data(), k_block_size);
+
+    Resampler resampler(ResamplerQuality::CatmullRom);
+    ResamplingRingBufferBank bank;
+    bank.init(2, 16384, 48000.0, 44100.0, ResampleMode::Auto, ResamplerQuality::CatmullRom, 512);
+    constexpr int k_oversized = 4096;
+    std::vector<float> oversized_in(k_oversized * 2, 0.2f);
+    std::vector<float> oversized_out(k_oversized, 0.0f);
+    (void)bank.push_channel(0, oversized_in.data(), k_oversized);
+    (void)bank.push_channel(1, oversized_in.data(), k_oversized);
+    run_resampler_rt(resampler, bank, oversized_in.data(), oversized_out.data(), k_block_size,
+                     k_oversized);
 
     SafetySentry sentry;
     sentry.set_auto_reset(true);
@@ -136,7 +165,7 @@ auto test_processor_with_model(const juce::File& model_file) -> bool {
         auto& midi = (block == 20) ? midi_on : ((block == 60) ? midi_off : midi_empty);
         processor.processBlock(audio, midi);
 
-        // Give ModelThread time to run concurrently and exercise lock/ringbuffer handoff
+        // Give StreamingEngine worker time to run concurrently and exercise lock/ringbuffer handoff
         if (block % 4 == 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
@@ -174,7 +203,7 @@ int main(int argc, char** argv) {
         }
     } else {
         std::cout << "[3/3] Skipped loaded-model test (pass a model path, e.g. "
-                     "models/darbouka_xnnpack.pte, to exercise ModelThread + resampling).\n";
+                     "models/darbouka_xnnpack.pte, to exercise StreamingEngine + resampling).\n";
     }
 
     std::cout << "\nAll RTSan checks completed.\n";

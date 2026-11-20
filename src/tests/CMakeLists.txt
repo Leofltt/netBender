@@ -48,6 +48,41 @@ endif()
 
 add_test(NAME test_backend_core COMMAND test_backend_core)
 
+add_executable(test_resampling_spsc
+    test_resampling_spsc.cpp
+)
+
+target_compile_features(test_resampling_spsc PRIVATE cxx_std_20)
+
+target_link_libraries(test_resampling_spsc PRIVATE
+    NetBender::dsp
+)
+
+add_test(NAME test_resampling_spsc COMMAND test_resampling_spsc)
+
+add_executable(test_streaming_engine
+    test_streaming_engine.cpp
+)
+
+target_include_directories(test_streaming_engine PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+)
+
+target_compile_features(test_streaming_engine PRIVATE cxx_std_20)
+
+target_link_libraries(test_streaming_engine PRIVATE
+    NetBender::backend
+)
+
+if (APPLE)
+    set_target_properties(test_streaming_engine PROPERTIES
+        BUILD_WITH_INSTALL_RPATH TRUE
+        INSTALL_RPATH "${TORCH_INSTALL_PREFIX}/lib;${torch_dir}/libtorch/lib;${ort_extracted_dir}/lib;${CONDA_ENV_PATH}/lib;/Library/Application Support/NetBender/lib;@loader_path/;@loader_path/../lib"
+    )
+endif()
+
+add_test(NAME test_streaming_engine COMMAND test_streaming_engine)
+
 add_executable(test_backends
     test_backends.cpp
 )
@@ -125,4 +160,27 @@ if (BUILD_JUCE_PLUGIN)
             INSTALL_RPATH "${TORCH_INSTALL_PREFIX}/lib;${torch_dir}/libtorch/lib;${ort_extracted_dir}/lib;${CONDA_ENV_PATH}/lib;/Library/Application Support/NetBender/lib;@loader_path/;@loader_path/../lib"
         )
     endif()
+
+    juce_add_console_app(test_resampler_parity
+        PRODUCT_NAME "NetBenderResamplerParityTest"
+    )
+
+    target_sources(test_resampler_parity PRIVATE
+        test_resampler_parity.cpp
+    )
+
+    target_compile_features(test_resampler_parity PRIVATE cxx_std_20)
+    target_compile_definitions(test_resampler_parity PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        NOMINMAX=1
+    )
+
+    target_link_libraries(test_resampler_parity PRIVATE
+        NetBender::dsp
+        juce::juce_audio_basics
+        juce::juce_core
+    )
+
+    add_test(NAME test_resampler_parity COMMAND test_resampler_parity)
 endif()

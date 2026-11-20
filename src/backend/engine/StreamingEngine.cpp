@@ -422,28 +422,6 @@ auto StreamingEngine::run_inference_step() -> void {
         return;
     }
 
-    std::string method;
-    InferenceDispatch dispatch = InferenceDispatch::PluginMode;
-    int n_batches = 1;
-    int model_out_channels = 1;
-    PreInferenceCallback pre_cb;
-    LatentHookProvider hook_provider;
-    ErrorCallback error_cb;
-    {
-        std::lock_guard<std::mutex> cb_lock(m_callback_mutex);
-        method = m_config.method;
-        dispatch = m_config.dispatch;
-        n_batches = m_config.n_batches;
-        model_out_channels = m_config.model_out_channels;
-        pre_cb = m_pre_inference_cb;
-        hook_provider = m_latent_hook_provider;
-        error_cb = m_error_cb;
-    }
-
-    if (m_pending_clear_fifo.exchange(false, std::memory_order_acq_rel)) {
-        m_backend->clear_decode_gen_fifo();
-    }
-
     if (n_in > 0) {
         (void)m_in_bank.pull(m_worker_in_ptrs.data(), n_in, model_buf);
     }
@@ -452,44 +430,74 @@ auto StreamingEngine::run_inference_step() -> void {
         std::fill(out_ch.begin(), out_ch.end(), 0.0f);
     }
 
-    try {
-        if (pre_cb) {
-            pre_cb(*m_backend);
+    {
+        // When use_worker_thread == false (synchronous inline mode), run_inference_step() is
+        // called inside process() (which is NETBENDER_NONBLOCKING). Scope-disable RTSan around
+        // the callback snapshot and backend inference call while keeping all ring-buffer,
+        // resampler, RtGate, and SafetySentry paths strictly RTSan-checked.
+        const netbender::rtsan::ScopedDisabler rtsan_disabler;
+
+        std::string method;
+        InferenceDispatch dispatch = InferenceDispatch::PluginMode;
+        int n_batches = 1;
+        int model_out_channels = 1;
+        PreInferenceCallback pre_cb;
+        LatentHookProvider hook_provider;
+        ErrorCallback error_cb;
+        {
+            std::lock_guard<std::mutex> cb_lock(m_callback_mutex);
+            method = m_config.method;
+            dispatch = m_config.dispatch;
+            n_batches = m_config.n_batches;
+            model_out_channels = m_config.model_out_channels;
+            pre_cb = m_pre_inference_cb;
+            hook_provider = m_latent_hook_provider;
+            error_cb = m_error_cb;
         }
 
-        if (dispatch == InferenceDispatch::PluginMode) {
-            if (method == "forward") {
-                IBackend::LatentHook hook = hook_provider ? hook_provider() : nullptr;
-                m_backend->perform_forward(m_worker_in_ptrs, m_worker_out_ptrs, n_batches,
-                                           model_out_channels, model_buf, std::move(hook));
-            } else if (method == "decode gen" || method == "decode_gen") {
-                IBackend::LatentHook hook = hook_provider ? hook_provider() : nullptr;
-                m_backend->perform_decode_gen(m_worker_out_ptrs, n_batches, model_out_channels,
-                                              model_buf, std::move(hook));
-            } else if (method == "prior" || method == "generate") {
-                m_backend->perform_prior_decode(m_worker_out_ptrs, n_batches, model_out_channels,
-                                                model_buf);
+        if (m_pending_clear_fifo.exchange(false, std::memory_order_acq_rel)) {
+            m_backend->clear_decode_gen_fifo();
+        }
+
+        try {
+            if (pre_cb) {
+                pre_cb(*m_backend);
+            }
+
+            if (dispatch == InferenceDispatch::PluginMode) {
+                if (method == "forward") {
+                    IBackend::LatentHook hook = hook_provider ? hook_provider() : nullptr;
+                    m_backend->perform_forward(m_worker_in_ptrs, m_worker_out_ptrs, n_batches,
+                                               model_out_channels, model_buf, std::move(hook));
+                } else if (method == "decode gen" || method == "decode_gen") {
+                    IBackend::LatentHook hook = hook_provider ? hook_provider() : nullptr;
+                    m_backend->perform_decode_gen(m_worker_out_ptrs, n_batches, model_out_channels,
+                                                  model_buf, std::move(hook));
+                } else if (method == "prior" || method == "generate") {
+                    m_backend->perform_prior_decode(m_worker_out_ptrs, n_batches,
+                                                    model_out_channels, model_buf);
+                } else {
+                    m_backend->perform(m_worker_in_ptrs, m_worker_out_ptrs, method, n_batches,
+                                       model_out_channels, model_buf);
+                }
             } else {
                 m_backend->perform(m_worker_in_ptrs, m_worker_out_ptrs, method, n_batches,
                                    model_out_channels, model_buf);
             }
-        } else {
-            m_backend->perform(m_worker_in_ptrs, m_worker_out_ptrs, method, n_batches,
-                               model_out_channels, model_buf);
-        }
-    } catch (const std::exception& e) {
-        for (auto& out_ch : m_worker_out) {
-            std::fill(out_ch.begin(), out_ch.end(), 0.0f);
-        }
-        if (error_cb) {
-            error_cb(e.what());
-        }
-    } catch (...) {
-        for (auto& out_ch : m_worker_out) {
-            std::fill(out_ch.begin(), out_ch.end(), 0.0f);
-        }
-        if (error_cb) {
-            error_cb("Unknown inference exception");
+        } catch (const std::exception& e) {
+            for (auto& out_ch : m_worker_out) {
+                std::fill(out_ch.begin(), out_ch.end(), 0.0f);
+            }
+            if (error_cb) {
+                error_cb(e.what());
+            }
+        } catch (...) {
+            for (auto& out_ch : m_worker_out) {
+                std::fill(out_ch.begin(), out_ch.end(), 0.0f);
+            }
+            if (error_cb) {
+                error_cb("Unknown inference exception");
+            }
         }
     }
 

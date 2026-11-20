@@ -16,58 +16,9 @@
 #include <atomic>
 #include "AudioRingBuffer.h"
 #include "SafetySentry.h"
+#include "engine/StreamingEngine.h"
 
 namespace {
-
-// Stateful fractional resampler matching juce::LagrangeInterpolator::process() contract:
-// consumes `floor(pos)` input samples and preserves fractional sub-sample phase across callbacks.
-class StatefulResampler {
-public:
-    auto reset() -> void {
-        m_subSamplePos = 1.0;
-        for (float& s : m_lastInputSamples)
-            s = 0.0f;
-    }
-
-    auto process(double speedRatio, const float* input, float* output,
-                 int numOutputSamplesToProduce) -> int {
-        int inIndex = 0;
-        double pos = m_subSamplePos;
-        for (int i = 0; i < numOutputSamplesToProduce; ++i) {
-            while (pos >= 1.0) {
-                pushInterpolationSample(input[inIndex++]);
-                pos -= 1.0;
-            }
-            output[i] = interpolate4Point(static_cast<float>(pos));
-            pos += speedRatio;
-        }
-        m_subSamplePos = pos;
-        return inIndex;
-    }
-
-private:
-    auto pushInterpolationSample(float newValue) -> void {
-        m_lastInputSamples[0] = m_lastInputSamples[1];
-        m_lastInputSamples[1] = m_lastInputSamples[2];
-        m_lastInputSamples[2] = m_lastInputSamples[3];
-        m_lastInputSamples[3] = newValue;
-    }
-
-    [[nodiscard]] auto interpolate4Point(float alpha) const -> float {
-        const float y0 = m_lastInputSamples[0];
-        const float y1 = m_lastInputSamples[1];
-        const float y2 = m_lastInputSamples[2];
-        const float y3 = m_lastInputSamples[3];
-        const float c0 = y1;
-        const float c1 = 0.5f * (y2 - y0);
-        const float c2 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
-        const float c3 = 0.5f * (y3 - y0) + 1.5f * (y1 - y2);
-        return ((c3 * alpha + c2) * alpha + c1) * alpha + c0;
-    }
-
-    double m_subSamplePos{1.0};
-    float m_lastInputSamples[4]{0.0f, 0.0f, 0.0f, 0.0f};
-};
 
 struct HostStreamStats {
     bool ran = false;
@@ -85,8 +36,8 @@ struct HostStreamStats {
     int hostLatencySamples = 0;
 };
 
-// Mirrors PluginProcessor::processBlock + ModelThread ring-buffer handoff, resampling,
-// latency prefill, and concurrent live weight-bending on a background worker thread.
+// Drives StreamingEngine with host audio callbacks, internal resampling,
+// latency prefill, dry/wet alignment, SafetySentry, and concurrent live weight bending.
 auto runHostCallbackStreamingTest(IBackend* backend, int inCh, int outCh, int modelBufSize,
                                   double modelSr) -> HostStreamStats {
     HostStreamStats stats;
@@ -96,95 +47,30 @@ auto runHostCallbackStreamingTest(IBackend* backend, int inCh, int outCh, int mo
     stats.hostBlockSize = 256;
     stats.modelBufferSize = modelBufSize;
 
-    const bool resampling = std::abs(stats.hostSr - stats.modelSr) > 1.0;
-    const double inRatio = resampling ? (stats.hostSr / stats.modelSr) : 1.0;
-    const double outRatio = resampling ? (stats.modelSr / stats.hostSr) : 1.0;
+    StreamingEngine engine;
+    StreamingConfig cfg;
+    cfg.method = "forward";
+    cfg.dispatch = InferenceDispatch::PluginMode;
+    cfg.model_in_channels = inCh;
+    cfg.model_out_channels = outCh;
+    cfg.n_batches = 1;
+    cfg.model_buffer_size = modelBufSize;
+    cfg.host_sample_rate = stats.hostSr;
+    cfg.model_sample_rate = stats.modelSr;
+    cfg.max_host_block_size = stats.hostBlockSize;
+    cfg.max_host_channels = std::max(1, std::max(inCh, outCh));
+    cfg.resample_mode = ResampleMode::Auto;
+    cfg.resample_quality = ResamplerQuality::CatmullRom;
+    cfg.use_worker_thread = true;
+    cfg.auto_start_worker = true;
+    cfg.enable_dry_delay = true;
+    cfg.enable_safety_sentry = true;
+    engine.configure(backend, cfg);
+    engine.set_dry_wet(1.0f);  // 100% wet to measure model output directly
 
-    const int modelLatencySamples = modelBufSize * 2;
-    const int hostLatencySamples =
-        resampling
-            ? static_cast<int>(std::round(modelLatencySamples * (stats.hostSr / stats.modelSr)))
-            : modelLatencySamples;
+    const double inRatio = engine.is_resampling_active() ? (stats.hostSr / stats.modelSr) : 1.0;
+    const int hostLatencySamples = engine.get_latency_samples();
     stats.hostLatencySamples = hostLatencySamples;
-
-    const int ringSize = std::max(modelBufSize, hostLatencySamples) * 8;
-    std::vector<AudioRingBuffer> inBuffers(inCh);
-    std::vector<AudioRingBuffer> outBuffers(outCh);
-    std::vector<AudioRingBuffer> dryDelayBuffers(outCh);
-    for (int c = 0; c < inCh; ++c)
-        inBuffers[c].init(ringSize);
-    for (int c = 0; c < outCh; ++c) {
-        outBuffers[c].init(ringSize);
-        dryDelayBuffers[c].init(ringSize);
-    }
-
-    // Pre-fill latency just like PluginProcessor::initBuffers()
-    std::vector<float> modelSilence(modelLatencySamples, 0.0f);
-    std::vector<float> hostSilence(hostLatencySamples, 0.0f);
-    for (int c = 0; c < outCh; ++c) {
-        outBuffers[c].put(modelSilence.data(), modelLatencySamples);
-        dryDelayBuffers[c].put(hostSilence.data(), hostLatencySamples);
-    }
-
-    std::vector<StatefulResampler> inputResamplers(inCh);
-    std::vector<StatefulResampler> outputResamplers(outCh);
-    int maxRatio = static_cast<int>(std::ceil(std::max(inRatio, outRatio))) + 2;
-    int scratchSize = std::max(modelBufSize, stats.hostBlockSize) * maxRatio + 64;
-    std::vector<std::vector<float>> resampledInScratch(inCh, std::vector<float>(scratchSize, 0.0f));
-    std::vector<std::vector<float>> resampledOutScratch(outCh,
-                                                        std::vector<float>(scratchSize, 0.0f));
-    std::vector<std::vector<float>> stagingIn(inCh, std::vector<float>(modelBufSize, 0.0f));
-
-    std::mutex stagingMutex;
-    std::mutex cvMutex;
-    std::condition_variable cv;
-    std::atomic<bool> workerRunning{true};
-    std::atomic<bool> isProcessing{false};
-    bool triggerReady = false;
-
-    // Background ModelThread equivalent
-    std::thread workerThread([&]() {
-        std::vector<std::vector<float>> workerIn(inCh, std::vector<float>(modelBufSize, 0.0f));
-        std::vector<std::vector<float>> workerOut(outCh, std::vector<float>(modelBufSize, 0.0f));
-        std::vector<float*> inPtrs(inCh);
-        std::vector<float*> outPtrs(outCh);
-        for (int c = 0; c < inCh; ++c)
-            inPtrs[c] = workerIn[c].data();
-        for (int c = 0; c < outCh; ++c)
-            outPtrs[c] = workerOut[c].data();
-
-        while (workerRunning.load()) {
-            {
-                std::unique_lock<std::mutex> lk(cvMutex);
-                cv.wait(lk, [&]() { return triggerReady || !workerRunning.load(); });
-                if (!workerRunning.load())
-                    break;
-                triggerReady = false;
-            }
-            {
-                std::lock_guard<std::mutex> slk(stagingMutex);
-                for (int c = 0; c < inCh; ++c) {
-                    std::memcpy(workerIn[c].data(), stagingIn[c].data(),
-                                modelBufSize * sizeof(float));
-                }
-            }
-
-            backend->perform_forward(inPtrs, outPtrs, 1, outCh, modelBufSize, nullptr);
-
-            for (int c = 0; c < outCh; ++c) {
-                outBuffers[c].put(workerOut[c].data(), modelBufSize);
-            }
-            {
-                std::lock_guard<std::mutex> lk(cvMutex);
-                isProcessing.store(false);
-            }
-            cv.notify_all();
-        }
-    });
-
-    SafetySentry sentry;
-    const int requiredInSamples =
-        resampling ? static_cast<int>(std::ceil(modelBufSize * inRatio)) : modelBufSize;
 
     // Run enough 256-sample host callbacks to span 4 full model blocks (covering 2x latency prefill
     // + 2x active wet blocks)
@@ -201,7 +87,17 @@ auto runHostCallbackStreamingTest(IBackend* backend, int inCh, int outCh, int mo
         origWeights = backend->get_original_layer_weights(testLayer);
     }
 
+    std::vector<std::vector<float>> hostIn(inCh, std::vector<float>(stats.hostBlockSize, 0.0f));
+    std::vector<std::vector<float>> hostOut(outCh, std::vector<float>(stats.hostBlockSize, 0.0f));
+    std::vector<const float*> inPtrs(inCh);
+    std::vector<float*> outPtrs(outCh);
+    for (int c = 0; c < inCh; ++c)
+        inPtrs[c] = hostIn[c].data();
+    for (int c = 0; c < outCh; ++c)
+        outPtrs[c] = hostOut[c].data();
+
     int samplesProcessed = 0;
+    uint64_t waitedInferences = 0;
     double postLatencySumSq = 0.0;
     size_t postLatencyCount = 0;
 
@@ -219,8 +115,7 @@ auto runHostCallbackStreamingTest(IBackend* backend, int inCh, int outCh, int mo
             }
         }
 
-        // 1. Push host callback input (256 samples @ 48 kHz)
-        std::vector<std::vector<float>> hostIn(inCh, std::vector<float>(stats.hostBlockSize, 0.0f));
+        // Generate 256-sample host input block @ 48 kHz
         for (int c = 0; c < inCh; ++c) {
             for (int i = 0; i < stats.hostBlockSize; ++i) {
                 float t =
@@ -229,123 +124,16 @@ auto runHostCallbackStreamingTest(IBackend* backend, int inCh, int outCh, int mo
                 if ((samplesProcessed + i) % 512 == 0)
                     hostIn[c][i] += 0.15f;
             }
-            inBuffers[c].put(hostIn[c].data(), stats.hostBlockSize);
         }
+
+        engine.process(inPtrs.data(), inCh, outPtrs.data(), outCh, stats.hostBlockSize);
+
         for (int c = 0; c < outCh; ++c) {
-            const float* src = hostIn[std::min(c, inCh - 1)].data();
-            dryDelayBuffers[c].put(src, stats.hostBlockSize);
-        }
-
-        // 2. Check if enough input accumulated to trigger worker thread
-        if (inBuffers[0].get_available() >= requiredInSamples) {
-            // Wait if previous worker block is still finishing so host simulation is deterministic
-            // across CPU/GPU speeds
-            {
-                std::unique_lock<std::mutex> lk(cvMutex);
-                cv.wait_for(lk, std::chrono::milliseconds(2000),
-                            [&]() { return !isProcessing.load(); });
-            }
-            if (!isProcessing.load()) {
-                std::lock_guard<std::mutex> slk(stagingMutex);
-                if (resampling) {
-                    int masterInConsumed = 0;
-                    for (int c = 0; c < inCh; ++c) {
-                        int peekCount = std::min(requiredInSamples + 2,
-                                                 static_cast<int>(resampledInScratch[c].size()));
-                        int avail = inBuffers[c].peek(resampledInScratch[c].data(), peekCount);
-                        if (avail < peekCount) {
-                            std::fill(resampledInScratch[c].begin() + avail,
-                                      resampledInScratch[c].begin() + peekCount, 0.0f);
-                        }
-                        int consumed =
-                            inputResamplers[c].process(inRatio, resampledInScratch[c].data(),
-                                                       stagingIn[c].data(), modelBufSize);
-                        if (c == 0)
-                            masterInConsumed = std::min(consumed, avail);
-                    }
-                    for (int c = 0; c < inCh; ++c) {
-                        inBuffers[c].drop(masterInConsumed);
-                    }
-                } else {
-                    for (int c = 0; c < inCh; ++c) {
-                        inBuffers[c].get(stagingIn[c].data(), modelBufSize);
-                    }
-                }
-
-                {
-                    std::lock_guard<std::mutex> lk(cvMutex);
-                    isProcessing.store(true);
-                    triggerReady = true;
-                }
-                stats.workerTriggers++;
-                cv.notify_one();
-
-                // If output buffer is running low before next block, let worker complete within
-                // simulated latency window
-                int minOutNeeded =
-                    resampling ? (static_cast<int>(std::ceil(stats.hostBlockSize * outRatio)) + 2)
-                               : stats.hostBlockSize;
-                if (outBuffers[0].get_available() < minOutNeeded * 2) {
-                    std::unique_lock<std::mutex> lk(cvMutex);
-                    cv.wait_for(lk, std::chrono::milliseconds(2000),
-                                [&]() { return !isProcessing.load(); });
-                }
-            }
-        }
-
-        // 3. Pull processed samples from output circular buffers
-        std::vector<std::vector<float>> hostOut(outCh,
-                                                std::vector<float>(stats.hostBlockSize, 0.0f));
-        if (resampling) {
-            int requiredModelSamples =
-                static_cast<int>(std::ceil(stats.hostBlockSize * outRatio)) + 2;
-            int masterConsumed = 0;
-            for (int c = 0; c < outCh; ++c) {
-                int peekCount =
-                    std::min(requiredModelSamples, static_cast<int>(resampledOutScratch[c].size()));
-                int avail = outBuffers[c].peek(resampledOutScratch[c].data(), peekCount);
-                if (avail < peekCount) {
-                    std::fill(resampledOutScratch[c].begin() + avail,
-                              resampledOutScratch[c].begin() + peekCount, 0.0f);
-                }
-                int consumed = outputResamplers[c].process(outRatio, resampledOutScratch[c].data(),
-                                                           hostOut[c].data(), stats.hostBlockSize);
-                if (c == 0) {
-                    if (avail < consumed)
-                        stats.underruns++;
-                    masterConsumed = std::min(consumed, avail);
-                }
-            }
-            for (int c = 0; c < outCh; ++c) {
-                outBuffers[c].drop(masterConsumed);
-            }
-        } else {
-            if (outBuffers[0].get_available() < stats.hostBlockSize) {
-                stats.underruns++;
-            }
-            for (int c = 0; c < outCh; ++c) {
-                outBuffers[c].get(hostOut[c].data(), stats.hostBlockSize);
-            }
-        }
-
-        // 4. Dry delay alignment & SafetySentry check (100% wet to measure model output directly)
-        std::vector<float> dryScratch(stats.hostBlockSize, 0.0f);
-        for (int c = 0; c < outCh; ++c) {
-            dryDelayBuffers[c].get(dryScratch.data(), stats.hostBlockSize);
             for (int i = 0; i < stats.hostBlockSize; ++i) {
-                float raw = hostOut[c][i];
-                if (std::isnan(raw) || std::isinf(raw))
+                float s = hostOut[c][i];
+                if (!std::isfinite(s))
                     stats.hadNan = true;
-            }
-            sentry.process_channel(hostOut[c].data(), dryScratch.data(), stats.hostBlockSize, 1.0f,
-                                   0.0f);
-            if (sentry.is_fuse_blown())
-                stats.fuseTripped = true;
-
-            // Measure audio quality after initial latency prefill + receptive field warmup
-            if (samplesProcessed >= hostLatencySamples + stats.hostBlockSize * 2) {
-                for (int i = 0; i < stats.hostBlockSize; ++i) {
-                    float s = hostOut[c][i];
+                if (samplesProcessed >= hostLatencySamples + stats.hostBlockSize * 2) {
                     float abs_s = std::abs(s);
                     if (abs_s > stats.postLatencyPeak)
                         stats.postLatencyPeak = abs_s;
@@ -356,16 +144,30 @@ auto runHostCallbackStreamingTest(IBackend* backend, int inCh, int outCh, int mo
         }
 
         samplesProcessed += stats.hostBlockSize;
+
+        // Deterministically pace worker inference across CPU/GPU model speeds to prevent spurious
+        // underruns in the offline harness
+        const int triggerThreshold =
+            static_cast<int>(std::ceil(static_cast<double>(waitedInferences + 1) *
+                                       static_cast<double>(modelBufSize) * inRatio)) +
+            16;
+        if (samplesProcessed >= triggerThreshold) {
+            const uint64_t targetInference = waitedInferences + 1;
+            const auto deadline =
+                std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
+            while (engine.get_inference_count() < targetInference &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            waitedInferences++;
+        }
     }
 
-    // Cleanly shut down worker thread and restore weights
-    {
-        std::lock_guard<std::mutex> lk(cvMutex);
-        workerRunning.store(false);
-    }
-    cv.notify_all();
-    if (workerThread.joinable())
-        workerThread.join();
+    stats.underruns = static_cast<int>(engine.get_out_underrun_count());
+    stats.workerTriggers = static_cast<int>(engine.get_inference_count());
+    stats.fuseTripped = engine.get_safety_sentry().is_fuse_blown();
+
+    engine.detach_backend();
     if (!testLayer.empty())
         backend->reset_all_layer_weights();
 
