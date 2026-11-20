@@ -142,7 +142,7 @@ NetBenderAudioProcessorEditor::NetBenderAudioProcessorEditor(NetBenderAudioProce
     setResizeLimits(UIConstants::Layout::window_min_width, UIConstants::Layout::window_min_height,
                     UIConstants::Layout::window_max_width, UIConstants::Layout::window_max_height);
 
-    update_model_info();
+    sync_from_processor_state();
     startTimerHz(UIConstants::Layout::editor_timer_hz);
 }
 
@@ -446,8 +446,41 @@ auto NetBenderAudioProcessorEditor::buttonClicked(juce::Button* button) -> void 
 }
 
 //==============================================================================
+auto NetBenderAudioProcessorEditor::sync_from_processor_state() -> void {
+    lastObservedStateRevision = audioProcessor.getStateRevision();
+
+    const float dw = audioProcessor.getDryWet();
+    dry_wet_slider.setValue(dw, juce::dontSendNotification);
+    lastKnownDryWet = dw;
+
+    const auto trigMode = audioProcessor.getTriggerMode();
+    trigger_mode_combo.setSelectedId((int)trigMode + 1, juce::dontSendNotification);
+    short_circuit_button.setVisible(trigMode == NetBenderAudioProcessor::TriggerMode::Momentary);
+
+    latent_enable_button.setToggleState(audioProcessor.isLatentEnabled(),
+                                        juce::dontSendNotification);
+    latent_mode_combo.setSelectedId((int)audioProcessor.getLatentMode() + 1,
+                                    juce::dontSendNotification);
+    latent_depth_slider.setValue(audioProcessor.getLatentDepth(), juce::dontSendNotification);
+    latent_slew_slider.setValue(audioProcessor.getLatentSlew(), juce::dontSendNotification);
+    latentPad.setCoords(audioProcessor.getLatentX(), audioProcessor.getLatentY());
+    latentPad.setEnabledState(audioProcessor.isLatentEnabled(), audioProcessor.hasAutoencode());
+    updateLatentControlsVisibility();
+
+    currentBendingLayer = audioProcessor.getActiveLayerName();
+    if (currentBendingLayer.isNotEmpty()) {
+        category_combo.setSelectedId(1, juce::dontSendNotification);
+    }
+
+    update_model_info();
+    resized();
+}
+
 auto NetBenderAudioProcessorEditor::timerCallback() -> void {
-    if (audioProcessor.isModelLoaded() && status_label.getText() == "No model loaded.") {
+    const uint64_t rev = audioProcessor.getStateRevision();
+    if (rev != lastObservedStateRevision) {
+        sync_from_processor_state();
+    } else if (audioProcessor.isModelLoaded() && status_label.getText() == "No model loaded.") {
         update_model_info();
     }
 
@@ -818,9 +851,9 @@ auto NetBenderAudioProcessorEditor::select_layer(const juce::String& layerName) 
     bridge_combo.addListener(this);
     bridge_depth_slider.addListener(this);
 
-    auto shape = audioProcessor.getBackend().get_layer_shape(layerName.toStdString());
-    weightCanvas.setLayerShape(shape);
-    weightCanvas.setWeights(originalWeights, currentWeights);
+    if (state.bridgeDepth > 0.001f && !state.bridgeSourceLayer.empty()) {
+        bridge_enable_toggle.setToggleState(true, juce::dontSendNotification);
+    }
 
     std::vector<float> bridgedBase = baseDrawnWeights;
     std::vector<float> srcTiled;
@@ -840,6 +873,16 @@ auto NetBenderAudioProcessorEditor::select_layer(const juce::String& layerName) 
     }
     bool isContinuous =
         (audioProcessor.getTriggerMode() == NetBenderAudioProcessor::TriggerMode::Continuous);
+    if (isContinuous && !state.isApplied && !bridgedBase.empty()) {
+        currentWeights.resize(bridgedBase.size());
+        for (size_t i = 0; i < bridgedBase.size(); ++i)
+            currentWeights[i] = bridgedBase[i] * state.scale + state.offset;
+    }
+
+    auto shape = audioProcessor.getBackend().get_layer_shape(layerName.toStdString());
+    weightCanvas.setLayerShape(shape);
+    weightCanvas.setWeights(originalWeights, currentWeights);
+
     weightCanvas.setShowBridgeVisuals(bridgeEnabled);
     weightCanvas.setBridgeWeights(srcTiled, bridgedBase, bridgeEnabled ? state.bridgeDepth : 0.0f,
                                   isContinuous);

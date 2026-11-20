@@ -1,13 +1,14 @@
 #pragma once
 
 #include "IBackend.h"
-#include <JuceHeader.h>
 #include <string>
 #include <vector>
 #include <unordered_map>
 #include <mutex>
 #include <atomic>
+#include <cstdint>
 #include "rtsan_utils.h"
+#include "BendRandom.h"
 
 // Layer classification for Trace Isolation
 enum class LayerCategory {
@@ -87,7 +88,9 @@ public:
 
     auto clear_layer_bending(const std::string& layer_name) -> void;
     auto clear_all_layer_bending() -> void;
-    auto request_audio_thread_reset_all() -> void { m_atomic_reset_all_requested.store(true); }
+    auto request_audio_thread_reset_all() noexcept NETBENDER_NONBLOCKING -> void {
+        m_atomic_reset_all_requested.store(true);
+    }
     [[nodiscard]] auto get_layer_live_weights(const std::string& layer_name) const
         -> std::vector<float>;
     [[nodiscard]] auto has_active_bending() const -> bool;
@@ -97,7 +100,9 @@ public:
                              float memory, DriftMode drift_mode, bool frozen) -> void;
 
     // Momentary / Trigger / Envelope controls
-    auto trigger_short_circuit(bool active) -> void { m_short_circuit_active.store(active); }
+    auto trigger_short_circuit(bool active) noexcept NETBENDER_NONBLOCKING -> void {
+        m_short_circuit_active.store(active);
+    }
     [[nodiscard]] auto is_short_circuit_active() const -> bool {
         return m_short_circuit_active.load();
     }
@@ -119,7 +124,11 @@ public:
         return m_transient_threshold.load();
     }
 
-    auto update_audio_envelope(float peak) NETBENDER_NONBLOCKING -> void;
+    auto update_audio_envelope(float peak) noexcept NETBENDER_NONBLOCKING -> void;
+    [[nodiscard]] auto get_audio_envelope() const -> float { return m_audio_envelope.load(); }
+
+    // Reseeds the stochastic drift generator (deterministic drift for tests / preset recall)
+    auto set_random_seed(uint64_t seed) -> void;
 
     // Core weight calculation and upload to backend
     auto apply_bending(IBackend* backend, const std::string& active_layer_name, float param_scale,
@@ -132,7 +141,7 @@ private:
     bool m_pending_reset_all{false};
     std::atomic<bool> m_atomic_reset_all_requested{false};
     mutable std::mutex m_mutex;
-    juce::Random m_jitter_rng;
+    netbender::bending::Xoshiro128Plus m_jitter_rng;
 
     // Momentary & Trigger state
     std::atomic<bool> m_short_circuit_active{false};

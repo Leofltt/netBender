@@ -120,6 +120,7 @@ public:
 
 private:
     auto timerCallback() -> void override;
+    auto sync_from_processor_state() -> void;
     auto update_model_info() -> void;
     auto select_layer(const juce::String& layer_name) -> void;
     auto apply_knob_bending() -> void;
@@ -162,6 +163,7 @@ private:
     float lastTargetScale{-999.0f};
     float lastTargetOffset{-999.0f};
     bool targetCurveDirty{true};
+    uint64_t lastObservedStateRevision{0};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(NetBenderAudioProcessorEditor)
 };

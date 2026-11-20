@@ -179,6 +179,12 @@ auto BendingManager::restore_layer_state(const std::string& name, float scale, f
     state.memory = memory;
     state.driftMode = drift_mode;
     state.frozen = frozen;
+    state.isApplied = false;
+}
+
+auto BendingManager::set_random_seed(uint64_t seed) -> void {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_jitter_rng.set_seed(seed);
 }
 
 auto BendingManager::set_envelope_attack(float att) -> void {
@@ -193,7 +199,7 @@ auto BendingManager::set_transient_threshold(float th) -> void {
     m_transient_threshold.store(std::clamp(th, 0.01f, 1.0f));
 }
 
-auto BendingManager::update_audio_envelope(float peak) NETBENDER_NONBLOCKING -> void {
+auto BendingManager::update_audio_envelope(float peak) noexcept NETBENDER_NONBLOCKING -> void {
     float prev = m_audio_envelope.load();
     m_audio_envelope.store(std::max(peak, prev * 0.95f));
 }
@@ -341,7 +347,7 @@ auto BendingManager::apply_bending(IBackend* backend, const std::string& active_
             float memory = std::clamp(state.memory, 0.0f, 0.999f);
 
             for (size_t i = 0; i < num_weights; ++i) {
-                float noise = (m_jitter_rng.nextFloat() * 2.0f - 1.0f) * heat;
+                float noise = m_jitter_rng.next_bipolar() * heat;
 
                 if (state.driftMode == DriftMode::ThermalOU) {
                     // Ornstein-Uhlenbeck: dW = -theta * W + sigma * dW_noise
@@ -375,21 +381,17 @@ auto BendingManager::apply_bending(IBackend* backend, const std::string& active_
         } else if (mode != TriggerMode::Continuous && current_env > 0.001f) {
             // Momentary gate active without heat: only recompute if envelope moved significantly
             if (std::abs(current_env - state.lastAppliedEnv) > 0.002f) {
-                juce::FloatVectorOperations::copy(state.scratchFinal.data(),
-                                                  state.scratchBridged.data(),
-                                                  static_cast<int>(num_weights));
-                juce::FloatVectorOperations::multiply(state.scratchFinal.data(), state.scale,
-                                                      static_cast<int>(num_weights));
-                juce::FloatVectorOperations::add(state.scratchFinal.data(), state.offset,
-                                                 static_cast<int>(num_weights));
-
-                // Vectorized crossfade: finalWeights = originalWeights * (1 - env) + bentWeight *
-                // env
-                juce::FloatVectorOperations::multiply(state.scratchFinal.data(), current_env,
-                                                      static_cast<int>(num_weights));
-                juce::FloatVectorOperations::addWithMultiply(
-                    state.scratchFinal.data(), state.originalWeights.data(), 1.0f - current_env,
-                    static_cast<int>(num_weights));
+                // Crossfade: final = W0 * (1 - env) + (bridged * scale + offset) * env
+                const float scale = state.scale;
+                const float offset = state.offset;
+                const float env = current_env;
+                const float inv_env = 1.0f - current_env;
+                const float* __restrict bridged = state.scratchBridged.data();
+                const float* __restrict original = state.originalWeights.data();
+                float* __restrict final_w = state.scratchFinal.data();
+                for (size_t i = 0; i < num_weights; ++i) {
+                    final_w[i] = (bridged[i] * scale + offset) * env + original[i] * inv_env;
+                }
 
                 backend->set_layer_weights(layer_name, state.scratchFinal);
                 state.isApplied = true;
@@ -398,13 +400,13 @@ auto BendingManager::apply_bending(IBackend* backend, const std::string& active_
         } else if (mode == TriggerMode::Continuous) {
             // Continuous mode without drift: apply bent target once and skip redundant uploads
             if (!state.isApplied) {
-                juce::FloatVectorOperations::copy(state.scratchFinal.data(),
-                                                  state.scratchBridged.data(),
-                                                  static_cast<int>(num_weights));
-                juce::FloatVectorOperations::multiply(state.scratchFinal.data(), state.scale,
-                                                      static_cast<int>(num_weights));
-                juce::FloatVectorOperations::add(state.scratchFinal.data(), state.offset,
-                                                 static_cast<int>(num_weights));
+                const float scale = state.scale;
+                const float offset = state.offset;
+                const float* __restrict bridged = state.scratchBridged.data();
+                float* __restrict final_w = state.scratchFinal.data();
+                for (size_t i = 0; i < num_weights; ++i) {
+                    final_w[i] = bridged[i] * scale + offset;
+                }
 
                 backend->set_layer_weights(layer_name, state.scratchFinal);
                 state.isApplied = true;

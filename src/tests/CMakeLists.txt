@@ -83,6 +83,29 @@ endif()
 
 add_test(NAME test_streaming_engine COMMAND test_streaming_engine)
 
+add_executable(test_bending
+    test_bending.cpp
+)
+
+target_include_directories(test_bending PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+)
+
+target_compile_features(test_bending PRIVATE cxx_std_20)
+
+target_link_libraries(test_bending PRIVATE
+    NetBender::backend
+)
+
+if (APPLE)
+    set_target_properties(test_bending PROPERTIES
+        BUILD_WITH_INSTALL_RPATH TRUE
+        INSTALL_RPATH "${TORCH_INSTALL_PREFIX}/lib;${torch_dir}/libtorch/lib;${ort_extracted_dir}/lib;${CONDA_ENV_PATH}/lib;/Library/Application Support/NetBender/lib;@loader_path/;@loader_path/../lib"
+    )
+endif()
+
+add_test(NAME test_bending COMMAND test_bending)
+
 add_executable(test_backends
     test_backends.cpp
 )
@@ -123,7 +146,6 @@ if (BUILD_JUCE_PLUGIN)
         "${CMAKE_CURRENT_SOURCE_DIR}"
         "${CMAKE_SOURCE_DIR}/frontend/juce"
         "${CMAKE_SOURCE_DIR}/frontend/juce/ui"
-        "${CMAKE_SOURCE_DIR}/frontend/juce/core"
         "${CMAKE_SOURCE_DIR}/backend"
         "${CMAKE_BINARY_DIR}/_deps"
     )

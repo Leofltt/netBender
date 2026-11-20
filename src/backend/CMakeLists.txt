@@ -47,10 +47,14 @@ add_library(netbender_backend STATIC
   TorchBackend.cpp
   OnnxBackend.cpp
   engine/StreamingEngine.cpp
+  engine/NetBenderSession.cpp
+  bending/BendingManager.cpp
+  bending/LatentTerrainEngine.cpp
   $<TARGET_OBJECTS:executorch_backend_obj>
 )
 target_include_directories(netbender_backend
   PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/engine"
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/bending"
   PRIVATE "${ONNXRUNTIME_INCLUDE_DIR}"
 )
 target_link_libraries(netbender_backend PUBLIC

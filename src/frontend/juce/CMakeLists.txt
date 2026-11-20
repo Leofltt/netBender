@@ -11,10 +11,6 @@ function(configure_nn_bending_target target_name)
         PluginProcessor.h
         PluginEditor.cpp
         PluginEditor.h
-        core/BendingManager.cpp
-        core/BendingManager.h
-        core/LatentTerrainEngine.cpp
-        core/LatentTerrainEngine.h
         ui/FlatLookAndFeel.cpp
         ui/FlatLookAndFeel.h
         ui/HeaderComponent.cpp
@@ -42,7 +38,6 @@ function(configure_nn_bending_target target_name)
     target_include_directories(${target_name} PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/ui"
-        "${CMAKE_CURRENT_SOURCE_DIR}/core"
         "${CMAKE_SOURCE_DIR}/backend"
         "${CMAKE_BINARY_DIR}/_deps"
     )
