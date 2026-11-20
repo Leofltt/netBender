@@ -8,7 +8,9 @@ class SafetySentry {
 public:
     SafetySentry() = default;
 
-    [[nodiscard]] auto is_fuse_blown() const NETBENDER_NONBLOCKING -> bool { return m_blown_fuse.load(); }
+    [[nodiscard]] auto is_fuse_blown() const NETBENDER_NONBLOCKING -> bool {
+        return m_blown_fuse.load();
+    }
 
     auto trip_fuse() NETBENDER_NONBLOCKING -> void { m_blown_fuse.store(true); }
     auto reset_fuse() NETBENDER_NONBLOCKING -> void {
@@ -21,14 +23,14 @@ public:
 
     // Safely blends wet model output with dry scratch buffer, enforcing soft headroom saturation,
     // NaN / Inf detection, and automatic output conversion clamp protection.
-    auto process_channel(float* wet_dest, const float* dry_src, int num_samples, float wet_gain, float dry_gain) NETBENDER_NONBLOCKING -> void;
+    auto process_channel(float* wet_dest, const float* dry_src, int num_samples, float wet_gain,
+                         float dry_gain) NETBENDER_NONBLOCKING -> void;
 
     // Checks auto-recovery block timer and invokes on_reset if cooldown threshold is reached
     auto tick_recovery(const std::function<void()>& on_reset) NETBENDER_NONBLOCKING -> void;
 
 private:
-    std::atomic<bool> m_blown_fuse { false };
-    std::atomic<bool> m_auto_reset { false };
-    std::atomic<int>  m_cooldown_blocks { 0 };
+    std::atomic<bool> m_blown_fuse{false};
+    std::atomic<bool> m_auto_reset{false};
+    std::atomic<int> m_cooldown_blocks{0};
 };
-

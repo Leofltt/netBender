@@ -19,7 +19,8 @@ LatentControlPanel::LatentControlPanel() {
     latent_depth_slider.setRange(0.0, 2.0, 0.01);
     latent_depth_slider.setValue(1.0);
     latent_depth_slider.setSliderStyle(juce::Slider::LinearBar);
-    latent_depth_slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, slider_box_width_standard, slider_box_height_standard);
+    latent_depth_slider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                                        slider_box_width_standard, slider_box_height_standard);
     latent_depth_slider.setColour(juce::Slider::trackColourId, magenta);
     addAndMakeVisible(latent_depth_slider);
 
@@ -41,7 +42,8 @@ LatentControlPanel::LatentControlPanel() {
     latent_slew_slider.setRange(0.001, 1.0, 0.001);
     latent_slew_slider.setValue(0.25);
     latent_slew_slider.setSliderStyle(juce::Slider::LinearBar);
-    latent_slew_slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, slider_box_width_standard, slider_box_height_standard);
+    latent_slew_slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, slider_box_width_standard,
+                                       slider_box_height_standard);
     latent_slew_slider.setColour(juce::Slider::trackColourId, sky_blue);
     addAndMakeVisible(latent_slew_slider);
 }

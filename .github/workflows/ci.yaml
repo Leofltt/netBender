@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4.2.2
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Cache LibTorch & ONNX Runtime
+        uses: actions/cache@v4
+        with:
+          path: |
+            torch
+            onnxruntime
+          key: deps-macos-arm64-${{ hashFiles('src/cmake/add_torch.cmake', 'src/cmake/add_onnxruntime.cmake') }}
+
+      - name: Configure CMake
+        run: |
+          cmake -S src -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_MAXMSP=OFF \
+            -DBUILD_PUREDATA=OFF \
+            -DBUILD_JUCE_PLUGIN=ON
+
+      - name: Build Unit Tests
+        run: cmake --build build --config Release --target unit_tests -j
+
+      - name: Run Model-Free Unit Tests
+        run: ctest --test-dir build --output-on-failure
+
+  windows:
+    runs-on: windows-2022
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4.2.2
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Cache LibTorch & ONNX Runtime
+        uses: actions/cache@v4
+        with:
+          path: |
+            torch
+            onnxruntime
+          key: deps-windows-x64-${{ hashFiles('src/cmake/add_torch.cmake', 'src/cmake/add_onnxruntime.cmake') }}
+
+      - name: Configure CMake
+        shell: powershell
+        run: |
+          cmake -S src -B build -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DBUILD_MAXMSP=OFF `
+            -DBUILD_PUREDATA=OFF `
+            -DBUILD_JUCE_PLUGIN=ON
+
+      - name: Build Unit Tests
+        shell: powershell
+        run: cmake --build build --config Release --target unit_tests -- /m
+
+      - name: Run Model-Free Unit Tests
+        shell: powershell
+        run: |
+          $dllDirs = @(
+            "$PWD\torch\libtorch\lib",
+            "$PWD\onnxruntime\onnxruntime-win-x64-1.18.0\lib"
+          ) | Where-Object { Test-Path $_ }
+          if ($dllDirs.Count -gt 0) {
+            $env:PATH = ($dllDirs -join ";") + ";" + $env:PATH
+          }
+          ctest --test-dir build -C Release --output-on-failure

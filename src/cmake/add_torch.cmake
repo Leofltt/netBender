@@ -8,15 +8,24 @@ find_library(torch_lib
 )
 
 function (download_library url out)
-  message("download ${url} to ${out}...")
+  message(STATUS "Downloading ${url} to ${out}...")
   file(DOWNLOAD
       ${url}
       ${out}/torch_cc.zip
-      SHOW_PROGRESS
-    )
-    execute_process(COMMAND ${CMAKE_COMMAND} -E tar -xf torch_cc.zip
-                    COMMAND remove -f ${out}/torch_cc.zip
-                    WORKING_DIRECTORY ${out})
+      STATUS _torch_dl_status
+  )
+  list(GET _torch_dl_status 0 _torch_dl_code)
+  if (NOT _torch_dl_code EQUAL 0)
+    file(REMOVE "${out}/torch_cc.zip")
+    message(FATAL_ERROR "Failed to download LibTorch from ${url}: ${_torch_dl_status}")
+  endif()
+  execute_process(COMMAND ${CMAKE_COMMAND} -E tar -xf torch_cc.zip
+                  WORKING_DIRECTORY ${out}
+                  RESULT_VARIABLE _torch_tar_res)
+  file(REMOVE "${out}/torch_cc.zip")
+  if (NOT _torch_tar_res EQUAL 0)
+    message(FATAL_ERROR "Failed to extract LibTorch archive from ${url}")
+  endif()
 endfunction()
 
 if (DEFINED torch_version)

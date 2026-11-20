@@ -16,8 +16,8 @@
 #include "dict_utils.h"
 #include "../../../backend/IBackend.h"
 #include "../../../backend/BackendFactory.h"
-#include "../../../shared/circular_buffer.h"
-#include "../../../shared/static_buffer.h"
+#include "../../../backend/engine/StreamingEngine.h"
+#include "static_buffer.h"
 
 #ifndef VERSION
 #define VERSION "UNDEFINED"
@@ -99,7 +99,8 @@ public:
   // BACKEND RELATED MEMBERS
   std::unique_ptr<IBackend> m_model;
   bool m_is_backend_init = false;
-  bool m_ready = false;
+  std::atomic<bool> m_ready{false};
+  std::atomic<bool> m_can_perform{false};
   std::string m_method;
   std::vector<std::string> settable_attributes;
   c74::min::path m_path;
@@ -108,35 +109,29 @@ public:
   bool is_valid_print_key(std::string string);
   bool buffer_initialised = false; 
   bool wait_for_buffer_reset = false; 
-  bool had_buffer_reset = true; 
-  bool can_perform() {
-    if (m_model->is_loaded()) {
-      if (m_model->has_method(m_method)) {
-        return true;
-      }
-    }
-    return false;
+  bool can_perform() const {
+    return m_can_perform.load(std::memory_order_acquire);
   }
   void update_model(const std::string &model);
   virtual void load_model(const std::string &model);
+  virtual void reload_model();
   virtual void set_method(std::string method);  
   virtual void update_method(std::string method = ""); 
+  void configure_streaming_engine(int batches);
   path to_model_path(std::string model_path);
   
   // BUFFER ATTRIBUTES MANAGER
   BufferManager m_buffer_manager;
 
-  // BUFFER RELATED MEMBERS
+  // STREAMING ENGINE & HOST DSP STATE
   int m_buffer_size;
-  int m_buffer_in, m_buffer_out; 
-  std::unique_ptr<circular_buffer<double, float>[]> m_in_buffer;
-  std::unique_ptr<circular_buffer<float, double>[]> m_out_buffer;
-  std::vector<std::unique_ptr<float[]>> m_in_model, m_out_model;
-
-  // AUDIO PERFORM
-  bool m_force_refresh, m_use_thread, m_should_stop_perform_thread;
-  std::binary_semaphore m_data_available_lock, m_result_available_lock;
-  std::unique_ptr<std::thread> m_compute_thread;
+  double m_host_sr{0.0};
+  int m_max_vec_size{512};
+  bool m_use_thread;
+  StreamingEngine m_engine;
+  RtGate m_perform_gate;
+  std::vector<const double *> m_in_ptrs_scratch;
+  std::vector<double *> m_out_ptrs_scratch;
 
   void operator()(audio_bundle input, audio_bundle output);
   virtual void perform(audio_bundle input, audio_bundle output) { }
@@ -173,8 +168,16 @@ public:
                       description{"Enable / disable gpu usage when available"},
                       setter{[this](const c74::min::atoms &args,
                                     const int inlet) -> c74::min::atoms {
-                        if (m_is_backend_init)
-                          m_model->use_gpu(bool(args[0]));
+                        if (m_is_backend_init && m_model) {
+                          m_engine.detach_backend();
+                          {
+                            const ScopedReconfigureGate fe_gate(m_perform_gate);
+                            m_model->use_gpu(bool(args[0]));
+                          }
+                          if (m_ready.load(std::memory_order_acquire) && m_model->is_loaded()) {
+                            init_buffers();
+                          }
+                        }
                         return args;
                       }}};
 
@@ -298,11 +301,36 @@ public:
   message<> reload{
       this, "reload", "Reload the model",
       [this](const c74::min::atoms &args, const int inlet) -> c74::min::atoms {
-        if (!m_is_backend_init) {
-          cerr << "Model not initialized" << endl;
-          return {};
+        reload_model();
+        return {};
+      }};
+
+  message<> dspsetup{
+      this, "dspsetup",
+      MIN_FUNCTION {
+        if (args.size() >= 1) {
+          const double new_sr = static_cast<double>(args[0]);
+          if (new_sr > 0.0) {
+            m_host_sr = new_sr;
+          }
         }
-        m_model->reload();
+        int new_vec_size = m_max_vec_size;
+        if (args.size() >= 2) {
+          const int max_vec = static_cast<int>(long(args[1]));
+          if (max_vec > m_max_vec_size) {
+            new_vec_size = max_vec;
+          }
+        }
+        const bool vec_grew = (new_vec_size > m_max_vec_size);
+        m_max_vec_size = new_vec_size;
+
+        if (m_ready.load(std::memory_order_acquire) && m_model && m_model->is_loaded()) {
+          if (!m_engine.is_configured() || vec_grew || wait_for_buffer_reset) {
+            init_buffers();
+          } else if (m_host_sr > 0.0) {
+            m_engine.set_host_sample_rate(m_host_sr);
+          }
+        }
         return {};
       }};
 
@@ -388,10 +416,11 @@ public:
     MIN_FUNCTION {
       if (args.size() == 0) {
         cerr << "please provide a method" << endl; 
+        return {};
       }
       std::string method = args[0]; 
       try {
-        if (m_model->is_loaded()) {
+        if (m_model && m_model->is_loaded()) {
           if (!m_model->has_method(method)) {
             cerr << "current model does not have method " << method << endl; 
             return args; 
@@ -399,6 +428,9 @@ public:
         }
         this->set_method(method);
         this->wait_for_buffer_reset = true; 
+        if (m_ready.load(std::memory_order_acquire)) {
+          this->init_buffers();
+        }
       } catch (std::string &e) {
         cerr << e << endl;   
       }
@@ -428,7 +460,8 @@ public:
       [this](const c74::min::atoms &args, const int inlet) -> c74::min::atoms {
         symbol attribute_name = args[0];
         if (attribute_name == "reload") {
-          m_model->reload();
+          reload_model();
+          return {};
         } else if (attribute_name == "load") {
           if (args.size() < 2) {
             cerr << "a model path must be given along the model message" << endl; 
@@ -627,28 +660,30 @@ void nn_base<nn_name, op_type>::init_process() {
   #ifdef _WIN32
   m_use_thread = false;
   #endif
-
+  if (m_ready.load(std::memory_order_acquire) && !m_engine.is_configured()) {
+    init_buffers();
+  }
 }
 
 template <typename nn_name, typename op_type>
 nn_base<nn_name, op_type>::nn_base(const atoms &args)
-    : m_compute_thread(nullptr), n_inlets(-1), m_in_ratio(1), n_outlets(-1),
-      m_out_ratio(1), m_buffer_size(-1), n_batches(1), 
-      m_method("forward"), m_force_refresh(false),
-      m_use_thread(true), m_data_available_lock(0), m_result_available_lock(1),
-      m_should_stop_perform_thread(false), m_in_model(), m_out_model(),
-      cout(this, logger::type::message), cwarn(this, logger::type::warning), cerr(this, logger::type::error) 
+    : m_method("forward"), n_inlets(-1), m_model_in(0), m_in_ratio(1), n_outlets(-1),
+      m_model_out(0), m_out_ratio(1), m_higher_ratio(1), n_batches(1),
+      m_buffer_size(-1), m_use_thread(true),
+      cout(this, logger::type::message), cerr(this, logger::type::error), cwarn(this, logger::type::warning)
 {
+  m_engine.set_error_callback([](const std::string& msg) {
+    std::cerr << "[netBender~] StreamingEngine error: " << msg << std::endl;
+  });
   init_external(args);
 }
 
-
-
 template <typename nn_name, typename op_type>
 nn_base<nn_name, op_type>::~nn_base() {
-  m_should_stop_perform_thread = true;
-  if (m_compute_thread)
-    m_compute_thread->join();
+  m_ready.store(false, std::memory_order_release);
+  m_can_perform.store(false, std::memory_order_release);
+  m_engine.detach_backend();
+  const ScopedReconfigureGate fe_gate(m_perform_gate);
 }
 
 template <typename nn_name, typename op_type>
@@ -701,23 +736,28 @@ path nn_base<nn_name, op_type>::to_model_path(std::string model_path) {
 template <typename nn_name, typename op_type>
 void nn_base<nn_name, op_type>::update_model(const std::string &model) {
   load_model(model);
-  if ((m_model->is_loaded()) && m_model->has_method(m_method)) {
-    update_method(); 
+  if (m_ready.load(std::memory_order_acquire) && m_model && m_model->is_loaded() &&
+      m_model->has_method(m_method)) {
+    init_buffers();
   }
 }
 
 template <typename nn_name, typename op_type>
 void nn_base<nn_name, op_type>::set_method(std::string method) {
-  m_method = method; 
+  m_method = method;
+  if (m_model && m_model->is_loaded()) {
+    m_can_perform.store(m_model->has_method(m_method), std::memory_order_release);
+  } else {
+    m_can_perform.store(false, std::memory_order_release);
+  }
 }
 
 template <typename nn_name, typename op_type>
 void nn_base<nn_name, op_type>::update_method(std::string method) {
   try {
-    // if (!m_model->is_loaded()) {
-    //   cerr << "no model is set yet" << endl;
-    //   return; 
-    // }
+    if (!m_model) {
+      return;
+    }
     if (method.empty()) {
       if (m_method.empty()) {
         return;
@@ -773,12 +813,15 @@ void nn_base<nn_name, op_type>::update_method(std::string method) {
       }
     } else {
       cerr << "model " << m_path << " does not have method " << method << endl; 
-      m_ready = false; 
+      m_ready.store(false, std::memory_order_release);
+      m_can_perform.store(false, std::memory_order_release);
     }
     wait_for_buffer_reset = true; 
   } catch (std::string &e) {
+    m_can_perform.store(false, std::memory_order_release);
     cerr << "failed to set method to " << method << ". Caught exception : " << e << endl; 
   } catch (std::exception &e) {
+    m_can_perform.store(false, std::memory_order_release);
     cerr << "failed to set method to " << method << ". Caught exception : " << e.what() << endl; 
   }
 
@@ -800,22 +843,46 @@ void nn_base<nn_name, op_type>::load_model(const std::string& model_path) {
     m_method = "forward";
 
   try {
-    auto path = to_model_path(model_path);
-    std::string resolved_path = std::string(path);
-    m_model = BackendFactory::create_for_file(resolved_path);
-    m_is_backend_init = true;
-    m_model.get()->load(resolved_path, get_sample_rate()); 
-    DEBUG_PRINT("model loaded"); 
+    auto resolved_min_path = to_model_path(model_path);
+    std::string resolved_path = std::string(resolved_min_path);
+    auto new_model = BackendFactory::create_for_file(resolved_path);
+    if (!new_model) {
+      cerr << "failed to create backend for " << model_path << endl;
+      return;
+    }
+
+    const double sr = (m_host_sr > 0.0)
+                          ? m_host_sr
+                          : (get_sample_rate() > 0 ? static_cast<double>(get_sample_rate()) : 44100.0);
+    if (new_model->load(resolved_path, sr) != 0 || !new_model->is_loaded()) {
+      const std::string err = new_model->get_last_error();
+      cerr << "failed to load model " << model_path
+           << (err.empty() ? "" : (": " + err)) << endl;
+      return;
+    }
+
+    DEBUG_PRINT("model loaded");
+    m_engine.detach_backend();
+    {
+      const ScopedReconfigureGate fe_gate(m_perform_gate);
+      m_ready.store(false, std::memory_order_release);
+      m_can_perform.store(false, std::memory_order_release);
+      m_model = std::move(new_model);
+      m_is_backend_init = true;
+      m_path = resolved_min_path;
+    }
+
     m_model->use_gpu(gpu);
     m_higher_ratio = m_model->get_higher_ratio();
     settable_attributes = m_model->get_settable_attributes(); 
     DEBUG_PRINT("attributes setted"); 
     m_buffer_manager.init_buffer_list(m_model.get(), this);
-    m_ready = true; 
+    m_ready.store(true, std::memory_order_release);
 
-    if (!m_model->has_method(m_method)) {
+    const bool method_ok = m_model->has_method(m_method);
+    m_can_perform.store(method_ok, std::memory_order_release);
+    if (!method_ok) {
       cwarn << model_path << " loaded, but does not have method " << m_method << endl; 
-
     }
   } catch (std::string &e) {
     cerr << e << endl;
@@ -827,60 +894,88 @@ void nn_base<nn_name, op_type>::load_model(const std::string& model_path) {
 }
 
 template <typename nn_name, typename op_type>
-void nn_base<nn_name, op_type>::init_buffers() { 
-  if (!m_ready) { return; }
-  update_method(); 
+void nn_base<nn_name, op_type>::reload_model() {
+  if (!m_is_backend_init || !m_model) {
+    cerr << "Model not initialized" << endl;
+    return;
+  }
+  m_engine.detach_backend();
+  {
+    const ScopedReconfigureGate fe_gate(m_perform_gate);
+    m_can_perform.store(false, std::memory_order_release);
+    m_model->reload();
+  }
+  if (m_ready.load(std::memory_order_acquire) && m_model->is_loaded()) {
+    m_higher_ratio = m_model->get_higher_ratio();
+    settable_attributes = m_model->get_settable_attributes();
+    init_buffers();
+  }
+}
 
-  // if (m_buffer_size == -1) {
-  //   m_buffer_size = DEFAULT_BUFFER_SIZE;
-  // } else if (m_buffer_size == 0) {
-  //   m_use_thread = false; 
-  //   m_buffer_size = m_higher_ratio;
-  // } else {
-  //   if (m_buffer_size < m_higher_ratio) {
-  //     cerr << "buffer size too small, switching to " << m_buffer_size << endl;
-  //     m_buffer_size = m_higher_ratio;
-  //   } else {
-  //     m_buffer_size = power_ceil(m_buffer_size);
-  //   }
-  // }
+template <typename nn_name, typename op_type>
+void nn_base<nn_name, op_type>::configure_streaming_engine(int batches) {
+  if (!m_model || !m_model->is_loaded()) {
+    m_engine.detach_backend();
+    m_can_perform.store(false, std::memory_order_release);
+    return;
+  }
+
+  StreamingConfig cfg;
+  cfg.method = m_method;
+  cfg.dispatch = InferenceDispatch::RawMethod;
+  cfg.model_in_channels = std::max(0, m_model_in);
+  cfg.model_out_channels = std::max(0, m_model_out);
+  cfg.n_batches = std::max(1, batches);
+  cfg.model_buffer_size = std::max(1, m_buffer_size);
+
+  const double current_sr =
+      (m_host_sr > 0.0) ? m_host_sr
+                        : (get_sample_rate() > 0 ? static_cast<double>(get_sample_rate()) : 44100.0);
+  const double model_sr = m_model->get_sample_rate();
+  cfg.host_sample_rate = current_sr;
+  cfg.model_sample_rate = (model_sr > 0.0) ? model_sr : current_sr;
+
+  cfg.max_host_block_size = std::max(256, m_max_vec_size);
+  cfg.max_host_channels = std::max({1, cfg.model_in_channels * cfg.n_batches,
+                                    cfg.model_out_channels * cfg.n_batches});
+  cfg.resample_mode = ResampleMode::Auto;
+  cfg.resample_quality = ResamplerQuality::CatmullRom;
+  cfg.use_worker_thread = m_use_thread;
+  cfg.auto_start_worker = m_use_thread;
+  cfg.enable_dry_delay = false;
+  cfg.enable_safety_sentry = false;
+  cfg.duplicate_mono_input = false;
+  cfg.duplicate_mono_output = false;
+
+  m_engine.configure(m_model.get(), cfg);
+  m_can_perform.store(m_model->is_loaded() && m_model->has_method(m_method),
+                      std::memory_order_release);
+}
+
+template <typename nn_name, typename op_type>
+void nn_base<nn_name, op_type>::init_buffers() { 
+  if (!m_ready.load(std::memory_order_acquire)) { return; }
+  m_engine.detach_backend();
+  const ScopedReconfigureGate fe_gate(m_perform_gate);
+
+  update_method(); 
+  if (!m_ready.load(std::memory_order_acquire)) {
+    m_can_perform.store(false, std::memory_order_release);
+    return;
+  }
 
   // Calling forward in a thread causes memory leak in windows.
   // See https://github.com/pytorch/pytorch/issues/24237
   #ifdef _WIN32
   m_use_thread = false;
   #endif
-  
-  m_in_buffer.reset();
-  m_in_buffer = std::make_unique<circular_buffer<double, float>[]>(n_inlets);
-  if (m_in_buffer.get()->max_size() < m_buffer_size) {
-    for (int i = 0; i < n_inlets; i++) {
-      m_in_buffer[i].initialize(m_buffer_size);
-    }
-  }
 
-  m_out_buffer.reset();
-  m_out_buffer = std::make_unique<circular_buffer<float, double>[]>(n_outlets);
-  if (m_out_buffer.get()->max_size() < m_buffer_size) {
-    for (int i = 0; i < n_outlets; i++) {
-      m_out_buffer[i].initialize(m_buffer_size);
-    }
-  }
+  m_in_ptrs_scratch.assign(static_cast<size_t>(std::max(1, m_model_in)), nullptr);
+  m_out_ptrs_scratch.assign(static_cast<size_t>(std::max(1, m_model_out)), nullptr);
 
-  m_in_model.clear(); 
-  for (int i = 0; i < m_model_in; i++) {
-    m_in_model.push_back(std::make_unique<float[]>(m_buffer_size));
-    std::fill(m_in_model[i].get(), m_in_model[i].get() + m_buffer_size, 0.); 
-  }
-
-  m_out_model.clear(); 
-  for (int i = 0; i < m_model_out; i++) {
-    m_out_model.push_back(std::make_unique<float[]>(m_buffer_size));
-    std::fill(m_out_model[i].get(), m_out_model[i].get() + m_buffer_size, 0.); 
-  }
+  configure_streaming_engine(1);
 
   wait_for_buffer_reset = false; 
-  had_buffer_reset = true; 
   buffer_initialised = true; 
 }
 
@@ -895,38 +990,19 @@ bool nn_base<nn_name, op_type>::has_settable_attribute(std::string attribute) {
 
 template <typename nn_name, typename op_type>
 void nn_base<nn_name, op_type>::operator()(audio_bundle input, audio_bundle output) {
-
-  // CHECK IF MODEL IS LOADED AND ENABLED
-  if (!m_ready || !enable) {
+  if (!m_ready.load(std::memory_order_acquire) || !enable) {
     fill_with_zero(output);
     return;
   }
 
-  if ((!m_use_thread) && (!buffer_initialised)) {
-    init_buffers(); 
+  const ScopedRtReader rt_reader(m_perform_gate);
+  if (!rt_reader.is_acquired() || !m_can_perform.load(std::memory_order_acquire) ||
+      !m_engine.is_configured()) {
+    fill_with_zero(output);
+    return;
   }
 
-  if (can_perform()) {
-    if (buffer_initialised) {
-      auto dsp_vec_size = output.frame_count();
-      // CHECK IF DSP_VEC_SIZE IS LARGER THAN BUFFER SIZE
-      if (dsp_vec_size > m_buffer_size) {
-        cerr << "vector size (" << dsp_vec_size << ") ";
-        cerr << "larger than buffer size (" << m_buffer_size << "). ";
-        cerr << "disabling model.";
-        cerr << endl;
-        enable = false;
-        fill_with_zero(output);
-        return;
-      } 
-      perform(input, output);
-    } 
-    // else {
-    //   fill_with_zero();
-    // }
-  } else {
-    fill_with_zero(output); 
-  }
+  perform(input, output);
 }
 
 template <typename nn_name, typename op_type>

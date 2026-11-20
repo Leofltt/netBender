@@ -2,7 +2,7 @@
 #include "ext_obex.h"						// required for new style Max object
 #include "ext_atomarray.h"                  // atomarrays
 
-#include "../../../shared/static_buffer.h"
+#include "static_buffer.h"
 
 #include <type_traits>
 

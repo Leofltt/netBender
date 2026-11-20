@@ -1,0 +1,1387 @@
+#include "TorchBackend.h"
+#include <exception>
+#include <algorithm>
+#include <iostream>
+#include <exception>
+#include <stdio.h>
+#include <stdlib.h>
+#include <random>
+#include "parsing_utils.h"
+
+#define CPU torch::kCPU
+#define CUDA torch::kCUDA
+#define MPS torch::kMPS
+
+#define REFRESH_THREAD_INTERVAL 50
+
+auto tensor_to_str(torch::Tensor& tsr) -> std::string {
+    std::stringstream ss;
+    ss << "Tensor(dim: ";
+    for (int i = 0; i < tsr.dim(); i++) {
+        ss << tsr.size(i);
+        if (i != tsr.dim() - 1)
+            ss << ", ";
+    }
+    ss << ")";
+    return ss.str();
+}
+
+namespace {
+
+auto static_buffer_to_tensor(StaticBuffer<float>& buffer) -> torch::Tensor {
+    auto dims = buffer.dims();
+    return torch::from_blob(buffer.data(),
+                            {static_cast<long long>(dims[0]), static_cast<long long>(dims[1])},
+                            torch::kFloat);
+}
+
+}  // namespace
+
+TorchBackend::TorchBackend()
+    : m_loaded(0),
+      m_in_dim(0),
+      m_in_ratio(0),
+      m_out_dim(0),
+      m_out_ratio(0),
+      m_device(CPU),
+      m_use_gpu(false),
+      m_sr(44100.0) {
+    at::init_num_threads();
+}
+
+auto TorchBackend::prepare_io_tensor(std::vector<float*>& in_buffer, int in_dim, int n_batches,
+                                     int in_ratio, int n_vec) -> torch::Tensor {
+    // Directly allocate one contiguous tensor of shape [in_dim * n_batches, n_vec]
+    // This avoids per-channel .clone() heap thrashing and subsequent torch::cat() allocations!
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+    auto cat_tensor_in = torch::empty({in_dim * n_batches, n_vec}, options);
+    float* tensor_data = cat_tensor_in.data_ptr<float>();
+
+    int total_channels = in_dim * n_batches;
+    for (int i = 0; i < total_channels; ++i) {
+        float* dest = tensor_data + i * n_vec;
+        if (i < (int)in_buffer.size() && in_buffer[i] != nullptr) {
+            std::memcpy(dest, in_buffer[i], n_vec * sizeof(float));
+        } else {
+            std::memset(dest, 0, n_vec * sizeof(float));
+        }
+    }
+
+    // Reshape and permute to desired [n_batches, in_dim, samples]
+    cat_tensor_in = cat_tensor_in.reshape({in_dim, n_batches, -1, in_ratio});
+    cat_tensor_in = cat_tensor_in.select(-1, -1);
+    cat_tensor_in = cat_tensor_in.permute({1, 0, 2});
+    return cat_tensor_in;
+}
+
+auto TorchBackend::perform(std::vector<float*>& in_buffer, std::vector<float*>& out_buffer,
+                           std::string method, int n_batches, int n_out_channels, int n_vec)
+    -> void {
+    torch::NoGradGuard guard;
+
+    auto params = get_method_params(method);
+    if (!params.size())
+        return;
+
+    auto in_dim = params[0];
+    auto in_ratio = params[1];
+    auto out_dim = params[2];
+    auto out_ratio = params[3];
+
+    if (!m_loaded)
+        return;
+
+    // COPY BUFFER INTO A SINGLE PRE-ALLOCATED CONTIGUOUS TENSOR (Zero clone / Zero cat)
+    auto cat_tensor_in = prepare_io_tensor(in_buffer, in_dim, n_batches, in_ratio, n_vec);
+
+    // SEND TENSOR TO DEVICE
+    std::unique_lock<std::mutex> model_lock(m_model_mutex);
+    cat_tensor_in = cat_tensor_in.to(m_device);
+    std::vector<torch::jit::IValue> inputs = {cat_tensor_in};
+    auto kwargs = empty_kwargs();
+
+    // PROCESS TENSOR
+    at::Tensor tensor_out;
+    try {
+        tensor_out = m_model.get_method(method)(inputs, kwargs).toTensor();
+        tensor_out = tensor_out.repeat_interleave(out_ratio).reshape({n_batches, out_dim, -1});
+    } catch (const std::exception& e) {
+        std::cerr << e.what() << '\n';
+        return;
+    }
+    model_lock.unlock();
+
+    int out_batches(tensor_out.size(0)), out_channels(tensor_out.size(1)),
+        out_n_vec(tensor_out.size(2));
+
+    tensor_out = tensor_out.contiguous().to(CPU);
+    const float* out_data = tensor_out.data_ptr<float>();
+
+    int copy_samples = std::min(n_vec, out_n_vec);
+    for (int j = 0; j < n_batches; j++) {
+        for (int i = 0; i < n_out_channels; i++) {
+            float* dest = out_buffer[j * n_out_channels + i];
+            if (dest == nullptr)
+                continue;
+
+            if (i < out_channels) {
+                const float* src = out_data + (j * out_channels + i) * out_n_vec;
+                std::memcpy(dest, src, copy_samples * sizeof(float));
+                if (copy_samples < n_vec) {
+                    std::memset(dest + copy_samples, 0, (n_vec - copy_samples) * sizeof(float));
+                }
+            } else {
+                std::memset(dest, 0, n_vec * sizeof(float));
+            }
+        }
+    }
+}
+
+auto TorchBackend::perform_forward(std::vector<float*>& in_buffer, std::vector<float*>& out_buffer,
+                                   int n_batches, int n_out_channels, int n_vec,
+                                   IBackend::LatentHook latent_hook) -> void {
+    // If no latent hook is active and the model has a native forward method, invoke it directly
+    if (!latent_hook && has_method("forward")) {
+        perform(in_buffer, out_buffer, "forward", n_batches, n_out_channels, n_vec);
+        return;
+    }
+
+    // If model has encode and decode, execute encode -> (latent_hook) -> decode
+    // so latent bending and autoencoding are fully supported.
+    bool has_enc_dec = has_method("encode") && has_method("decode");
+    if (has_enc_dec) {
+        torch::NoGradGuard guard;
+        if (!m_loaded)
+            return;
+
+        auto encode_params = get_method_params("encode");
+        auto decode_params = get_method_params("decode");
+        if (encode_params.empty() || decode_params.empty())
+            return;
+
+        auto in_dim = encode_params[0];
+        auto out_dim = decode_params[2];
+        auto out_ratio = decode_params[3];
+
+        // Audio input to encoder must never be temporally decimated (in_ratio = 1)
+        auto cat_tensor_in = prepare_io_tensor(in_buffer, in_dim, n_batches, 1, n_vec);
+
+        std::unique_lock<std::mutex> model_lock(m_model_mutex);
+        cat_tensor_in = cat_tensor_in.to(m_device);
+        std::vector<torch::jit::IValue> encode_inputs = {cat_tensor_in};
+        auto kwargs = empty_kwargs();
+
+        at::Tensor latent_tensor;
+        try {
+            latent_tensor = m_model.get_method("encode")(encode_inputs, kwargs).toTensor();
+        } catch (const std::exception& e) {
+            std::cerr << "Forward encode error: " << e.what() << '\n';
+            return;
+        }
+
+        if (latent_hook) {
+            try {
+                auto cpu_latent = latent_tensor.to(CPU).contiguous();
+                int64_t channels = cpu_latent.dim() > 1 ? cpu_latent.size(1) : 1;
+                int64_t length = cpu_latent.dim() > 2 ? cpu_latent.size(2) : cpu_latent.numel();
+                IBackend::LatentBuffer buf{cpu_latent.data_ptr<float>(), channels, length};
+                latent_hook(buf);
+                latent_tensor = cpu_latent.to(m_device);
+            } catch (const std::exception& e) {
+                std::cerr << "Forward latent hook error: " << e.what() << '\n';
+            }
+        }
+
+        std::vector<torch::jit::IValue> decode_inputs = {latent_tensor.to(m_device)};
+        at::Tensor tensor_out;
+        try {
+            tensor_out = m_model.get_method("decode")(decode_inputs, kwargs).toTensor();
+            int effective_out_ratio =
+                (out_ratio > 1 && tensor_out.size(-1) >= n_vec) ? 1 : out_ratio;
+            tensor_out =
+                tensor_out.repeat_interleave(effective_out_ratio).reshape({n_batches, out_dim, -1});
+        } catch (const std::exception& e) {
+            std::cerr << "Forward decode error: " << e.what() << '\n';
+            return;
+        }
+        model_lock.unlock();
+
+        int out_batches(tensor_out.size(0)), out_channels(tensor_out.size(1)),
+            out_n_vec(tensor_out.size(2));
+        tensor_out = tensor_out.contiguous().to(CPU);
+        const float* out_data = tensor_out.data_ptr<float>();
+
+        int copy_samples = std::min(n_vec, out_n_vec);
+        for (int j = 0; j < n_batches; j++) {
+            for (int i = 0; i < n_out_channels; i++) {
+                float* dest = out_buffer[j * n_out_channels + i];
+                if (dest == nullptr)
+                    continue;
+
+                if (i < out_channels) {
+                    const float* src = out_data + (j * out_channels + i) * out_n_vec;
+                    std::memcpy(dest, src, copy_samples * sizeof(float));
+                    if (copy_samples < n_vec) {
+                        std::memset(dest + copy_samples, 0, (n_vec - copy_samples) * sizeof(float));
+                    }
+                } else {
+                    std::memset(dest, 0, n_vec * sizeof(float));
+                }
+            }
+        }
+    } else {
+        // Native forward method
+        perform(in_buffer, out_buffer, "forward", n_batches, n_out_channels, n_vec);
+    }
+}
+
+auto TorchBackend::perform_prior_decode(std::vector<float*>& out_buffer, int n_batches,
+                                        int n_out_channels, int n_vec) -> void {
+    torch::NoGradGuard guard;
+    if (!m_loaded)
+        return;
+
+    std::string prior_method =
+        has_method("prior") ? "prior" : (has_method("generate") ? "generate" : "");
+    if (prior_method.empty())
+        return;
+
+    // If decode exists and prior generates latents, chain prior -> decode
+    if (has_method("decode")) {
+        auto prior_params = get_method_params(prior_method);
+        auto decode_params = get_method_params("decode");
+        if (decode_params.empty())
+            return;
+
+        auto out_dim = decode_params[2];
+        auto out_ratio = decode_params[3];
+
+        std::unique_lock<std::mutex> model_lock(m_model_mutex);
+        auto kwargs = empty_kwargs();
+        std::vector<torch::jit::IValue> prior_inputs;
+
+        if (!prior_params.empty() && prior_params[0] > 0) {
+            int p_in_dim = prior_params[0];
+            int p_in_ratio = prior_params[1];
+            std::vector<float*> empty_in;
+            auto cat_tensor_in =
+                prepare_io_tensor(empty_in, p_in_dim, n_batches, p_in_ratio, n_vec).to(m_device);
+            prior_inputs.push_back(cat_tensor_in);
+        }
+
+        at::Tensor latent_tensor;
+        try {
+            latent_tensor = m_model.get_method(prior_method)(prior_inputs, kwargs).toTensor();
+        } catch (const std::exception& e) {
+            std::cerr << "Prior error: " << e.what() << '\n';
+            return;
+        }
+
+        std::vector<torch::jit::IValue> decode_inputs = {latent_tensor};
+        at::Tensor tensor_out;
+        try {
+            tensor_out = m_model.get_method("decode")(decode_inputs, kwargs).toTensor();
+            tensor_out = tensor_out.repeat_interleave(out_ratio).reshape({n_batches, out_dim, -1});
+        } catch (const std::exception& e) {
+            std::cerr << "Prior decode error: " << e.what() << '\n';
+            return;
+        }
+        model_lock.unlock();
+
+        int out_batches(tensor_out.size(0)), out_channels(tensor_out.size(1)),
+            out_n_vec(tensor_out.size(2));
+        tensor_out = tensor_out.contiguous().to(CPU);
+        const float* out_data = tensor_out.data_ptr<float>();
+
+        int copy_samples = std::min(n_vec, out_n_vec);
+        for (int j = 0; j < n_batches; j++) {
+            for (int i = 0; i < n_out_channels; i++) {
+                float* dest = out_buffer[j * n_out_channels + i];
+                if (dest == nullptr)
+                    continue;
+
+                if (i < out_channels) {
+                    const float* src = out_data + (j * out_channels + i) * out_n_vec;
+                    std::memcpy(dest, src, copy_samples * sizeof(float));
+                    if (copy_samples < n_vec) {
+                        std::memset(dest + copy_samples, 0, (n_vec - copy_samples) * sizeof(float));
+                    }
+                } else {
+                    std::memset(dest, 0, n_vec * sizeof(float));
+                }
+            }
+        }
+    } else {
+        // If no decode method, call prior directly with perform
+        std::vector<float*> empty_in_buf;
+        perform(empty_in_buf, out_buffer, prior_method, n_batches, n_out_channels, n_vec);
+    }
+}
+
+auto TorchBackend::perform_decode_gen(std::vector<float*>& out_buffer, int n_batches,
+                                      int n_out_channels, int n_vec,
+                                      IBackend::LatentHook latent_hook) -> void {
+    torch::NoGradGuard guard;
+    if (!m_loaded || !has_method("decode"))
+        return;
+
+    auto decode_params = get_method_params("decode");
+    if (decode_params.size() < 4)
+        return;
+
+    int latent_dim = decode_params[0];
+    int latent_ratio = decode_params[1];
+    int out_dim = decode_params[2];
+    int out_ratio = decode_params[3];
+
+    // Check available samples in FIFO buffer
+    size_t fifo_samples = (m_decode_gen_fifo.empty() || m_decode_gen_fifo[0].empty())
+                              ? 0
+                              : (m_decode_gen_fifo[0].size() - m_decode_gen_fifo_read_idx);
+
+    const size_t kCrossfadeSamples = 512;
+    // If FIFO does not have enough samples to fulfill n_vec + crossfade cushion, synthesize another
+    // block
+    if (fifo_samples < (size_t)(n_vec + kCrossfadeSamples)) {
+        // Compact FIFO by erasing already consumed samples, preserving overlap tail for seamless
+        // blending
+        if (m_decode_gen_fifo_read_idx > 0) {
+            size_t erase_count = (m_decode_gen_fifo_read_idx > kCrossfadeSamples)
+                                     ? (m_decode_gen_fifo_read_idx - kCrossfadeSamples)
+                                     : 0;
+            if (erase_count > 0) {
+                for (auto& ch : m_decode_gen_fifo) {
+                    if (erase_count < ch.size()) {
+                        ch.erase(ch.begin(), ch.begin() + erase_count);
+                    } else {
+                        ch.clear();
+                    }
+                }
+                m_decode_gen_fifo_read_idx -= erase_count;
+            }
+        }
+
+        int min_steps = (latent_ratio <= 640 && latent_dim >= 128)
+                            ? 8
+                            : (latent_ratio >= 1024 && latent_dim >= 8 ? 16 : 4);
+        int latent_steps = std::max(min_steps, n_vec / std::max(1, latent_ratio));
+
+        at::Tensor latent_tensor;
+        std::string prior_method =
+            has_method("prior") ? "prior" : (has_method("generate") ? "generate" : "");
+
+        if (!prior_method.empty()) {
+            // If model has a learned prior (RAVE / Darbouka), seed base latents using prior!
+            auto prior_params = get_method_params(prior_method);
+            std::unique_lock<std::mutex> model_lock(m_model_mutex);
+            auto kwargs = empty_kwargs();
+            std::vector<torch::jit::IValue> prior_inputs;
+
+            if (!prior_params.empty() && prior_params[0] > 0) {
+                int p_in_dim = prior_params[0];
+                int p_in_ratio = prior_params[1];
+                std::vector<float*> empty_in;
+                auto cat_tensor_in =
+                    prepare_io_tensor(empty_in, p_in_dim, n_batches, p_in_ratio, n_vec)
+                        .to(m_device);
+                prior_inputs.push_back(cat_tensor_in);
+            }
+
+            try {
+                latent_tensor =
+                    m_model.get_method(prior_method)(prior_inputs, kwargs).toTensor().to(m_device);
+            } catch (...) {
+                latent_tensor = at::Tensor();
+            }
+            model_lock.unlock();
+        }
+
+        // Fallback: If no prior or prior failed, synthesize base latent buffer with continuous
+        // Ornstein-Uhlenbeck walk EnCodec SEANet operates at sigma ~ 8.5 to 10.0; VAEs (Stable
+        // Audio, RAVE) operate at unit normal sigma ~ 1.0
+        if (!latent_tensor.defined() || latent_tensor.numel() == 0) {
+            float latent_scale = (latent_dim >= 128 && latent_ratio <= 640)
+                                     ? 8.5f
+                                     : ((latent_dim >= 256) ? 0.25f : 1.0f);
+            const float alpha = (latent_ratio <= 640) ? 0.94f : 0.86f;
+            const float beta = std::sqrt(1.0f - alpha * alpha);
+
+            static std::mt19937 rng_gen(1337);
+            std::normal_distribution<float> norm_dist(0.0f, latent_scale);
+
+            if (m_decode_gen_latent_state.size() != (size_t)latent_dim) {
+                m_decode_gen_latent_state.resize(latent_dim);
+                for (int c = 0; c < latent_dim; ++c) {
+                    m_decode_gen_latent_state[c] = norm_dist(rng_gen);
+                }
+            }
+
+            auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+            auto cpu_latent = torch::empty({n_batches, latent_dim, latent_steps}, options);
+            float* ldata = cpu_latent.data_ptr<float>();
+
+            for (int b = 0; b < n_batches; ++b) {
+                for (int c = 0; c < latent_dim; ++c) {
+                    float prev = m_decode_gen_latent_state[c];
+                    float* ch_ptr = ldata + (b * latent_dim + c) * latent_steps;
+                    for (int t = 0; t < latent_steps; ++t) {
+                        float eps = norm_dist(rng_gen);
+                        prev = alpha * prev + beta * eps;
+                        ch_ptr[t] = prev;
+                    }
+                    if (b == 0)
+                        m_decode_gen_latent_state[c] = prev;
+                }
+            }
+            latent_tensor = cpu_latent;
+        }
+
+        // Apply latent hook (2D Latent Vector Pad, Drift, Harmonics, RFF Orbit) on CPU memory
+        if (latent_hook) {
+            try {
+                auto cpu_latent = latent_tensor.to(CPU).contiguous();
+                int64_t channels = cpu_latent.dim() > 1 ? cpu_latent.size(1) : 1;
+                int64_t length = cpu_latent.dim() > 2 ? cpu_latent.size(2) : cpu_latent.numel();
+                IBackend::LatentBuffer buf{cpu_latent.data_ptr<float>(), channels, length};
+                latent_hook(buf);
+                latent_tensor = cpu_latent;
+            } catch (const std::exception& e) {
+                std::cerr << "Decode Gen latent hook error: " << e.what() << '\n';
+            }
+        }
+
+        std::unique_lock<std::mutex> model_lock(m_model_mutex);
+        auto kwargs = empty_kwargs();
+        std::vector<torch::jit::IValue> decode_inputs = {latent_tensor.to(m_device)};
+        at::Tensor tensor_out;
+        try {
+            tensor_out = m_model.get_method("decode")(decode_inputs, kwargs).toTensor();
+            int effective_out_ratio =
+                (out_ratio > 1 && tensor_out.size(-1) >= n_vec) ? 1 : out_ratio;
+            tensor_out =
+                tensor_out.repeat_interleave(effective_out_ratio).reshape({n_batches, out_dim, -1});
+        } catch (const std::exception& e) {
+            std::cerr << "Decode Gen decode error: " << e.what() << '\n';
+            return;
+        }
+        model_lock.unlock();
+
+        int model_out_ch = tensor_out.size(1);
+        int new_samples = tensor_out.size(2);
+        tensor_out = tensor_out.contiguous().to(CPU);
+        const float* out_data = tensor_out.data_ptr<float>();
+
+        // Append synthesized output into per-channel FIFO buffers with equal-power crossfade
+        if (m_decode_gen_fifo.size() < (size_t)model_out_ch) {
+            m_decode_gen_fifo.resize(model_out_ch);
+        }
+        size_t prev_available = m_decode_gen_fifo[0].size();
+        size_t overlap =
+            std::min(kCrossfadeSamples, std::min(prev_available, (size_t)new_samples / 2));
+
+        for (int c = 0; c < model_out_ch; ++c) {
+            const float* src = out_data + c * new_samples;
+            if (overlap > 0) {
+                size_t tail_idx = prev_available - overlap;
+                for (size_t i = 0; i < overlap; ++i) {
+                    float t = (float)(i + 0.5f) / (float)overlap;
+                    float w_in = std::sin(1.57079632679f * t);
+                    float w_out = std::cos(1.57079632679f * t);
+                    float old_s = m_decode_gen_fifo[c][tail_idx + i];
+                    float new_s = src[i];
+                    m_decode_gen_fifo[c][tail_idx + i] = old_s * w_out + new_s * w_in;
+                }
+                m_decode_gen_fifo[c].insert(m_decode_gen_fifo[c].end(), src + overlap,
+                                            src + new_samples);
+            } else {
+                m_decode_gen_fifo[c].insert(m_decode_gen_fifo[c].end(), src, src + new_samples);
+            }
+        }
+    }
+
+    // Transfer n_vec samples from FIFO to destination out_buffer
+    int fifo_channels = (int)m_decode_gen_fifo.size();
+    size_t available =
+        (fifo_channels > 0) ? (m_decode_gen_fifo[0].size() - m_decode_gen_fifo_read_idx) : 0;
+    int copy_samples = std::min((size_t)n_vec, available);
+
+    for (int j = 0; j < n_batches; j++) {
+        for (int c = 0; c < n_out_channels; c++) {
+            float* dest = out_buffer[j * n_out_channels + c];
+            if (dest == nullptr)
+                continue;
+
+            if (c < fifo_channels && copy_samples > 0) {
+                const float* src = m_decode_gen_fifo[c].data() + m_decode_gen_fifo_read_idx;
+                std::memcpy(dest, src, copy_samples * sizeof(float));
+                if (copy_samples < n_vec) {
+                    std::memset(dest + copy_samples, 0, (n_vec - copy_samples) * sizeof(float));
+                }
+            } else {
+                std::memset(dest, 0, n_vec * sizeof(float));
+            }
+        }
+    }
+
+    m_decode_gen_fifo_read_idx += copy_samples;
+    if (fifo_channels > 0 && m_decode_gen_fifo_read_idx >= m_decode_gen_fifo[0].size()) {
+        for (auto& ch : m_decode_gen_fifo)
+            ch.clear();
+        m_decode_gen_fifo_read_idx = 0;
+    }
+}
+
+auto TorchBackend::has_prior_decode() -> bool {
+    return (has_method("prior") || has_method("generate")) && has_method("decode");
+}
+
+auto TorchBackend::has_autoencode() -> bool {
+    return has_method("encode") && has_method("decode");
+}
+
+auto TorchBackend::get_plugin_modes() -> std::vector<std::string> {
+    std::vector<std::string> modes;
+    if (!is_loaded())
+        return modes;
+
+    if (has_method("forward") || (has_method("encode") && has_method("decode"))) {
+        modes.push_back("forward");
+    }
+    if (has_method("decode")) {
+        modes.push_back("decode gen");
+    }
+    if (has_method("prior")) {
+        modes.push_back("prior");
+    } else if (has_method("generate")) {
+        modes.push_back("generate");
+    }
+
+    // If none of the known modes match, fallback to available methods
+    if (modes.empty()) {
+        for (const auto& m : m_available_methods) {
+            modes.push_back(m);
+        }
+    }
+
+    return modes;
+}
+
+auto TorchBackend::get_mode_params(std::string mode) -> std::vector<int> {
+    if (mode == "forward") {
+        if (has_method("forward")) {
+            return get_method_params("forward");
+        } else if (has_method("encode") && has_method("decode")) {
+            auto ep = get_method_params("encode");
+            auto dp = get_method_params("decode");
+            if (ep.size() >= 4 && dp.size() >= 4) {
+                return {ep[0], ep[1], dp[2], dp[3]};
+            }
+        }
+    }
+    if ((mode == "decode gen" || mode == "prior" || mode == "generate") && has_method("decode")) {
+        auto dp = get_method_params("decode");
+        if (dp.size() >= 4) {
+            // 0 inputs, audio out channels from decode
+            return {0, 1, dp[2], dp[3]};
+        }
+    }
+    return get_method_params(mode);
+}
+
+auto TorchBackend::load(std::string path, double sample_rate, const std::string* target_method)
+    -> int {
+    try {
+        auto model = torch::jit::load(path);
+        if (target_method != nullptr) {
+            if (!(*target_method).empty()) {
+                // if target_method is not null, check if loaded model has it
+                auto locked_model = LockedModel();
+                locked_model.model = &model;
+                auto methods = get_available_methods(&locked_model);
+                if (std::find(methods.begin(), methods.end(), *target_method) == methods.end()) {
+                    throw "path " + path + " does not contain target method " + (*target_method);
+                }
+            }
+        }
+        model.eval();
+        model.to(m_device);
+
+        std::unique_lock<std::mutex> model_lock(m_model_mutex);
+        m_model = model;
+        model_lock.unlock();
+
+        m_available_methods = get_available_methods();
+        m_buffer_attributes = retrieve_buffer_attributes();
+        m_path = path;
+        set_sample_rate(sample_rate);
+        m_loaded = 1;
+        clear_decode_gen_fifo();
+
+        // Cache original weights and parameter tensor handles for bending / reset
+        m_original_weights.clear();
+        m_parameter_cache.clear();
+        for (const auto& layer : m_model.named_parameters()) {
+            m_parameter_cache[layer.name] = layer.value;
+            auto t = layer.value.contiguous().to(CPU);
+            m_original_weights[layer.name] =
+                std::vector<float>(t.data_ptr<float>(), t.data_ptr<float>() + t.numel());
+        }
+
+        // Warm up model execution to pre-compile MPS / CPU kernels and prevent audio callback
+        // dropouts
+        try {
+            int warm_in_ch = 1;
+            int warm_out_ch = 1;
+            auto fwd_p = get_method_params("forward");
+            if (fwd_p.size() >= 3) {
+                warm_in_ch = std::max(1, fwd_p[0]);
+                warm_out_ch = std::max(1, fwd_p[2]);
+            } else {
+                auto enc_p = get_method_params("encode");
+                auto dec_p = get_method_params("decode");
+                if (!enc_p.empty())
+                    warm_in_ch = std::max(1, enc_p[0]);
+                if (dec_p.size() >= 3)
+                    warm_out_ch = std::max(1, dec_p[2]);
+            }
+            int warm_vec = 2048;
+            std::vector<std::vector<float>> dummy_in(warm_in_ch,
+                                                     std::vector<float>(warm_vec, 0.0f));
+            std::vector<std::vector<float>> dummy_out(warm_out_ch,
+                                                      std::vector<float>(warm_vec, 0.0f));
+            std::vector<float*> in_ptrs(warm_in_ch);
+            std::vector<float*> out_ptrs(warm_out_ch);
+            for (int c = 0; c < warm_in_ch; ++c)
+                in_ptrs[c] = dummy_in[c].data();
+            for (int c = 0; c < warm_out_ch; ++c)
+                out_ptrs[c] = dummy_out[c].data();
+
+            if (has_method("forward") || (has_method("encode") && has_method("decode"))) {
+                perform_forward(in_ptrs, out_ptrs, 1, warm_out_ch, warm_vec, nullptr);
+            } else if (has_method("decode")) {
+                perform_decode_gen(out_ptrs, 1, warm_out_ch, warm_vec, nullptr);
+            }
+            clear_decode_gen_fifo();
+        } catch (...) {
+        }
+
+        m_last_error.clear();
+        return 0;
+    } catch (const std::exception& e) {
+        m_last_error = "problem loading model " + path + ". Exception : " + e.what();
+        std::cerr << "[TorchBackend] " << m_last_error << std::endl;
+        m_loaded = 0;
+        return -1;
+    } catch (const std::string& s) {
+        m_last_error = s;
+        std::cerr << "[TorchBackend] " << m_last_error << std::endl;
+        m_loaded = 0;
+        return -1;
+    } catch (...) {
+        m_last_error = "Unknown error loading TorchScript model: " + path;
+        std::cerr << "[TorchBackend] " << m_last_error << std::endl;
+        m_loaded = 0;
+        return -1;
+    }
+}
+
+auto TorchBackend::set_sample_rate(double sample_rate) -> void {
+    m_sr = sample_rate;
+    if (has_method("set_sample_rate")) {
+        std::unique_lock<std::mutex> model_lock(m_model_mutex);
+        auto args = empty_args();
+        args.push_back((int)sample_rate);
+        auto kwargs = empty_kwargs();
+        std::string method_name = "set_sample_rate";
+        try {
+            m_model.get_method(method_name)(args, kwargs);
+        } catch (...) {
+        }
+        model_lock.unlock();
+    }
+}
+
+auto TorchBackend::get_sample_rate() -> double {
+    if (!m_loaded)
+        return m_sr > 0 ? m_sr : 44100.0;
+    {
+        std::unique_lock<std::mutex> model_lock(m_model_mutex);
+        if (m_model.find_method("get_sample_rate")) {
+            auto args = empty_args();
+            auto kwargs = empty_kwargs();
+            try {
+                auto res = m_model.get_method("get_sample_rate")(args, kwargs);
+                if (res.isInt()) {
+                    int64_t sr = res.toInt();
+                    if (sr > 0)
+                        return (double)sr;
+                } else if (res.isDouble()) {
+                    double sr = res.toDouble();
+                    if (sr > 0)
+                        return sr;
+                }
+            } catch (...) {
+            }
+        }
+        for (const char* attr_name : {"sr", "sampling_rate", "sample_rate"}) {
+            try {
+                if (m_model.hasattr(attr_name)) {
+                    auto val = m_model.attr(attr_name);
+                    if (val.isInt()) {
+                        int64_t sr = val.toInt();
+                        if (sr > 0)
+                            return (double)sr;
+                    } else if (val.isDouble()) {
+                        double sr = val.toDouble();
+                        if (sr > 0)
+                            return sr;
+                    } else if (val.isTensor()) {
+                        auto t = val.toTensor();
+                        if (t.numel() == 1) {
+                            double sr = t.item<double>();
+                            if (sr > 0)
+                                return sr;
+                        }
+                    }
+                }
+            } catch (...) {
+            }
+        }
+        try {
+            for (const auto& buf : m_model.named_buffers()) {
+                if (buf.name.find("sampling_rate") != std::string::npos ||
+                    buf.name.find("sample_rate") != std::string::npos) {
+                    if (buf.value.numel() == 1) {
+                        int64_t sr = buf.value.item<int64_t>();
+                        if (sr > 0)
+                            return (double)sr;
+                    }
+                }
+            }
+        } catch (...) {
+        }
+    }
+    if (get_higher_ratio() == 320)
+        return 24000.0;
+    return m_sr > 0 ? m_sr : 44100.0;
+}
+
+auto TorchBackend::reload() -> int {
+    if (m_path.empty())
+        return -1;
+    auto return_code = load(m_path, m_sr);
+    return return_code;
+}
+
+auto TorchBackend::has_method(std::string method_name) -> bool {
+    if (!is_loaded()) {
+        return false;
+    }
+    if (!m_available_methods.empty()) {
+        return std::find(m_available_methods.begin(), m_available_methods.end(), method_name) !=
+               m_available_methods.end();
+    }
+    std::unique_lock<std::mutex> model_lock(m_model_mutex);
+    for (const auto& m : m_model.get_methods()) {
+        if (m.name() == method_name)
+            return true;
+    }
+    return false;
+}
+
+auto TorchBackend::has_settable_attribute(std::string attribute) -> bool {
+    for (const auto& a : get_settable_attributes()) {
+        if (a == attribute)
+            return true;
+    }
+    return false;
+}
+
+auto TorchBackend::get_available_methods(LockedModel* target_model) -> std::vector<std::string> {
+    std::vector<std::string> methods;
+    torch::jit::script::Module* model;
+    std::mutex* mutex;
+    if (target_model == nullptr) {
+        model = &m_model;
+        mutex = &m_model_mutex;
+    } else {
+        model = target_model->model;
+        mutex = &target_model->mutex;
+    }
+    try {
+        std::vector<c10::IValue> dumb_input = {};
+        std::unique_lock<std::mutex> model_lock(*mutex);
+        auto methods_from_model = model->get_method("get_methods")(dumb_input).toList();
+        model_lock.unlock();
+
+        for (int i = 0; i < methods_from_model.size(); i++) {
+            methods.push_back(methods_from_model.get(i).toStringRef());
+        }
+    } catch (...) {
+        std::unique_lock<std::mutex> model_lock(*mutex);
+        for (const auto& m : model->get_methods()) {
+            try {
+                auto method_params = model->attr(m.name() + "_params");
+                methods.push_back(m.name());
+            } catch (...) {
+            }
+        }
+        model_lock.unlock();
+    }
+    return methods;
+}
+
+auto TorchBackend::get_available_attributes() -> std::vector<std::string> {
+    std::vector<std::string> attributes;
+    std::unique_lock<std::mutex> model_lock(m_model_mutex);
+    for (const auto& attribute : m_model.named_attributes())
+        attributes.push_back(attribute.name);
+    return attributes;
+}
+
+auto TorchBackend::get_settable_attributes() -> std::vector<std::string> {
+    std::vector<std::string> attributes;
+    try {
+        std::vector<c10::IValue> dumb_input = {};
+        std::unique_lock<std::mutex> model_lock(m_model_mutex);
+        auto methods_from_model = m_model.get_method("get_attributes")(dumb_input).toList();
+        model_lock.unlock();
+        for (int i = 0; i < methods_from_model.size(); i++) {
+            auto attr_name = methods_from_model.get(i).toStringRef();
+            if (attr_name != "none") {
+                attributes.push_back(attr_name);
+            }
+        }
+    } catch (...) {
+        std::unique_lock<std::mutex> model_lock(m_model_mutex);
+        for (const auto& a : m_model.named_attributes()) {
+            try {
+                auto method_params = m_model.attr(a.name + "_params");
+                if (a.name != "none") {
+                    attributes.push_back(a.name);
+                }
+            } catch (...) {
+            }
+        }
+        model_lock.unlock();
+    }
+    return attributes;
+}
+
+auto TorchBackend::get_attribute(std::string attribute_name) -> std::vector<c10::IValue> {
+    std::string attribute_getter_name = "get_" + attribute_name;
+    std::unique_lock<std::mutex> model_lock(m_model_mutex);
+    try {
+        auto attribute_getter = m_model.get_method(attribute_getter_name);
+    } catch (...) {
+        model_lock.unlock();
+        throw "getter for attribute " + attribute_name + " not found in model";
+    }
+    std::vector<c10::IValue> getter_inputs = {}, attributes;
+    auto kwargs = empty_kwargs();
+    try {
+        try {
+            auto output_list =
+                m_model.get_method(attribute_getter_name)(getter_inputs, kwargs).toList();
+            attributes = output_list.vec();
+        } catch (...) {
+            auto output_tuple_ref =
+                m_model.get_method(attribute_getter_name)(getter_inputs, kwargs).toTuple();
+            attributes = (*output_tuple_ref.get()).elements();
+        }
+    } catch (...) {
+        model_lock.unlock();
+        throw("could not access method " + attribute_getter_name + " from original script.");
+    }
+    model_lock.unlock();
+    return attributes;
+}
+
+auto TorchBackend::get_attribute_as_string(std::string attribute_name) -> std::string {
+    std::vector<c10::IValue> getter_outputs = get_attribute(attribute_name);
+    // finstringd arguments
+    torch::Tensor setter_params;
+    std::unique_lock<std::mutex> model_lock(m_model_mutex);
+    try {
+        setter_params = m_model.attr(attribute_name + "_params").toTensor();
+        model_lock.unlock();
+    } catch (...) {
+        model_lock.unlock();
+        throw "parameters to get attribute " + attribute_name + " not found in model";
+    }
+    std::string current_attr = "";
+    for (int i = 0; i < setter_params.size(0); i++) {
+        int current_id = setter_params[i].item().toInt();
+        switch (current_id) {
+            // bool case
+            case 0: {
+                current_attr += (getter_outputs[i].toBool()) ? "true" : "false";
+                break;
+            }
+            // int case
+            case 1: {
+                current_attr += std::to_string(getter_outputs[i].toInt());
+                break;
+            }
+            // float case
+            case 2: {
+                float result = getter_outputs[i].to<float>();
+                current_attr += std::to_string(result);
+                break;
+            }
+            // str case
+            case 3: {
+                current_attr += getter_outputs[i].toStringRef();
+                break;
+            }
+            // tensor case
+            case 4: {
+                auto tensor = getter_outputs[i].toTensor();
+                current_attr += tensor_to_str(tensor);
+                break;
+            }
+            case 5: {
+                current_attr += getter_outputs[i].toStringRef();
+                break;
+            }
+            default: {
+                throw "bad type id : " + std::to_string(current_id) + " at index " +
+                    std::to_string(i);
+                break;
+            }
+        }
+        if (i < setter_params.size(0) - 1)
+            current_attr += " ";
+    }
+    return current_attr;
+}
+
+auto TorchBackend::set_attribute(std::string attribute_name,
+                                 std::vector<std::string> attribute_args,
+                                 const TorchBackend::BufferMap& buffer_array) -> void {
+    // find setter
+    std::string attribute_setter_name = "set_" + attribute_name;
+    std::unique_lock<std::mutex> model_lock(m_model_mutex);
+    try {
+        auto attribute_setter = m_model.get_method(attribute_setter_name);
+    } catch (...) {
+        model_lock.unlock();
+        throw "setter for attribute " + attribute_name + " not found in model";
+    }
+    // find arguments
+    torch::Tensor setter_params;
+    try {
+        setter_params = m_model.attr(attribute_name + "_params").toTensor();
+    } catch (...) {
+        model_lock.unlock();
+        throw "parameters to set attribute " + attribute_name + " not found in model";
+    }
+    model_lock.unlock();
+
+    // check attribute params
+    int setter_elements = setter_params.numel();
+    if (attribute_args.size() != setter_elements) {
+        std::stringstream exception;
+        exception << "wrong number of elements : setter seems to have "
+                  << std::to_string(setter_params.numel());
+        exception << ", but " << attribute_args.size() << " was given";
+        throw exception.str();
+    }
+
+    // process inputs
+    std::vector<c10::IValue> setter_inputs = {};
+    auto n_args = setter_params.size(0);
+    for (int i = 0; i < n_args; i++) {
+        int current_id = setter_params[i].item().toInt();
+        switch (current_id) {
+            // bool case
+            case 0:
+                setter_inputs.push_back(c10::IValue(to_bool(attribute_args[i])));
+                break;
+            // int case
+            case 1:
+                setter_inputs.push_back(c10::IValue(to_int(attribute_args[i])));
+                break;
+            // float case
+            case 2:
+                setter_inputs.push_back(c10::IValue(to_float(attribute_args[i])));
+                break;
+            // str case
+            case 3:
+                setter_inputs.push_back(c10::IValue(attribute_args[i]));
+                break;
+            // tensor case
+            case 4: {
+                auto buffer_name = get_buffer_name(attribute_name, i);
+                if (!buffer_array.contains(buffer_name)) {
+                    throw std::string("buffer for argument ") + buffer_name +
+                        std::string(" not found. Did you initialise it?");
+                } else {
+                    auto buffer = buffer_array.at(buffer_name);
+                    auto buf_tensor = static_buffer_to_tensor(buffer).index({0});
+                    setter_inputs.push_back(buf_tensor.clone());
+                }
+                break;
+            }
+            case 5: {
+                auto buffer_name = get_buffer_name(attribute_name, i);
+                if (!buffer_array.contains(buffer_name)) {
+                    throw std::string("buffer for argument ") + buffer_name +
+                        std::string(" not found. Did you initialise it?");
+                } else {
+                    auto buffer = buffer_array.at(buffer_name);
+                    update_buffer(buffer_name, buffer);
+                    setter_inputs.push_back(c10::IValue(buffer_name));
+                }
+                break;
+            }
+            default:
+                throw "bad type id : " + std::to_string(current_id) + "at index " +
+                    std::to_string(i);
+                break;
+        }
+    }
+    try {
+        std::unique_lock<std::mutex> model_lock(m_model_mutex);
+        auto kwargs = empty_kwargs();
+        auto setter_out = m_model.get_method(attribute_setter_name)(setter_inputs, kwargs);
+        model_lock.unlock();
+        int setter_result = setter_out.toInt();
+        if (setter_result != 0) {
+            throw "setter returned -1";
+        }
+    } catch (std::string& e) {
+        throw "setter for " + attribute_name + " failed : " + e;
+    } catch (std::exception& e) {
+        throw "setter for " + attribute_name + " failed : " + e.what();
+    } catch (...) {
+        throw "setter for " + attribute_name + " failed";
+    }
+}
+
+auto TorchBackend::get_method_params(std::string method) -> std::vector<int> {
+    std::vector<int> params;
+
+    if (std::find(m_available_methods.begin(), m_available_methods.end(), method) !=
+        m_available_methods.end()) {
+        try {
+            std::unique_lock<std::mutex> model_lock(m_model_mutex);
+            auto p = m_model.attr(method + "_params").toTensor();
+            model_lock.unlock();
+            for (int i(0); i < 4; i++)
+                params.push_back(p[i].item().to<int>());
+        } catch (...) {
+        }
+    }
+    return params;
+}
+
+auto TorchBackend::get_higher_ratio() -> int {
+    int higher_ratio = 1;
+    for (const auto& method : m_available_methods) {
+        auto params = get_method_params(method);
+        if (!params.size())
+            continue;  // METHOD NOT USABLE, SKIPPING
+        int max_ratio = std::max(params[1], params[3]);
+        higher_ratio = std::max(higher_ratio, max_ratio);
+    }
+    return higher_ratio;
+}
+
+auto TorchBackend::is_loaded() -> bool {
+    return m_loaded;
+}
+
+auto TorchBackend::use_gpu(bool value) -> void {
+    std::unique_lock<std::mutex> model_lock(m_model_mutex);
+    if (value) {
+        if (torch::hasCUDA()) {
+            std::cout << "sending model to cuda" << std::endl;
+            m_device = CUDA;
+        } else if (torch::hasMPS()) {
+            std::cout << "sending model to mps" << std::endl;
+            m_device = MPS;
+        } else {
+            std::cout << "sending model to cpu" << std::endl;
+            m_device = CPU;
+        }
+    } else {
+        m_device = CPU;
+    }
+    if (m_loaded) {
+        try {
+            m_model.to(m_device);
+        } catch (const std::exception& e) {
+            std::cerr << "[TorchBackend] Failed to move model to device: " << e.what() << std::endl;
+        }
+    }
+    model_lock.unlock();
+
+    if (m_loaded) {
+        try {
+            int warm_in_ch = 1;
+            int warm_out_ch = 1;
+            auto fwd_p = get_method_params("forward");
+            if (fwd_p.size() >= 3) {
+                warm_in_ch = std::max(1, fwd_p[0]);
+                warm_out_ch = std::max(1, fwd_p[2]);
+            } else {
+                auto enc_p = get_method_params("encode");
+                auto dec_p = get_method_params("decode");
+                if (!enc_p.empty())
+                    warm_in_ch = std::max(1, enc_p[0]);
+                if (dec_p.size() >= 3)
+                    warm_out_ch = std::max(1, dec_p[2]);
+            }
+            int warm_vec = 2048;
+            std::vector<std::vector<float>> dummy_in(warm_in_ch,
+                                                     std::vector<float>(warm_vec, 0.0f));
+            std::vector<std::vector<float>> dummy_out(warm_out_ch,
+                                                      std::vector<float>(warm_vec, 0.0f));
+            std::vector<float*> in_ptrs(warm_in_ch);
+            std::vector<float*> out_ptrs(warm_out_ch);
+            for (int c = 0; c < warm_in_ch; ++c)
+                in_ptrs[c] = dummy_in[c].data();
+            for (int c = 0; c < warm_out_ch; ++c)
+                out_ptrs[c] = dummy_out[c].data();
+
+            if (has_method("forward") || (has_method("encode") && has_method("decode"))) {
+                perform_forward(in_ptrs, out_ptrs, 1, warm_out_ch, warm_vec, nullptr);
+            } else if (has_method("decode")) {
+                perform_decode_gen(out_ptrs, 1, warm_out_ch, warm_vec, nullptr);
+            }
+            clear_decode_gen_fifo();
+        } catch (...) {
+        }
+    }
+}
+
+auto TorchBackend::get_buffer_name(std::string attribute_name, int attribute_elt_idx)
+    -> std::string {
+    return attribute_name + "#" + std::to_string(attribute_elt_idx);
+}
+
+auto TorchBackend::is_buffer_element_of_attribute(std::string attribute_name, int attribute_elt_idx)
+    -> bool {
+    std::string target_buffer_name = get_buffer_name(attribute_name, attribute_elt_idx);
+    // std::cout << "current registered buffers : " << m_buffer_attributes.size() << std::endl;
+    for (auto buffer_name : m_buffer_attributes) {
+        // std::cout << "target buffer name : " << target_buffer_name << "; compared buffer name : "
+        // << buffer_name << std::endl;
+        if (buffer_name == target_buffer_name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+auto TorchBackend::is_tensor_element_of_attribute(std::string attribute_name, int attribute_elt_idx)
+    -> bool {
+    auto attribute_params = m_model.attr(attribute_name + "_params").toTensor();
+    if (id_to_string_hash.at(attribute_params.item().toInt()) == "tensor") {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+auto TorchBackend::retrieve_buffer_attributes() -> std::vector<std::string> {
+    std::vector<std::string> buffer_names = {};
+    std::string getter_name = "get_buffer_attributes";
+    if (has_method(getter_name)) {
+        std::unique_lock<std::mutex> model_lock(m_model_mutex);
+        try {
+            auto model_method = m_model.get_method(getter_name);
+            auto model_out = model_method(empty_args(), empty_kwargs()).toList().vec();
+            for (int i = 0; i < model_out.size(); i++) {
+                // std::cout << "adding " << model_out[i].toStringRef() << " to buffer list" <<
+                // std::endl;
+                buffer_names.push_back(model_out[i].toStringRef());
+            }
+            model_lock.unlock();
+        } catch (const std::exception& e) {
+            model_lock.unlock();
+            std::cerr << "[TorchBackend] Error retrieving buffer attributes: " << e.what()
+                      << std::endl;
+        }
+    }
+    return buffer_names;
+}
+
+auto TorchBackend::get_buffer_attributes() -> std::vector<std::string> {
+    return m_buffer_attributes;
+}
+
+auto TorchBackend::reset_buffer(std::string buffer_name) -> int {
+    std::string clear_method = "clear_buffer_attribute";
+    auto args = empty_args();
+    auto kwargs = empty_kwargs();
+    args.push_back(buffer_name);
+    std::unique_lock<std::mutex> model_lock(m_model_mutex);
+    auto model_out = m_model.get_method(clear_method)(args, kwargs);
+    int result = model_out.toInt();
+    return result;
+}
+
+auto TorchBackend::update_buffer(std::string buffer_name, StaticBuffer<float>& buffer) -> int {
+    std::string setter_method = "set_buffer_attribute";
+    auto args = empty_args();
+    auto kwargs = empty_kwargs();
+    auto tensor = static_buffer_to_tensor(buffer).to(m_device);
+    auto sr = static_cast<int>(buffer.sr());
+    // auto tensor_min = tensor.min(); auto tensor_max = tensor.max();
+    auto tensor_size = {tensor.size(0), tensor.size(1)};
+    args.push_back(buffer_name);
+    args.push_back(tensor);
+    args.push_back(sr);
+    std::unique_lock<std::mutex> model_lock(m_model_mutex);
+    auto model_out = m_model.get_method(setter_method)(args, kwargs);
+    model_lock.unlock();
+    int result = model_out.toInt();
+    return result;
+}
+
+auto TorchBackend::get_model_info() -> ModelInfo {
+    if (!m_loaded) {
+        throw "no model loaded; cannot retrieve model information";
+    }
+
+    auto methods = get_available_methods();
+    auto attributes = get_settable_attributes();
+    auto method_dict = ModelInfo::MethodDict();
+    auto attribute_dict = ModelInfo::AttributeDict();
+    std::unique_lock<std::mutex> model_lock(m_model_mutex);
+    model_lock.unlock();
+    try {
+        for (auto method : methods) {
+            auto method_properties = MethodProperties();
+            model_lock.lock();
+            auto setter_params = m_model.attr(method + "_params").toTensor();
+            model_lock.unlock();
+            method_properties.name = method;
+            method_properties.channels_in = setter_params[0].item().toInt();
+            method_properties.ratio_in = setter_params[1].item().toInt();
+            method_properties.channels_out = setter_params[2].item().toInt();
+            method_properties.ratio_out = setter_params[3].item().toInt();
+            method_dict.insert({method, method_properties});
+        }
+        for (auto attribute : attributes) {
+            model_lock.lock();
+            auto attribute_params = m_model.attr(attribute + "_params").toTensor();
+            model_lock.unlock();
+            auto attribute_properties = AttributeProperties();
+            attribute_properties.name = attribute;
+            auto attribute_types = std::vector<std::string>();
+            for (int i = 0; i < attribute_params.size(0); i++) {
+                auto param_idx = attribute_params[i].item().toInt();
+                auto param_str = this->id_to_string_hash.at(param_idx);
+                attribute_types.push_back(param_str);
+            }
+            attribute_properties.attribute_types = attribute_types;
+            attribute_dict.insert({attribute, attribute_properties});
+        }
+        auto model_info = ModelInfo();
+        model_info.method_properties = method_dict;
+        model_info.attribute_properties = attribute_dict;
+        return model_info;
+    } catch (std::exception& e) {
+        model_lock.unlock();
+        throw "error fetching model information for model " + m_path +
+            ". Caught error : " + e.what();
+    }
+}
+
+auto TorchBackend::get_available_layers() -> std::vector<std::string> {
+    std::vector<std::string> layers;
+    std::unique_lock<std::mutex> model_lock(m_model_mutex);
+    for (const auto& layer : m_model.named_parameters())
+        layers.push_back(layer.name);
+    model_lock.unlock();
+    return layers;
+}
+
+auto TorchBackend::get_layer_weights(std::string layer_name) -> std::vector<float> {
+    std::unique_lock<std::mutex> model_lock(m_model_mutex);
+    torch::Tensor m_tensor;
+    for (const auto& layer : m_model.named_parameters())
+        if (layer.name == layer_name)
+            m_tensor = layer.value.contiguous().to(CPU);
+    model_lock.unlock();
+
+    auto m_weights =
+        std::vector(m_tensor.data_ptr<float>(), m_tensor.data_ptr<float>() + m_tensor.numel());
+    return m_weights;
+}
+
+auto TorchBackend::get_layer_shape(std::string layer_name) -> std::vector<int64_t> {
+    std::unique_lock<std::mutex> model_lock(m_model_mutex);
+    std::vector<int64_t> shape;
+    for (const auto& layer : m_model.named_parameters()) {
+        if (layer.name == layer_name) {
+            auto sizes = layer.value.sizes();
+            shape.assign(sizes.begin(), sizes.end());
+            break;
+        }
+    }
+    return shape;
+}
+
+auto TorchBackend::set_layer_weights(std::string layer_name, const std::vector<float>& weights)
+    -> void {
+    std::unique_lock<std::mutex> model_lock(m_model_mutex);
+
+    // O(1) parameter lookup using cached tensor references
+    auto it = m_parameter_cache.find(layer_name);
+    if (it != m_parameter_cache.end()) {
+        if ((int64_t)weights.size() < it->second.numel())
+            return;
+        torch::NoGradGuard no_grad;
+        it->second.copy_(torch::from_blob(const_cast<float*>(weights.data()), it->second.sizes()));
+        return;
+    }
+
+    // Fallback linear search in case cache was bypassed
+    for (const auto& layer : m_model.named_parameters()) {
+        if (layer.name == layer_name) {
+            if ((int64_t)weights.size() < layer.value.numel())
+                return;
+            torch::NoGradGuard no_grad;
+            layer.value.copy_(
+                torch::from_blob(const_cast<float*>(weights.data()), layer.value.sizes()));
+            m_parameter_cache[layer_name] = layer.value;
+            break;
+        }
+    }
+}
+
+auto TorchBackend::get_original_layer_weights(std::string layer_name) -> std::vector<float> {
+    auto it = m_original_weights.find(layer_name);
+    if (it != m_original_weights.end()) {
+        return it->second;
+    }
+    return get_layer_weights(layer_name);
+}
+
+auto TorchBackend::reset_layer_weights(std::string layer_name) -> void {
+    auto it = m_original_weights.find(layer_name);
+    if (it != m_original_weights.end()) {
+        set_layer_weights(layer_name, it->second);
+    }
+}
+
+auto TorchBackend::reset_all_layer_weights() -> void {
+    for (const auto& pair : m_original_weights) {
+        set_layer_weights(pair.first, pair.second);
+    }
+}
+
+auto TorchBackend::save_model(std::string path) -> int {
+    std::unique_lock<std::mutex> model_lock(m_model_mutex);
+    try {
+        m_model.save(path);
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to save model: " << e.what() << '\n';
+        return -1;
+    }
+}

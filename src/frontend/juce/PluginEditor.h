@@ -9,12 +9,11 @@
 #include "ui/LatentTerrainComponent.h"
 #include <vector>
 
-class NetBenderAudioProcessorEditor  : public juce::AudioProcessorEditor,
-                                       public juce::ComboBox::Listener,
-                                       public juce::Slider::Listener,
-                                       public juce::Button::Listener,
-                                       private juce::Timer
-{
+class NetBenderAudioProcessorEditor : public juce::AudioProcessorEditor,
+                                      public juce::ComboBox::Listener,
+                                      public juce::Slider::Listener,
+                                      public juce::Button::Listener,
+                                      private juce::Timer {
 public:
     NetBenderAudioProcessorEditor(NetBenderAudioProcessor&);
     ~NetBenderAudioProcessorEditor() override;
@@ -121,6 +120,7 @@ public:
 
 private:
     auto timerCallback() -> void override;
+    auto sync_from_processor_state() -> void;
     auto update_model_info() -> void;
     auto select_layer(const juce::String& layer_name) -> void;
     auto apply_knob_bending() -> void;
@@ -150,19 +150,20 @@ private:
     std::vector<float> originalWeights;
     std::vector<float> currentWeights;
     std::vector<float> baseDrawnWeights;
-    double lastKnobScale { 1.0 };
-    double lastKnobOffset { 0.0 };
-    float lastKnownScale { 1.0f };
-    float lastKnownOffset { 0.0f };
-    float lastKnownHeat { 0.0f };
-    float lastKnownMemory { 0.8f };
-    float lastKnownDryWet { 1.0f };
+    double lastKnobScale{1.0};
+    double lastKnobOffset{0.0};
+    float lastKnownScale{1.0f};
+    float lastKnownOffset{0.0f};
+    float lastKnownHeat{0.0f};
+    float lastKnownMemory{0.8f};
+    float lastKnownDryWet{1.0f};
     std::string lastBridgeSource;
-    float lastBridgeDepth { -1.0f };
-    bool lastBridgeEnabled { false };
-    float lastTargetScale { -999.0f };
-    float lastTargetOffset { -999.0f };
-    bool targetCurveDirty { true };
+    float lastBridgeDepth{-1.0f};
+    bool lastBridgeEnabled{false};
+    float lastTargetScale{-999.0f};
+    float lastTargetOffset{-999.0f};
+    bool targetCurveDirty{true};
+    uint64_t lastObservedStateRevision{0};
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (NetBenderAudioProcessorEditor)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(NetBenderAudioProcessorEditor)
 };

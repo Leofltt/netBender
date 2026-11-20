@@ -46,7 +46,8 @@ HeaderComponent::HeaderComponent() {
     dry_wet_slider.setRange(0.0, 1.0, 0.01);
     dry_wet_slider.setValue(1.0);
     dry_wet_slider.setSliderStyle(juce::Slider::LinearBar);
-    dry_wet_slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, slider_box_width_compact, slider_box_height_compact);
+    dry_wet_slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, slider_box_width_compact,
+                                   slider_box_height_compact);
     dry_wet_slider.setColour(juce::Slider::trackColourId, violet);
     addAndMakeVisible(dry_wet_slider);
 

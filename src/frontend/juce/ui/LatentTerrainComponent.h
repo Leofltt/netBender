@@ -20,7 +20,9 @@ public:
     auto getCoordY() const -> float { return get_coord_y(); }
 
     auto set_enabled_state(bool is_enabled, bool has_bottleneck) -> void;
-    auto setEnabledState(bool isEnabled, bool hasBottleneck) -> void { set_enabled_state(isEnabled, hasBottleneck); }
+    auto setEnabledState(bool isEnabled, bool hasBottleneck) -> void {
+        set_enabled_state(isEnabled, hasBottleneck);
+    }
 
     auto paint(juce::Graphics& g) -> void override;
     auto mouseDown(const juce::MouseEvent& e) -> void override;
@@ -32,7 +34,10 @@ private:
     auto record_trail_point(float px, float py) -> void;
     auto update_from_mouse(const juce::MouseEvent& e) -> void;
 
-    struct Point2D { float x; float y; };
+    struct Point2D {
+        float x;
+        float y;
+    };
 
     float m_x{0.0f};
     float m_y{0.0f};

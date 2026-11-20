@@ -8,30 +8,30 @@
 // these macros expand cleanly to no-ops.
 
 #if defined(__has_cpp_attribute)
-  #if __has_cpp_attribute(clang::nonblocking)
-    #define NETBENDER_NONBLOCKING [[clang::nonblocking]]
-  #else
-    #define NETBENDER_NONBLOCKING
-  #endif
-  #if __has_cpp_attribute(clang::blocking)
-    #define NETBENDER_BLOCKING [[clang::blocking]]
-  #else
-    #define NETBENDER_BLOCKING
-  #endif
+#if __has_cpp_attribute(clang::nonblocking)
+#define NETBENDER_NONBLOCKING [[clang::nonblocking]]
 #else
-  #define NETBENDER_NONBLOCKING
-  #define NETBENDER_BLOCKING
+#define NETBENDER_NONBLOCKING
+#endif
+#if __has_cpp_attribute(clang::blocking)
+#define NETBENDER_BLOCKING [[clang::blocking]]
+#else
+#define NETBENDER_BLOCKING
+#endif
+#else
+#define NETBENDER_NONBLOCKING
+#define NETBENDER_BLOCKING
 #endif
 
 #if defined(__has_feature)
-  #if __has_feature(realtime_sanitizer)
-    #define NETBENDER_HAS_RTSAN 1
-    #include <sanitizer/rtsan_interface.h>
-  #else
-    #define NETBENDER_HAS_RTSAN 0
-  #endif
+#if __has_feature(realtime_sanitizer)
+#define NETBENDER_HAS_RTSAN 1
+#include <sanitizer/rtsan_interface.h>
 #else
-  #define NETBENDER_HAS_RTSAN 0
+#define NETBENDER_HAS_RTSAN 0
+#endif
+#else
+#define NETBENDER_HAS_RTSAN 0
 #endif
 
 namespace netbender::rtsan {
@@ -54,4 +54,4 @@ public:
 };
 #endif
 
-} // namespace netbender::rtsan
+}  // namespace netbender::rtsan

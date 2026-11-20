@@ -7,9 +7,10 @@
 #include <mutex>
 
 enum class LatentMode {
-    FourierOrbit = 0, // 2D XY mapped via Random Fourier Features into multidimensional latent space
-    LatentSlew,       // Temporal inertia / lowpass filter on latent activations
-    Quantize          // Latent space bitcrushing / discretization
+    FourierOrbit =
+        0,       // 2D XY mapped via Random Fourier Features into multidimensional latent space
+    LatentSlew,  // Temporal inertia / lowpass filter on latent activations
+    Quantize     // Latent space bitcrushing / discretization
 };
 
 class LatentTerrainEngine {
@@ -34,19 +35,20 @@ public:
 
     auto reset() -> void;
 
-    // Applies Random Fourier Feature projection, slew filter, or quantization to latent tensor buffer
-    auto apply_hook(IBackend::LatentBuffer& buf, float override_x = -999.0f, float override_y = -999.0f, float override_depth = -999.0f) -> void;
+    // Applies Random Fourier Feature projection, slew filter, or quantization to latent tensor
+    // buffer
+    auto apply_hook(IBackend::LatentBuffer& buf, float override_x = -999.0f,
+                    float override_y = -999.0f, float override_depth = -999.0f) -> void;
 
 private:
-    std::atomic<bool>       m_enabled { false };
-    std::atomic<LatentMode> m_mode { LatentMode::FourierOrbit };
-    std::atomic<float>      m_x { 0.0f };
-    std::atomic<float>      m_y { 0.0f };
-    std::atomic<float>      m_depth { 0.5f };
-    std::atomic<float>      m_slew { 0.0f };
+    std::atomic<bool> m_enabled{false};
+    std::atomic<LatentMode> m_mode{LatentMode::FourierOrbit};
+    std::atomic<float> m_x{0.0f};
+    std::atomic<float> m_y{0.0f};
+    std::atomic<float> m_depth{0.5f};
+    std::atomic<float> m_slew{0.0f};
 
-    std::vector<float>      m_prev_latent_buffer;
-    std::vector<float>      m_rff_matrix;
-    int                     m_cached_latent_dim { 0 };
+    std::vector<float> m_prev_latent_buffer;
+    std::vector<float> m_rff_matrix;
+    int m_cached_latent_dim{0};
 };
-

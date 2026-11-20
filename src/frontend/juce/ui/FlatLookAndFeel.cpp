@@ -58,23 +58,25 @@ auto FlatLookAndFeel::drawButtonBackground(juce::Graphics& g, juce::Button& butt
 }
 
 auto FlatLookAndFeel::drawButtonText(juce::Graphics& g, juce::TextButton& button,
-                                     bool /*shouldDrawButtonAsHighlighted*/, bool /*shouldDrawButtonAsDown*/) -> void {
+                                     bool /*shouldDrawButtonAsHighlighted*/,
+                                     bool /*shouldDrawButtonAsDown*/) -> void {
     auto font = getTextButtonFont(button, button.getHeight());
     g.setFont(font);
-    g.setColour(button.findColour(button.getToggleState() ? juce::TextButton::textColourOnId
-                                                          : juce::TextButton::textColourOffId)
+    g.setColour(button
+                    .findColour(button.getToggleState() ? juce::TextButton::textColourOnId
+                                                        : juce::TextButton::textColourOffId)
                     .withMultipliedAlpha(button.isEnabled() ? 1.0f : 0.5f));
 
     auto yIndent = juce::jmin(4, button.proportionOfHeight(0.3f));
-    g.drawFittedText(button.getButtonText(),
-                     4, yIndent, button.getWidth() - 8, button.getHeight() - yIndent * 2,
-                     juce::Justification::centred, 2);
+    g.drawFittedText(button.getButtonText(), 4, yIndent, button.getWidth() - 8,
+                     button.getHeight() - yIndent * 2, juce::Justification::centred, 2);
 }
 
 auto FlatLookAndFeel::drawComboBox(juce::Graphics& g, int width, int height, bool isButtonDown,
-                                  int /*buttonX*/, int /*buttonY*/, int /*buttonW*/, int /*buttonH*/,
-                                  juce::ComboBox& box) -> void {
-    auto bounds = juce::Rectangle<float>(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height));
+                                   int /*buttonX*/, int /*buttonY*/, int /*buttonW*/,
+                                   int /*buttonH*/, juce::ComboBox& box) -> void {
+    auto bounds =
+        juce::Rectangle<float>(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height));
 
     auto bg = box.findColour(juce::ComboBox::backgroundColourId);
     if (!box.isEnabled()) {
@@ -92,15 +94,17 @@ auto FlatLookAndFeel::drawComboBox(juce::Graphics& g, int width, int height, boo
         g.fillRect(bounds);
     }
 
-    auto outlineCol = box.hasKeyboardFocus(false)
-                        ? box.findColour(juce::ComboBox::focusedOutlineColourId)
-                        : (box.isMouseOver() ? box.findColour(juce::ComboBox::outlineColourId).brighter(0.3f)
-                                             : box.findColour(juce::ComboBox::outlineColourId));
+    auto outlineCol =
+        box.hasKeyboardFocus(false)
+            ? box.findColour(juce::ComboBox::focusedOutlineColourId)
+            : (box.isMouseOver() ? box.findColour(juce::ComboBox::outlineColourId).brighter(0.3f)
+                                 : box.findColour(juce::ComboBox::outlineColourId));
     g.setColour(outlineCol);
     g.drawRect(bounds, 1.0f);
 
     float arrowZoneWidth = 22.0f;
-    juce::Rectangle<float> arrowZone(static_cast<float>(width) - arrowZoneWidth, 0.0f, arrowZoneWidth, static_cast<float>(height));
+    juce::Rectangle<float> arrowZone(static_cast<float>(width) - arrowZoneWidth, 0.0f,
+                                     arrowZoneWidth, static_cast<float>(height));
 
     juce::Path arrow;
     float arrowW = 8.0f;
@@ -111,14 +115,17 @@ auto FlatLookAndFeel::drawComboBox(juce::Graphics& g, int width, int height, boo
     arrow.lineTo(cx, cy + arrowH * 0.5f);
     arrow.lineTo(cx + arrowW * 0.5f, cy - arrowH * 0.5f);
 
-    auto arrowCol = box.findColour(juce::ComboBox::arrowColourId)
-                       .withMultipliedAlpha(box.isEnabled() ? (box.isMouseOver() ? 1.0f : 0.8f) : 0.25f);
+    auto arrowCol =
+        box.findColour(juce::ComboBox::arrowColourId)
+            .withMultipliedAlpha(box.isEnabled() ? (box.isMouseOver() ? 1.0f : 0.8f) : 0.25f);
     g.setColour(arrowCol);
-    g.strokePath(arrow, juce::PathStrokeType(1.5f, juce::PathStrokeType::mitered, juce::PathStrokeType::square));
+    g.strokePath(arrow, juce::PathStrokeType(1.5f, juce::PathStrokeType::mitered,
+                                             juce::PathStrokeType::square));
 }
 
 auto FlatLookAndFeel::getComboBoxFont(juce::ComboBox& box) -> juce::Font {
-    return juce::Font(juce::FontOptions(juce::jlimit(11.0f, 13.0f, static_cast<float>(box.getHeight()) * 0.52f)));
+    return juce::Font(
+        juce::FontOptions(juce::jlimit(11.0f, 13.0f, static_cast<float>(box.getHeight()) * 0.52f)));
 }
 
 auto FlatLookAndFeel::positionComboBoxText(juce::ComboBox& box, juce::Label& label) -> void {
@@ -126,7 +133,7 @@ auto FlatLookAndFeel::positionComboBoxText(juce::ComboBox& box, juce::Label& lab
     label.setFont(getComboBoxFont(box));
     label.setJustificationType(juce::Justification::centredLeft);
     label.setColour(juce::Label::textColourId,
-                     box.findColour(juce::ComboBox::textColourId)
+                    box.findColour(juce::ComboBox::textColourId)
                         .withMultipliedAlpha(box.isEnabled() ? 1.0f : 0.5f));
 }
 
@@ -137,11 +144,12 @@ auto FlatLookAndFeel::drawPopupMenuBackground(juce::Graphics& g, int width, int 
 }
 
 auto FlatLookAndFeel::drawPopupMenuItem(juce::Graphics& g, const juce::Rectangle<int>& area,
-                                       const bool isSeparator, const bool isActive,
-                                       const bool isHighlighted, const bool isTicked,
-                                       const bool hasSubMenu, const juce::String& text,
-                                       const juce::String& /*shortcutKeyText*/,
-                                       const juce::Drawable* /*icon*/, const juce::Colour* const textColourToUse) -> void {
+                                        const bool isSeparator, const bool isActive,
+                                        const bool isHighlighted, const bool isTicked,
+                                        const bool hasSubMenu, const juce::String& text,
+                                        const juce::String& /*shortcutKeyText*/,
+                                        const juce::Drawable* /*icon*/,
+                                        const juce::Colour* const textColourToUse) -> void {
     if (isSeparator) {
         auto r = area.reduced(4, 0);
         r.removeFromTop(roundToInt((static_cast<float>(r.getHeight()) * 0.5f) - 0.5f));
@@ -189,7 +197,8 @@ auto FlatLookAndFeel::drawPopupMenuItem(juce::Graphics& g, const juce::Rectangle
     }
 }
 
-auto FlatLookAndFeel::drawPopupMenuUpDownArrow(juce::Graphics& g, int width, int height, bool isScrollUpArrow) -> void {
+auto FlatLookAndFeel::drawPopupMenuUpDownArrow(juce::Graphics& g, int width, int height,
+                                               bool isScrollUpArrow) -> void {
     g.setColour(findColour(juce::PopupMenu::backgroundColourId));
     g.fillRect(0, 0, width, height);
 
@@ -210,15 +219,14 @@ auto FlatLookAndFeel::drawPopupMenuUpDownArrow(juce::Graphics& g, int width, int
     }
 
     g.setColour(findColour(juce::ComboBox::arrowColourId));
-    g.strokePath(arrow, juce::PathStrokeType(1.5f, juce::PathStrokeType::mitered, juce::PathStrokeType::square));
+    g.strokePath(arrow, juce::PathStrokeType(1.5f, juce::PathStrokeType::mitered,
+                                             juce::PathStrokeType::square));
 }
 
-auto FlatLookAndFeel::drawTickBox(juce::Graphics& g, juce::Component& component,
-                                 float x, float y, float w, float h,
-                                 const bool ticked,
-                                 const bool isEnabled,
-                                 const bool shouldDrawButtonAsHighlighted,
-                                 const bool /*shouldDrawButtonAsDown*/) -> void {
+auto FlatLookAndFeel::drawTickBox(juce::Graphics& g, juce::Component& component, float x, float y,
+                                  float w, float h, const bool ticked, const bool isEnabled,
+                                  const bool shouldDrawButtonAsHighlighted,
+                                  const bool /*shouldDrawButtonAsDown*/) -> void {
     juce::Rectangle<float> tickBounds(x, y, w, h);
 
     g.setColour(UIConstants::Colors::surface_card);
@@ -246,8 +254,10 @@ auto FlatLookAndFeel::drawTickBox(juce::Graphics& g, juce::Component& component,
     }
 }
 
-auto FlatLookAndFeel::drawScrollbar(juce::Graphics& g, juce::ScrollBar& scrollbar, int x, int y, int width, int height,
-                                    bool isScrollbarVertical, int thumbStartPosition, int thumbSize, bool isMouseOver, bool /*isMouseDown*/) -> void {
+auto FlatLookAndFeel::drawScrollbar(juce::Graphics& g, juce::ScrollBar& scrollbar, int x, int y,
+                                    int width, int height, bool isScrollbarVertical,
+                                    int thumbStartPosition, int thumbSize, bool isMouseOver,
+                                    bool /*isMouseDown*/) -> void {
     juce::Rectangle<int> thumbBounds;
     if (isScrollbarVertical) {
         thumbBounds = {x + 1, thumbStartPosition, width - 2, thumbSize};
@@ -261,7 +271,8 @@ auto FlatLookAndFeel::drawScrollbar(juce::Graphics& g, juce::ScrollBar& scrollba
 }
 
 auto FlatLookAndFeel::drawGroupComponentOutline(juce::Graphics& g, int width, int height,
-                                                const juce::String& text, const juce::Justification& position,
+                                                const juce::String& text,
+                                                const juce::Justification& position,
                                                 juce::GroupComponent& group) -> void {
     constexpr float textH = 14.0f;
     constexpr float indent = 3.0f;
@@ -273,9 +284,11 @@ auto FlatLookAndFeel::drawGroupComponentOutline(juce::Graphics& g, int width, in
     auto w = juce::jmax(0.0f, static_cast<float>(width) - x * 2.0f);
     auto h = juce::jmax(0.0f, static_cast<float>(height) - y - indent);
 
-    auto textW = text.isEmpty() ? 0.0f
-                                : juce::jlimit(0.0f, juce::jmax(0.0f, w - textEdgeGap * 2.0f),
-                                               juce::GlyphArrangement::getStringWidth(f, text) + textEdgeGap * 2.0f);
+    auto textW =
+        text.isEmpty()
+            ? 0.0f
+            : juce::jlimit(0.0f, juce::jmax(0.0f, w - textEdgeGap * 2.0f),
+                           juce::GlyphArrangement::getStringWidth(f, text) + textEdgeGap * 2.0f);
     auto textX = 10.0f;
     if (position.testFlags(juce::Justification::horizontallyCentred)) {
         textX = (w - textW) * 0.5f;
@@ -297,8 +310,7 @@ auto FlatLookAndFeel::drawGroupComponentOutline(juce::Graphics& g, int width, in
     if (text.isNotEmpty()) {
         g.setColour(group.findColour(juce::GroupComponent::textColourId));
         g.setFont(f);
-        g.drawText(text,
-                   juce::roundToInt(x + textX + textEdgeGap), 0,
+        g.drawText(text, juce::roundToInt(x + textX + textEdgeGap), 0,
                    juce::roundToInt(textW - textEdgeGap * 2.0f), juce::roundToInt(textH),
                    juce::Justification::centred, true);
     }

@@ -26,7 +26,8 @@ BridgePanel::BridgePanel() {
     bridge_depth_slider.setRange(0.0, 1.0, 0.01);
     bridge_depth_slider.setValue(0.0);
     bridge_depth_slider.setSliderStyle(juce::Slider::LinearBar);
-    bridge_depth_slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, slider_box_width_standard, slider_box_height_standard);
+    bridge_depth_slider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                                        slider_box_width_standard, slider_box_height_standard);
     bridge_depth_slider.setColour(juce::Slider::trackColourId, golden_ochre);
     addAndMakeVisible(bridge_depth_slider);
 }

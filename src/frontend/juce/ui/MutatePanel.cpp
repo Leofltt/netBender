@@ -18,7 +18,8 @@ MutatePanel::MutatePanel() {
     scale_slider.setRange(0.0, 5.0, 0.01);
     scale_slider.setValue(1.0);
     scale_slider.setSliderStyle(juce::Slider::LinearBar);
-    scale_slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, slider_box_width_standard, slider_box_height_standard);
+    scale_slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, slider_box_width_standard,
+                                 slider_box_height_standard);
     scale_slider.setColour(juce::Slider::trackColourId, violet);
     addAndMakeVisible(scale_slider);
 
@@ -30,7 +31,8 @@ MutatePanel::MutatePanel() {
     offset_slider.setRange(-2.0, 2.0, 0.001);
     offset_slider.setValue(0.0);
     offset_slider.setSliderStyle(juce::Slider::LinearBar);
-    offset_slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, slider_box_width_standard, slider_box_height_standard);
+    offset_slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, slider_box_width_standard,
+                                  slider_box_height_standard);
     offset_slider.setColour(juce::Slider::trackColourId, cyan);
     addAndMakeVisible(offset_slider);
 
@@ -47,7 +49,8 @@ MutatePanel::MutatePanel() {
     heat_slider.setRange(0.0, 1.0, 0.001);
     heat_slider.setValue(0.0);
     heat_slider.setSliderStyle(juce::Slider::LinearBar);
-    heat_slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, slider_box_width_standard, slider_box_height_standard);
+    heat_slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, slider_box_width_standard,
+                                slider_box_height_standard);
     heat_slider.setColour(juce::Slider::trackColourId, flame_orange);
     addAndMakeVisible(heat_slider);
 
@@ -59,7 +62,8 @@ MutatePanel::MutatePanel() {
     memory_slider.setRange(0.0, 1.0, 0.001);
     memory_slider.setValue(0.8);
     memory_slider.setSliderStyle(juce::Slider::LinearBar);
-    memory_slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, slider_box_width_standard, slider_box_height_standard);
+    memory_slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, slider_box_width_standard,
+                                  slider_box_height_standard);
     memory_slider.setColour(juce::Slider::trackColourId, deep_sky_blue);
     addAndMakeVisible(memory_slider);
 

@@ -1,7 +1,7 @@
 #pragma once
 #include "m_pd.h"
 #include "../../../backend/IBackend.h"
-#include "../../../shared/static_buffer.h"
+#include "static_buffer.h"
 
 #ifndef CHECK_BUFFERS_INTERVAL
 #define CHECK_BUFFERS_INTERVAL 100

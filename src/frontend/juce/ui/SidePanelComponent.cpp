@@ -39,14 +39,20 @@ auto SidePanelComponent::set_side_tab(SideTab new_tab) -> void {
     const auto& active_text = text_white;
     const auto& inactive_text = text_dimmed;
 
-    tab_mutate_button.setColour(juce::TextButton::buttonColourId, is_mutate ? active_bg : inactive_bg);
-    tab_mutate_button.setColour(juce::TextButton::textColourOffId, is_mutate ? active_text : inactive_text);
+    tab_mutate_button.setColour(juce::TextButton::buttonColourId,
+                                is_mutate ? active_bg : inactive_bg);
+    tab_mutate_button.setColour(juce::TextButton::textColourOffId,
+                                is_mutate ? active_text : inactive_text);
 
-    tab_harmonics_button.setColour(juce::TextButton::buttonColourId, is_harmonics ? active_bg : inactive_bg);
-    tab_harmonics_button.setColour(juce::TextButton::textColourOffId, is_harmonics ? active_text : inactive_text);
+    tab_harmonics_button.setColour(juce::TextButton::buttonColourId,
+                                   is_harmonics ? active_bg : inactive_bg);
+    tab_harmonics_button.setColour(juce::TextButton::textColourOffId,
+                                   is_harmonics ? active_text : inactive_text);
 
-    tab_bridge_button.setColour(juce::TextButton::buttonColourId, is_bridge ? active_bg : inactive_bg);
-    tab_bridge_button.setColour(juce::TextButton::textColourOffId, is_bridge ? active_text : inactive_text);
+    tab_bridge_button.setColour(juce::TextButton::buttonColourId,
+                                is_bridge ? active_bg : inactive_bg);
+    tab_bridge_button.setColour(juce::TextButton::textColourOffId,
+                                is_bridge ? active_text : inactive_text);
 
     mutate_panel.setVisible(is_mutate);
     harmonics_panel.setVisible(is_harmonics);
