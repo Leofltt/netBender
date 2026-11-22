@@ -105,6 +105,36 @@ public:
     [[nodiscard]] auto session() -> NetBenderSession* { return m_session.get(); }
     [[nodiscard]] auto session() const -> const NetBenderSession* { return m_session.get(); }
 
+    // Layer introspection helpers (cached on open() for wait-free RT lookup by index)
+    [[nodiscard]] auto get_layer_count() const -> int;
+    [[nodiscard]] auto find_layer_index(const std::string& name) const -> int;
+    [[nodiscard]] auto get_layer_name(int index) const -> std::string;
+    [[nodiscard]] auto get_layer_weight_count(int index) const -> size_t;
+
+    // Wait-free RT bending, bridge, trigger, latent terrain, and safety sentry controls
+    auto set_layer_bend(int layer_idx, float scale, float offset, float heat, float memory,
+                        int drift_mode, bool frozen) noexcept -> void;
+    auto set_layer_bridge(int target_idx, int source_idx, float depth) noexcept -> void;
+    auto set_short_circuit(bool active) noexcept -> void;
+    auto set_trigger(int mode, float attack, float release, float threshold) noexcept -> void;
+    auto set_latent(bool enabled, float x, float y, float depth, int mode, float slew) noexcept
+        -> void;
+
+    [[nodiscard]] auto get_sentry_blown() const noexcept -> bool;
+    auto set_sentry_auto_reset(bool enabled) noexcept -> void;
+    auto request_fuse_reset() noexcept -> void;
+
+    // Raw weight inspection / injection and per-layer or global resets
+    [[nodiscard]] auto get_layer_weights(int layer_idx, bool original = false) const
+        -> std::vector<float>;
+    auto prepare_layer_weight_staging(int layer_idx) -> bool;
+    auto set_layer_weights_immediate(int layer_idx, const float* data, size_t count) -> bool;
+    auto set_layer_weights_rt(int layer_idx, const float* data, size_t count) noexcept -> bool;
+    auto request_reset_layer_weights(int layer_idx) noexcept -> void;
+    auto request_reset_all_weights() noexcept -> void;
+    auto reset_layer_weights_immediate(int layer_idx) -> void;
+    auto reset_all_weights_immediate() -> void;
+
 private:
     template <typename SampleT>
     auto process_impl(const SampleT* const* in_channels, int num_in, SampleT* const* out_channels,

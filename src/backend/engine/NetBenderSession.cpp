@@ -5,6 +5,7 @@
 #include <cmath>
 #include <exception>
 #include <nlohmann/json.hpp>
+#include <cstring>
 
 namespace {
 
@@ -104,6 +105,25 @@ auto weights_differ(const std::vector<float>& a, const std::vector<float>& b) ->
     return false;
 }
 
+auto compute_layer_weight_count(IBackend& backend, const std::string& name) -> size_t {
+    const auto shape = backend.get_layer_shape(name);
+    if (!shape.empty()) {
+        size_t total = 1;
+        bool valid = true;
+        for (int64_t dim : shape) {
+            if (dim <= 0) {
+                valid = false;
+                break;
+            }
+            total *= static_cast<size_t>(dim);
+        }
+        if (valid && total > 0) {
+            return total;
+        }
+    }
+    return backend.get_original_layer_weights(name).size();
+}
+
 }  // namespace
 
 //==============================================================================
@@ -114,6 +134,7 @@ NetBenderSession::NetBenderSession(SessionConfig config)
     m_backend = BackendFactory::create_default();
 
     m_engine.set_pre_inference_callback([this](IBackend& backend) {
+        drain_pending_rt_bending();
         std::string active_layer;
         {
             std::lock_guard<std::mutex> lock(m_state_mutex);
@@ -156,16 +177,14 @@ NetBenderSession::NetBenderSession(SessionConfig config)
         return nullptr;
     });
 
-    m_engine.set_fuse_reset_callback([this] {
-        m_engine.get_safety_sentry().reset_fuse();
-        m_bending.request_audio_thread_reset_all();
-    });
+    m_engine.set_fuse_reset_callback([this] { request_fuse_reset(); });
 
     m_engine.set_error_callback([this](const std::string& msg) { set_error(msg); });
 }
 
 NetBenderSession::~NetBenderSession() {
     m_engine.detach_backend();
+    clear_layer_slots();
 }
 
 //==============================================================================
@@ -196,6 +215,7 @@ auto NetBenderSession::set_backend_creator(BackendCreator creator) -> void {
 auto NetBenderSession::load_model(const std::string& path) -> bool {
     m_model_loaded.store(false);
     m_engine.detach_backend();
+    clear_layer_slots();
 
     try {
         auto new_backend = m_backend_creator(path);
@@ -257,9 +277,10 @@ auto NetBenderSession::load_model(const std::string& path) -> bool {
             m_buffer_size.store(std::max(min_buffer_for_ratio, req_size * 2));
         }
 
-        // Reset latent terrain cached matrices and stale layer bending states
+        // Reset latent terrain cached matrices, stale layer bending states, and rebuild RT slots
         m_latent.reset();
         m_bending.clear_all_layer_bending();
+        rebuild_layer_slots();
 
         m_model_loaded.store(true);
         configure_engine();
@@ -287,6 +308,33 @@ auto NetBenderSession::get_available_modes() const -> std::vector<std::string> {
         return {};
     }
     return m_backend->get_plugin_modes();
+}
+
+auto NetBenderSession::get_layer_names() const -> std::vector<std::string> {
+    std::lock_guard<std::mutex> lock(m_state_mutex);
+    return m_layer_names;
+}
+
+auto NetBenderSession::find_layer_index(const std::string& name) const -> int {
+    std::lock_guard<std::mutex> lock(m_state_mutex);
+    const auto it = m_layer_name_to_idx.find(name);
+    return (it != m_layer_name_to_idx.end()) ? it->second : -1;
+}
+
+auto NetBenderSession::get_layer_name(int index) const -> std::string {
+    std::lock_guard<std::mutex> lock(m_state_mutex);
+    if (index < 0 || static_cast<size_t>(index) >= m_layer_names.size()) {
+        return {};
+    }
+    return m_layer_names[static_cast<size_t>(index)];
+}
+
+auto NetBenderSession::get_layer_weight_count(int index) const -> size_t {
+    std::lock_guard<std::mutex> lock(m_state_mutex);
+    if (index < 0 || static_cast<size_t>(index) >= m_layer_weight_counts.size()) {
+        return 0;
+    }
+    return m_layer_weight_counts[static_cast<size_t>(index)];
 }
 
 auto NetBenderSession::set_method(const std::string& method) -> bool {
@@ -443,6 +491,125 @@ auto NetBenderSession::set_bending_automation(float scale, float offset, float h
     m_bending_automation_active.store(true);
 }
 
+auto NetBenderSession::set_layer_bend_rt(int layer_idx, float scale, float offset, float heat,
+                                         float memory, int drift_mode,
+                                         int frozen) noexcept NETBENDER_NONBLOCKING -> void {
+    ScopedRtReader reader(m_layer_slots_gate);
+    if (!reader.is_acquired() || !m_model_loaded.load(std::memory_order_acquire) || layer_idx < 0 ||
+        static_cast<size_t>(layer_idx) >= m_layer_slots.size()) {
+        return;
+    }
+
+    auto& slot = *m_layer_slots[static_cast<size_t>(layer_idx)];
+    const uint64_t seq = m_op_seq.fetch_add(1, std::memory_order_acq_rel) + 1;
+
+    slot.scale.store(scale, std::memory_order_relaxed);
+    slot.offset.store(offset, std::memory_order_relaxed);
+    slot.bend_seq.store(seq, std::memory_order_relaxed);
+    slot.scale_offset_dirty.store(true, std::memory_order_release);
+
+    if (heat >= 0.0f) {
+        slot.heat.store(heat, std::memory_order_relaxed);
+        slot.heat_seq.store(seq, std::memory_order_relaxed);
+        slot.heat_dirty.store(true, std::memory_order_release);
+    }
+    if (memory >= 0.0f) {
+        slot.memory.store(std::clamp(memory, 0.0f, 1.0f), std::memory_order_relaxed);
+        slot.memory_seq.store(seq, std::memory_order_relaxed);
+        slot.memory_dirty.store(true, std::memory_order_release);
+    }
+    if (drift_mode >= 0) {
+        slot.drift_mode.store(std::clamp(drift_mode, 0, 2), std::memory_order_relaxed);
+        slot.drift_seq.store(seq, std::memory_order_relaxed);
+        slot.drift_dirty.store(true, std::memory_order_release);
+    }
+    if (frozen >= 0) {
+        slot.frozen.store(frozen > 0 ? 1 : 0, std::memory_order_relaxed);
+        slot.frozen_seq.store(seq, std::memory_order_relaxed);
+        slot.frozen_dirty.store(true, std::memory_order_release);
+    }
+
+    m_any_slot_dirty.store(true, std::memory_order_release);
+}
+
+auto NetBenderSession::set_layer_bridge_rt(int target_idx, int source_idx,
+                                           float depth) noexcept NETBENDER_NONBLOCKING -> void {
+    ScopedRtReader reader(m_layer_slots_gate);
+    if (!reader.is_acquired() || !m_model_loaded.load(std::memory_order_acquire) ||
+        target_idx < 0 || static_cast<size_t>(target_idx) >= m_layer_slots.size()) {
+        return;
+    }
+
+    int norm_src = -1;
+    if (source_idx >= 0 && static_cast<size_t>(source_idx) < m_layer_slots.size() &&
+        source_idx != target_idx) {
+        norm_src = source_idx;
+    }
+
+    auto& slot = *m_layer_slots[static_cast<size_t>(target_idx)];
+    const uint64_t seq = m_op_seq.fetch_add(1, std::memory_order_acq_rel) + 1;
+    slot.bridge_source_idx.store(norm_src, std::memory_order_relaxed);
+    slot.bridge_depth.store(std::clamp(depth, 0.0f, 1.0f), std::memory_order_relaxed);
+    slot.bridge_seq.store(seq, std::memory_order_relaxed);
+    slot.bridge_dirty.store(true, std::memory_order_release);
+    m_any_slot_dirty.store(true, std::memory_order_release);
+}
+
+auto NetBenderSession::set_layer_weights_rt(int layer_idx, const float* data,
+                                            size_t count) noexcept NETBENDER_NONBLOCKING -> bool {
+    ScopedRtReader reader(m_layer_slots_gate);
+    if (!reader.is_acquired() || !m_model_loaded.load(std::memory_order_acquire) ||
+        data == nullptr || layer_idx < 0 ||
+        static_cast<size_t>(layer_idx) >= m_layer_slots.size()) {
+        return false;
+    }
+
+    auto& slot = *m_layer_slots[static_cast<size_t>(layer_idx)];
+    if (!slot.tb_ready.load(std::memory_order_acquire) || slot.tb_buf[0].size() != count) {
+        return false;
+    }
+
+    std::memcpy(slot.tb_buf[slot.tb_write_idx].data(), data, count * sizeof(float));
+    const uint64_t seq = m_op_seq.fetch_add(1, std::memory_order_acq_rel) + 1;
+    slot.weights_seq.store(seq, std::memory_order_relaxed);
+
+    const int prev = slot.tb_middle.exchange(slot.tb_write_idx | 4, std::memory_order_acq_rel);
+    slot.tb_write_idx = prev & 3;
+    m_any_slot_dirty.store(true, std::memory_order_release);
+    return true;
+}
+
+auto NetBenderSession::request_reset_layer_weights(int layer_idx) noexcept NETBENDER_NONBLOCKING
+    -> void {
+    ScopedRtReader reader(m_layer_slots_gate);
+    if (!reader.is_acquired() || !m_model_loaded.load(std::memory_order_acquire) || layer_idx < 0 ||
+        static_cast<size_t>(layer_idx) >= m_layer_slots.size()) {
+        return;
+    }
+
+    auto& slot = *m_layer_slots[static_cast<size_t>(layer_idx)];
+    const uint64_t seq = m_op_seq.fetch_add(1, std::memory_order_acq_rel) + 1;
+    slot.reset_seq.store(seq, std::memory_order_relaxed);
+    slot.reset_requested.store(true, std::memory_order_release);
+    m_any_slot_dirty.store(true, std::memory_order_release);
+}
+
+auto NetBenderSession::request_reset_all_weights() noexcept NETBENDER_NONBLOCKING -> void {
+    if (!m_model_loaded.load(std::memory_order_acquire)) {
+        return;
+    }
+    const uint64_t seq = m_op_seq.fetch_add(1, std::memory_order_acq_rel) + 1;
+    m_reset_all_seq.store(seq, std::memory_order_relaxed);
+    m_reset_all_requested.store(true, std::memory_order_release);
+    m_any_slot_dirty.store(true, std::memory_order_release);
+}
+
+auto NetBenderSession::request_fuse_reset() noexcept NETBENDER_NONBLOCKING -> void {
+    m_engine.get_safety_sentry().reset_fuse();
+    m_bending.request_audio_thread_reset_all();
+    request_reset_all_weights();
+}
+
 auto NetBenderSession::set_latent_automation(float x, float y,
                                              float depth) noexcept NETBENDER_NONBLOCKING -> void {
     m_auto_latent_x.store(x);
@@ -463,6 +630,16 @@ auto NetBenderSession::get_active_layer() const -> std::string {
 }
 
 auto NetBenderSession::clear_layer_bending(const std::string& name) -> void {
+    {
+        std::lock_guard<std::mutex> lock(m_state_mutex);
+        const auto it = m_layer_name_to_idx.find(name);
+        if (it != m_layer_name_to_idx.end() && it->second >= 0 &&
+            static_cast<size_t>(it->second) < m_layer_slots.size()) {
+            const uint64_t seq = m_op_seq.fetch_add(1, std::memory_order_acq_rel) + 1;
+            m_layer_slots[static_cast<size_t>(it->second)]->reset_seq.store(
+                seq, std::memory_order_release);
+        }
+    }
     m_bending.clear_layer_bending(name);
     if (!m_engine.is_worker_running() && m_backend) {
         m_backend->reset_layer_weights(name);
@@ -470,6 +647,8 @@ auto NetBenderSession::clear_layer_bending(const std::string& name) -> void {
 }
 
 auto NetBenderSession::clear_all_layer_bending() -> void {
+    const uint64_t seq = m_op_seq.fetch_add(1, std::memory_order_acq_rel) + 1;
+    m_reset_all_seq.store(seq, std::memory_order_release);
     m_bending.clear_all_layer_bending();
     if (!m_engine.is_worker_running() && m_backend) {
         m_backend->reset_all_layer_weights();
@@ -484,6 +663,93 @@ auto NetBenderSession::reset_fuse() -> void {
 auto NetBenderSession::set_latent_hook(IBackend::LatentHook hook) -> void {
     std::lock_guard<std::mutex> lock(m_state_mutex);
     m_user_latent_hook = std::move(hook);
+}
+
+auto NetBenderSession::get_layer_weights(int layer_idx, bool original) const -> std::vector<float> {
+    if (!m_model_loaded.load(std::memory_order_acquire) || !m_backend) {
+        return {};
+    }
+    std::string name;
+    bool pending_reset = false;
+    {
+        std::lock_guard<std::mutex> lock(m_state_mutex);
+        if (layer_idx < 0 || static_cast<size_t>(layer_idx) >= m_layer_names.size()) {
+            return {};
+        }
+        name = m_layer_names[static_cast<size_t>(layer_idx)];
+        if (!original && static_cast<size_t>(layer_idx) < m_layer_slots.size()) {
+            const auto& slot = *m_layer_slots[static_cast<size_t>(layer_idx)];
+            const uint64_t pending_reset_seq =
+                std::max(m_reset_all_seq.load(std::memory_order_acquire),
+                         slot.reset_seq.load(std::memory_order_acquire));
+            const bool reset_flag = m_reset_all_requested.load(std::memory_order_acquire) ||
+                                    slot.reset_requested.load(std::memory_order_acquire);
+            if (reset_flag &&
+                slot.weights_seq.load(std::memory_order_acquire) <= pending_reset_seq) {
+                pending_reset = true;
+            }
+        }
+    }
+
+    if (original || pending_reset) {
+        return m_backend->get_original_layer_weights(name);
+    }
+
+    const LayerBendingState st = m_bending.get_layer_state(name);
+    if (st.isApplied && !st.scratchFinal.empty()) {
+        return st.scratchFinal;
+    }
+    if (!st.drawnWeights.empty()) {
+        return st.drawnWeights;
+    }
+    return m_backend->get_layer_weights(name);
+}
+
+auto NetBenderSession::prepare_layer_weight_staging(int layer_idx) -> bool {
+    ScopedRtReader reader(m_layer_slots_gate);
+    if (!reader.is_acquired() || !m_model_loaded.load(std::memory_order_acquire) || layer_idx < 0 ||
+        static_cast<size_t>(layer_idx) >= m_layer_slots.size()) {
+        return false;
+    }
+    const size_t expected = m_layer_weight_counts[static_cast<size_t>(layer_idx)];
+    if (expected == 0) {
+        return false;
+    }
+    auto& slot = *m_layer_slots[static_cast<size_t>(layer_idx)];
+    std::lock_guard<std::mutex> tb_lock(slot.tb_init_mutex);
+    if (!slot.tb_ready.load(std::memory_order_acquire)) {
+        for (auto& buf : slot.tb_buf) {
+            buf.assign(expected, 0.0f);
+        }
+        slot.tb_write_idx = 0;
+        slot.tb_read_idx = 1;
+        slot.tb_middle.store(2, std::memory_order_relaxed);
+        slot.tb_ready.store(true, std::memory_order_release);
+    }
+    return true;
+}
+
+auto NetBenderSession::set_layer_weights_immediate(int layer_idx, const float* data, size_t count)
+    -> bool {
+    if (!m_model_loaded.load(std::memory_order_acquire) || data == nullptr) {
+        return false;
+    }
+    std::string name;
+    size_t expected = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_state_mutex);
+        if (layer_idx < 0 || static_cast<size_t>(layer_idx) >= m_layer_names.size()) {
+            return false;
+        }
+        expected = m_layer_weight_counts[static_cast<size_t>(layer_idx)];
+        if (expected == 0 || count != expected) {
+            return false;
+        }
+        name = m_layer_names[static_cast<size_t>(layer_idx)];
+    }
+    std::vector<float> weights(data, data + count);
+    m_bending.set_layer_drawn_weights(name, weights);
+    return true;
 }
 
 auto NetBenderSession::set_latency_callback(LatencyCallback cb) -> void {
@@ -748,4 +1014,153 @@ auto NetBenderSession::load_state(const std::string& serialized, bool restore_mo
         return false;
     }
     return from_json(j, restore_model);
+}
+
+//==============================================================================
+auto NetBenderSession::clear_layer_slots() -> void {
+    ScopedReconfigureGate gate(m_layer_slots_gate);
+    std::lock_guard<std::mutex> lock(m_state_mutex);
+    m_layer_count.store(0, std::memory_order_release);
+    m_layer_slots.clear();
+    m_layer_names.clear();
+    m_layer_name_to_idx.clear();
+    m_layer_weight_counts.clear();
+    m_op_seq.store(0, std::memory_order_relaxed);
+    m_any_slot_dirty.store(false, std::memory_order_relaxed);
+    m_reset_all_requested.store(false, std::memory_order_relaxed);
+    m_reset_all_seq.store(0, std::memory_order_relaxed);
+}
+
+auto NetBenderSession::rebuild_layer_slots() -> void {
+    ScopedReconfigureGate gate(m_layer_slots_gate);
+    std::lock_guard<std::mutex> lock(m_state_mutex);
+
+    m_layer_slots.clear();
+    m_layer_names.clear();
+    m_layer_name_to_idx.clear();
+    m_layer_weight_counts.clear();
+
+    if (m_backend) {
+        m_layer_names = m_backend->get_available_layers();
+        m_layer_name_to_idx.reserve(m_layer_names.size());
+        m_layer_weight_counts.resize(m_layer_names.size(), 0);
+        m_layer_slots.reserve(m_layer_names.size());
+        for (size_t i = 0; i < m_layer_names.size(); ++i) {
+            m_layer_name_to_idx[m_layer_names[i]] = static_cast<int>(i);
+            m_layer_weight_counts[i] = compute_layer_weight_count(*m_backend, m_layer_names[i]);
+            m_layer_slots.push_back(std::make_unique<AtomicLayerSlot>());
+        }
+    }
+
+    m_op_seq.store(0, std::memory_order_relaxed);
+    m_any_slot_dirty.store(false, std::memory_order_relaxed);
+    m_reset_all_requested.store(false, std::memory_order_relaxed);
+    m_reset_all_seq.store(0, std::memory_order_relaxed);
+    m_layer_count.store(static_cast<int>(m_layer_names.size()), std::memory_order_release);
+}
+
+auto NetBenderSession::drain_pending_rt_bending() -> void {
+    ScopedRtReader reader(m_layer_slots_gate);
+    if (!reader.is_acquired() || !m_any_slot_dirty.exchange(false, std::memory_order_acq_rel)) {
+        return;
+    }
+
+    uint64_t global_reset_seq = m_reset_all_seq.load(std::memory_order_acquire);
+    if (m_reset_all_requested.exchange(false, std::memory_order_acq_rel)) {
+        global_reset_seq =
+            std::max(global_reset_seq, m_reset_all_seq.load(std::memory_order_acquire));
+        m_bending.clear_all_layer_bending();
+    }
+
+    for (size_t i = 0; i < m_layer_slots.size(); ++i) {
+        auto& slot = *m_layer_slots[i];
+        const std::string& name = m_layer_names[i];
+
+        uint64_t eff_reset_seq =
+            std::max(global_reset_seq, slot.reset_seq.load(std::memory_order_acquire));
+        if (slot.reset_requested.exchange(false, std::memory_order_acq_rel)) {
+            const uint64_t layer_rst_seq = slot.reset_seq.load(std::memory_order_acquire);
+            eff_reset_seq = std::max(eff_reset_seq, layer_rst_seq);
+            if (layer_rst_seq > global_reset_seq) {
+                m_bending.clear_layer_bending(name);
+            }
+        }
+
+        const bool so_dirty = slot.scale_offset_dirty.exchange(false, std::memory_order_acq_rel);
+        const bool h_dirty = slot.heat_dirty.exchange(false, std::memory_order_acq_rel);
+        const bool m_dirty = slot.memory_dirty.exchange(false, std::memory_order_acq_rel);
+        const bool d_dirty = slot.drift_dirty.exchange(false, std::memory_order_acq_rel);
+        const bool f_dirty = slot.frozen_dirty.exchange(false, std::memory_order_acq_rel);
+
+        if (so_dirty || h_dirty || m_dirty || d_dirty || f_dirty) {
+            const LayerBendingState cur = m_bending.get_layer_state(name);
+            if (so_dirty && slot.bend_seq.load(std::memory_order_acquire) > eff_reset_seq) {
+                const float scale = slot.scale.load(std::memory_order_relaxed);
+                const float offset = slot.offset.load(std::memory_order_relaxed);
+                if (std::abs(cur.scale - scale) > 1e-6f) {
+                    m_bending.set_layer_scale(name, scale);
+                }
+                if (std::abs(cur.offset - offset) > 1e-6f) {
+                    m_bending.set_layer_offset(name, offset);
+                }
+            }
+            if (h_dirty && slot.heat_seq.load(std::memory_order_acquire) > eff_reset_seq) {
+                const float heat = slot.heat.load(std::memory_order_relaxed);
+                if (std::abs(cur.heat - heat) > 1e-6f) {
+                    m_bending.set_layer_heat(name, heat);
+                }
+            }
+            if (m_dirty && slot.memory_seq.load(std::memory_order_acquire) > eff_reset_seq) {
+                const float memory = slot.memory.load(std::memory_order_relaxed);
+                if (std::abs(cur.memory - memory) > 1e-6f) {
+                    m_bending.set_layer_memory(name, memory);
+                }
+            }
+            if (d_dirty && slot.drift_seq.load(std::memory_order_acquire) > eff_reset_seq) {
+                const auto drift_mode =
+                    static_cast<DriftMode>(slot.drift_mode.load(std::memory_order_relaxed));
+                if (cur.driftMode != drift_mode) {
+                    m_bending.set_layer_drift_mode(name, drift_mode);
+                }
+            }
+            if (f_dirty && slot.frozen_seq.load(std::memory_order_acquire) > eff_reset_seq) {
+                const bool frozen = (slot.frozen.load(std::memory_order_relaxed) != 0);
+                if (cur.frozen != frozen) {
+                    m_bending.set_layer_frozen(name, frozen);
+                }
+            }
+        }
+
+        if (slot.bridge_dirty.exchange(false, std::memory_order_acq_rel)) {
+            if (slot.bridge_seq.load(std::memory_order_acquire) > eff_reset_seq) {
+                const int src_idx = slot.bridge_source_idx.load(std::memory_order_relaxed);
+                const std::string src_name =
+                    (src_idx >= 0 && static_cast<size_t>(src_idx) < m_layer_names.size())
+                        ? m_layer_names[static_cast<size_t>(src_idx)]
+                        : std::string{};
+                const float depth = slot.bridge_depth.load(std::memory_order_relaxed);
+
+                const LayerBendingState cur = m_bending.get_layer_state(name);
+                if (cur.bridgeSourceLayer != src_name) {
+                    m_bending.set_layer_bridge_source(name, src_name);
+                }
+                if (std::abs(cur.bridgeDepth - depth) > 1e-6f) {
+                    m_bending.set_layer_bridge_depth(name, depth);
+                }
+            }
+        }
+
+        if (slot.tb_ready.load(std::memory_order_acquire)) {
+            if ((slot.tb_middle.load(std::memory_order_acquire) & 4) != 0) {
+                const int prev =
+                    slot.tb_middle.exchange(slot.tb_read_idx, std::memory_order_acq_rel);
+                slot.tb_read_idx = prev & 3;
+                if ((prev & 4) != 0 &&
+                    slot.weights_seq.load(std::memory_order_acquire) > eff_reset_seq) {
+                    m_bending.set_layer_drawn_weights(
+                        name, slot.tb_buf[static_cast<size_t>(slot.tb_read_idx)]);
+                }
+            }
+        }
+    }
 }

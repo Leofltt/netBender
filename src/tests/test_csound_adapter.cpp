@@ -10,6 +10,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -68,6 +69,22 @@ struct TempDir {
         std::filesystem::remove_all(path, ec);
     }
 };
+
+auto approx(float a, float b, float tol = 1e-4f) -> bool {
+    return std::abs(a - b) <= tol;
+}
+
+template <typename Pred>
+auto wait_until(Pred&& pred, int timeout_ms = 2000) -> bool {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (!pred()) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(250));
+    }
+    return true;
+}
 
 auto touch_file(const std::filesystem::path& p) -> void {
     std::filesystem::create_directories(p.parent_path());
@@ -380,6 +397,319 @@ auto test_csound_io_buffer_sizing_and_dump() -> void {
     CHECK(dump.find("hw_buf(-B)=2048 frames") != std::string::npos);
 }
 
+auto test_multi_layer_bending_bridge_and_resets() -> void {
+    CsoundMockBackend* mock = nullptr;
+    CsoundSessionAdapter adapter([&](const std::string&) {
+        auto b = std::make_unique<CsoundMockBackend>();
+        b->higher_ratio = 64;
+        b->preferred_buffer_size = 64;
+        mock = b.get();
+        return b;
+    });
+
+    OpenOptions opts;
+    opts.model_path = "mock_bend.pte";
+    opts.method = "forward";
+    opts.buffer_size = 64;
+    opts.thread_mode = 0;  // sync inline
+    opts.safety_sentry = 0;
+    opts.dry_delay = 0;
+    opts.host_sample_rate = 44100.0;
+    opts.ksmps = 64;
+
+    std::string err;
+    CHECK(adapter.open(opts, err));
+    CHECK(mock != nullptr);
+    CHECK(adapter.get_layer_count() == 2);
+    CHECK(adapter.find_layer_index("layer0.weight") == 0);
+    CHECK(adapter.find_layer_index("layer1.bias") == 1);
+    CHECK(adapter.find_layer_index("nonexistent") == -1);
+    CHECK(adapter.get_layer_name(0) == "layer0.weight");
+    CHECK(adapter.get_layer_name(1) == "layer1.bias");
+    CHECK(adapter.get_layer_weight_count(0) == 4);
+    CHECK(adapter.get_layer_weight_count(1) == 2);
+
+    std::vector<double> in(64, 0.25), out(64, 0.0);
+    const double* in_ptrs[1] = {in.data()};
+    double* out_ptrs[1] = {out.data()};
+
+    // Simultaneous multi-layer bending: layer0 ({1, 0.5, -0.5, 0.25}) and layer1 ({0.1, -0.1})
+    adapter.set_layer_bend(0, 2.0f, -0.5f, 0.0f, 0.8f, 1, false);
+    adapter.set_layer_bend(1, 3.0f, 0.2f, 0.0f, 0.8f, 1, false);
+    adapter.process(in_ptrs, 1, out_ptrs, 1, 64, 1.0, 1.0f, true);
+
+    const auto w0 = mock->get_layer_weights("layer0.weight");
+    const auto w1 = mock->get_layer_weights("layer1.bias");
+    CHECK(approx(w0[0], 1.5f));
+    CHECK(approx(w0[1], 0.5f));
+    CHECK(approx(w0[2], -1.5f));
+    CHECK(approx(w0[3], 0.0f));
+    CHECK(approx(w1[0], 0.5f));
+    CHECK(approx(w1[1], -0.1f));
+
+    // Cross-talk bridge from layer 1 ({0.1, -0.1}) into layer 0 at depth 0.5 (with scale=1,
+    // offset=0)
+    adapter.set_layer_bend(0, 1.0f, 0.0f, 0.0f, 0.8f, 1, false);
+    adapter.set_layer_bridge(0, 1, 0.5f);
+    adapter.process(in_ptrs, 1, out_ptrs, 1, 64, 1.0, 1.0f, true);
+    const auto bridged0 = mock->get_layer_weights("layer0.weight");
+    const auto orig0 = mock->get_original_layer_weights("layer0.weight");
+    const auto orig1 = mock->get_original_layer_weights("layer1.bias");
+    for (size_t i = 0; i < orig0.size(); ++i) {
+        CHECK(approx(bridged0[i], 0.5f * orig0[i] + 0.5f * orig1[i % 2]));
+    }
+
+    // Per-layer reset restores layer 0 while leaving layer 1 bent
+    adapter.request_reset_layer_weights(0);
+    adapter.process(in_ptrs, 1, out_ptrs, 1, 64, 1.0, 1.0f, true);
+    CHECK(mock->get_layer_weights("layer0.weight") == orig0);
+    CHECK(approx(mock->get_layer_weights("layer1.bias")[0], 0.5f));
+
+    // Sequence ordering within same block: bend -> reset => reset wins
+    adapter.set_layer_bend(1, 5.0f, 0.0f, 0.0f, 0.8f, 1, false);
+    adapter.request_reset_layer_weights(1);
+    adapter.process(in_ptrs, 1, out_ptrs, 1, 64, 1.0, 1.0f, true);
+    CHECK(mock->get_layer_weights("layer1.bias") == orig1);
+
+    // Sequence ordering within same block: reset -> bend => bend wins
+    adapter.request_reset_all_weights();
+    adapter.set_layer_bend(0, 4.0f, 0.0f, 0.0f, 0.8f, 1, false);
+    adapter.process(in_ptrs, 1, out_ptrs, 1, 64, 1.0, 1.0f, true);
+    CHECK(approx(mock->get_layer_weights("layer0.weight")[0], 4.0f));
+    CHECK(mock->get_layer_weights("layer1.bias") == orig1);
+
+    // Global RT reset clears remaining bending
+    adapter.request_reset_all_weights();
+    adapter.process(in_ptrs, 1, out_ptrs, 1, 64, 1.0, 1.0f, true);
+    CHECK(mock->get_layer_weights("layer0.weight") == orig0);
+}
+
+auto test_trigger_short_circuit_and_sentry() -> void {
+    CsoundMockBackend* mock = nullptr;
+    CsoundSessionAdapter adapter([&](const std::string&) {
+        auto b = std::make_unique<CsoundMockBackend>();
+        b->higher_ratio = 64;
+        b->preferred_buffer_size = 64;
+        mock = b.get();
+        return b;
+    });
+
+    OpenOptions opts;
+    opts.model_path = "mock_trig.pte";
+    opts.method = "forward";
+    opts.buffer_size = 64;
+    opts.thread_mode = 0;
+    opts.safety_sentry = 1;
+    opts.dry_delay = 1;
+    opts.host_sample_rate = 44100.0;
+    opts.ksmps = 64;
+
+    std::string err;
+    CHECK(adapter.open(opts, err));
+    CHECK(mock != nullptr);
+
+    std::vector<double> in(64, 0.25), out(64, 0.0);
+    const double* in_ptrs[1] = {in.data()};
+    double* out_ptrs[1] = {out.data()};
+    const auto orig0 = mock->get_original_layer_weights("layer0.weight");
+
+    // Momentary mode with instant attack (1.0) and half release (0.5)
+    adapter.set_trigger(1, 1.0f, 0.5f, 0.15f);
+    adapter.set_layer_bend(0, 2.0f, 0.0f, 0.0f, 0.8f, 1, false);
+    adapter.set_short_circuit(false);
+    adapter.process(in_ptrs, 1, out_ptrs, 1, 64, 1.0, 1.0f, true);
+    CHECK(mock->get_layer_weights("layer0.weight") == orig0);
+
+    // Engage short-circuit -> immediate 2x scale
+    adapter.set_short_circuit(true);
+    adapter.process(in_ptrs, 1, out_ptrs, 1, 64, 1.0, 1.0f, true);
+    CHECK(approx(mock->get_layer_weights("layer0.weight")[0], orig0[0] * 2.0f));
+
+    // Live scale change while gate remains held -> must update immediately
+    adapter.set_layer_bend(0, 3.0f, 0.0f, 0.0f, 0.8f, 1, false);
+    adapter.process(in_ptrs, 1, out_ptrs, 1, 64, 1.0, 1.0f, true);
+    CHECK(approx(mock->get_layer_weights("layer0.weight")[0], orig0[0] * 3.0f));
+
+    // Release gate -> decays back to baseline W0
+    adapter.set_short_circuit(false);
+    for (int blk = 0; blk < 16; ++blk) {
+        adapter.process(in_ptrs, 1, out_ptrs, 1, 64, 1.0, 1.0f, true);
+    }
+    CHECK(mock->get_layer_weights("layer0.weight") == orig0);
+
+    // SafetySentry trip & wait-free request_fuse_reset()
+    adapter.set_trigger(0, -1.0f, -1.0f, -1.0f);
+    adapter.set_layer_bend(0, 4.0f, 0.0f, 0.0f, 0.8f, 1, false);
+    adapter.process(in_ptrs, 1, out_ptrs, 1, 64, 1.0, 1.0f, true);
+    CHECK(approx(mock->get_layer_weights("layer0.weight")[0], 4.0f));
+
+    adapter.set_sentry_auto_reset(false);
+    adapter.session()->safety_sentry().trip_fuse();
+    CHECK(adapter.get_sentry_blown());
+
+    adapter.request_fuse_reset();
+    CHECK(!adapter.get_sentry_blown());
+    adapter.process(in_ptrs, 1, out_ptrs, 1, 64, 1.0, 1.0f, true);
+    CHECK(mock->get_layer_weights("layer0.weight") == orig0);
+}
+
+auto test_latent_terrain_controls() -> void {
+    CsoundMockBackend* mock = nullptr;
+    CsoundSessionAdapter adapter([&](const std::string&) {
+        auto b = std::make_unique<CsoundMockBackend>();
+        b->higher_ratio = 64;
+        b->preferred_buffer_size = 64;
+        mock = b.get();
+        return b;
+    });
+
+    OpenOptions opts;
+    opts.model_path = "mock_latent.pte";
+    opts.method = "forward";
+    opts.buffer_size = 64;
+    opts.thread_mode = 0;
+    opts.safety_sentry = 0;
+    opts.host_sample_rate = 44100.0;
+    opts.ksmps = 64;
+
+    std::string err;
+    CHECK(adapter.open(opts, err));
+    CHECK(mock != nullptr);
+
+    std::vector<double> in(64, 0.25), out(64, 0.0);
+    const double* in_ptrs[1] = {in.data()};
+    double* out_ptrs[1] = {out.data()};
+
+    // FourierOrbit enabled
+    adapter.set_latent(true, 0.5f, -0.5f, 1.0f, 0, 0.0f);
+    adapter.process(in_ptrs, 1, out_ptrs, 1, 64, 1.0, 1.0f, true);
+    CHECK(mock->last_latent_hook_called);
+    CHECK(adapter.session()->latent().get_mode() == LatentMode::FourierOrbit);
+    CHECK(approx(adapter.session()->latent().get_x(), 0.5f));
+    CHECK(approx(adapter.session()->latent().get_y(), -0.5f));
+    CHECK(approx(adapter.session()->latent().get_depth(), 1.0f));
+
+    // Switch to LatentSlew & Quantize modes
+    adapter.set_latent(true, 0.0f, 0.0f, 0.75f, 1, 0.85f);
+    CHECK(adapter.session()->latent().get_mode() == LatentMode::LatentSlew);
+    CHECK(approx(adapter.session()->latent().get_slew(), 0.85f));
+    adapter.process(in_ptrs, 1, out_ptrs, 1, 64, 1.0, 1.0f, true);
+    CHECK(mock->last_latent_hook_called);
+
+    adapter.set_latent(true, 0.0f, 0.0f, 0.75f, 2, 0.0f);
+    CHECK(adapter.session()->latent().get_mode() == LatentMode::Quantize);
+    adapter.process(in_ptrs, 1, out_ptrs, 1, 64, 1.0, 1.0f, true);
+    CHECK(mock->last_latent_hook_called);
+
+    // Disable terrain -> hook not invoked on forward pass
+    adapter.set_latent(false, 0.0f, 0.0f, 0.5f, 0, 0.0f);
+    adapter.process(in_ptrs, 1, out_ptrs, 1, 64, 1.0, 1.0f, true);
+    CHECK(!mock->last_latent_hook_called);
+}
+
+auto test_raw_weights_and_async_worker_bending() -> void {
+    // 1. Sync: getweights / immediate setweights / SPSC triple-buffered RT setweights
+    {
+        CsoundMockBackend* mock = nullptr;
+        CsoundSessionAdapter adapter([&](const std::string&) {
+            auto b = std::make_unique<CsoundMockBackend>();
+            b->higher_ratio = 64;
+            b->preferred_buffer_size = 64;
+            mock = b.get();
+            return b;
+        });
+
+        OpenOptions opts;
+        opts.model_path = "mock_weights.pte";
+        opts.method = "forward";
+        opts.buffer_size = 64;
+        opts.thread_mode = 0;
+        opts.safety_sentry = 0;
+        opts.host_sample_rate = 44100.0;
+        opts.ksmps = 64;
+
+        std::string err;
+        CHECK(adapter.open(opts, err));
+        const auto orig0 = adapter.get_layer_weights(0, true);
+        CHECK(orig0.size() == 4);
+        CHECK(adapter.get_layer_weights(0, false) == orig0);
+
+        // Wrong-sized vector rejected cleanly
+        const std::vector<float> bad_size{1.0f, 2.0f};
+        CHECK(!adapter.set_layer_weights_immediate(0, bad_size.data(), bad_size.size()));
+
+        const std::vector<float> custom_i{0.2f, 0.4f, 0.6f, 0.8f};
+        CHECK(adapter.set_layer_weights_immediate(0, custom_i.data(), custom_i.size()));
+        CHECK(adapter.get_layer_weights(0, false) == custom_i);
+        CHECK(adapter.get_layer_weights(0, true) == orig0);
+
+        std::vector<double> in(64, 0.25), out(64, 0.0);
+        const double* in_ptrs[1] = {in.data()};
+        double* out_ptrs[1] = {out.data()};
+        adapter.process(in_ptrs, 1, out_ptrs, 1, 64, 1.0, 1.0f, true);
+        CHECK(mock->get_layer_weights("layer0.weight") == custom_i);
+
+        // RT triple buffer: two back-to-back writes -> latest wins on inference
+        CHECK(adapter.prepare_layer_weight_staging(0));
+        CHECK(!adapter.set_layer_weights_rt(0, bad_size.data(), bad_size.size()));
+        const std::vector<float> custom_rt_1{1.1f, 2.2f, 3.3f, 4.4f};
+        const std::vector<float> custom_rt_2{-0.3f, -0.6f, 0.9f, 1.2f};
+        CHECK(adapter.set_layer_weights_rt(0, custom_rt_1.data(), custom_rt_1.size()));
+        CHECK(adapter.set_layer_weights_rt(0, custom_rt_2.data(), custom_rt_2.size()));
+        adapter.process(in_ptrs, 1, out_ptrs, 1, 64, 1.0, 1.0f, true);
+        CHECK(mock->get_layer_weights("layer0.weight") == custom_rt_2);
+
+        adapter.reset_layer_weights_immediate(0);
+        adapter.process(in_ptrs, 1, out_ptrs, 1, 64, 1.0, 1.0f, true);
+        CHECK(mock->get_layer_weights("layer0.weight") == orig0);
+    }
+
+    // 2. Async worker thread: wait-free bend + RT weights drain cleanly across threads
+    {
+        CsoundMockBackend* mock = nullptr;
+        CsoundSessionAdapter adapter([&](const std::string&) {
+            auto b = std::make_unique<CsoundMockBackend>();
+            b->higher_ratio = 256;
+            b->preferred_buffer_size = 256;
+            mock = b.get();
+            return b;
+        });
+
+        OpenOptions opts;
+        opts.model_path = "mock_async_bend.pte";
+        opts.method = "forward";
+        opts.buffer_size = 256;
+        opts.thread_mode = 1;  // async worker
+        opts.safety_sentry = 0;
+        opts.host_sample_rate = 48000.0;
+        opts.ksmps = 128;
+
+        std::string err;
+        CHECK(adapter.open(opts, err));
+        CHECK(adapter.prepare_layer_weight_staging(0));
+
+        const std::vector<float> base_w{0.5f, 0.5f, 0.5f, 0.5f};
+        CHECK(adapter.set_layer_weights_rt(0, base_w.data(), base_w.size()));
+        adapter.set_layer_bend(0, 2.0f, 0.25f, 0.0f, 0.8f, 1, false);
+        adapter.set_latent(true, 0.25f, -0.25f, 0.8f, 0, 0.0f);
+
+        std::vector<double> in(128, 0.25), out(128, 0.0);
+        const double* in_ptrs[1] = {in.data()};
+        double* out_ptrs[1] = {out.data()};
+        for (int blk = 0; blk < 8; ++blk) {
+            adapter.process(in_ptrs, 1, out_ptrs, 1, 128, 1.0, 1.0f, true);
+        }
+
+        CHECK(wait_until([&] { return adapter.session()->engine().get_inference_count() >= 1; }));
+        adapter.session()->release();
+        CHECK(mock != nullptr && mock->forward_count >= 1);
+        CHECK(mock->last_latent_hook_called);
+        CHECK(approx(mock->get_layer_weights("layer0.weight")[0], 1.25f));
+        adapter.close();
+        CHECK(!adapter.is_open());
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -389,6 +719,10 @@ int main() {
     test_encode_decode_multichannel_and_float_overload();
     test_generate_modes();
     test_csound_io_buffer_sizing_and_dump();
+    test_multi_layer_bending_bridge_and_resets();
+    test_trigger_short_circuit_and_sentry();
+    test_latent_terrain_controls();
+    test_raw_weights_and_async_worker_bending();
     std::cout << "[PASS] test_csound_adapter\n";
     return 0;
 }

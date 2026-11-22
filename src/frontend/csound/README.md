@@ -20,6 +20,20 @@ Supports `.pte` (ExecuTorch), `.onnx` (ONNX Runtime), and `.ts` (TorchScript) mo
 | `netbender_layers` | `SLayers[] netbender_layers ihandle` | Returns an `S[]` array containing all bendable layer names. |
 | `netbender_methods` | `SMethods[] netbender_methods ihandle` | Returns an `S[]` array containing available model methods/modes. |
 
+## Implemented Opcodes (Phase 2 — Live Circuit Bending & Weights)
+
+| Opcode | Signature | Description |
+| :--- | :--- | :--- |
+| `netbender_bend` | `netbender_bend ihandle, Slayer, kscale, koffset [, kheat=0, kmemory=-1, kdriftmode=-1, kfrozen=0]`<br>`netbender_bend ihandle, ilayer, kscale, koffset [, kheat=0, kmemory=-1, kdriftmode=-1, kfrozen=0]` | Wait-free k-rate parametric weight bending per layer (supports multiple layers simultaneously). Defaults: `kheat=0` (`>= 0`), `kmemory=-1` (`0..1`, `-1` -> `0.8`), `kdriftmode=-1` (`0`=Noise, `1`=ThermalOU, `2`=RandomWalk, `-1` -> `1`), `kfrozen=0` (`0\|1` locks current drift). |
+| `netbender_short` | `netbender_short ihandle, kactive` | Wait-free k-rate momentary/short-circuit bend gate (`0\|1`). Drives `BendingManager::trigger_short_circuit` in `Momentary` trigger mode. |
+| `netbender_trigger` | `netbender_trigger ihandle, imode [, iatt=-1, irel=-1, ithresh=-1]`<br>`netbender_trigger ihandle, kmode [, katt=-1, krel=-1, kthresh=-1]` | Configures bend trigger mode (`0`=Continuous, `1`=Momentary, `2`=Transient) and optional envelope parameters (`attack` `0.01..1`, `release` `0.5..0.999`, `threshold` `0.01..1`; negative keeps current value). |
+| `netbender_bridge` | `netbender_bridge ihandle, Starget, Ssource, kdepth`<br>`netbender_bridge ihandle, itarget, isource, kdepth` | Wait-free cross-talk bridge blending a target layer's base weights with a source layer (`kdepth` in `0..1`). Pass empty `Ssource=""` or `isource=-1` to disconnect. |
+| `netbender_latent` | `netbender_latent ihandle, ienable, ix, iy, idepth [, imode=0, islew=0]`<br>`netbender_latent ihandle, kenable, kx, ky, kdepth [, kmode=0, kslew=0]` | Controls `LatentTerrainEngine` (`enable` `0\|1`, `x/y` in `-1..1`, `depth` in `0..2`, `mode`: `0`=FourierOrbit, `1`=LatentSlew, `2`=Quantize, `slew` in `0..0.999`). Runs during `forward` when enabled and always during `decode gen`. |
+| `netbender_sentry` | `kblown netbender_sentry ihandle [, kautoreset=-1, kresettrig=0]` | Monitors `SafetySentry` fuse state (`1` if tripped/bypassed, `0` if healthy). Optional `kautoreset` (`0\|1`, `<0` leaves unchanged) toggles auto-recovery; rising edge on `kresettrig` performs a lock-free fuse + full weight reset. |
+| `netbender_getweights` | `iWeights[] netbender_getweights ihandle, Slayer [, ioriginal=0]`<br>`iWeights[] netbender_getweights ihandle, ilayer [, ioriginal=0]` | Reads a flattened `i[]` tensor of a layer's weights (`0`=live/current weights, `1`=original unbent weights). |
+| `netbender_setweights` | `netbender_setweights ihandle, Slayer, iWeights[]`<br>`netbender_setweights ihandle, ilayer, iWeights[]`<br>`netbender_setweights ihandle, Slayer, kWeights[], ktrig`<br>`netbender_setweights ihandle, ilayer, kWeights[], ktrig` | Injects raw flattened weights into a layer at i-time or via wait-free SPSC triple buffering on a `ktrig` rising edge. Array length must match the layer's element count. |
+| `netbender_resetweights` | `netbender_resetweights ihandle`<br>`netbender_resetweights ihandle, Slayer`<br>`netbender_resetweights ihandle, ktrig`<br>`netbender_resetweights ihandle, Slayer, ktrig`<br>`netbender_resetweights ihandle, ilayer, ktrig` | Resets one layer or all layers back to baseline weights (`i` / `iS` at init time; `ik` / `iSk` / `iik` on rising edge of `ktrig`, where `ilayer < 0` resets all layers). |
+
 ### Model Path Resolution Order
 
 `netbender_load` searches in the following order (probing `.pte`, `.onnx`, `.ts` automatically if `Spath` omits an extension):
@@ -102,4 +116,16 @@ Run from the repository root so relative paths to `models/*` resolve:
 
 # 5. Generative synthesis (decode gen / prior)
 /Applications/Csound/csound src/frontend/csound/examples/04_gen_generative.csd
+
+# 6. Multi-layer parametric bending, cross-layer bridge & weight reset
+/Applications/Csound/csound src/frontend/csound/examples/05_bend_parametric_and_bridge.csd
+
+# 7. Momentary/transient triggers, short-circuit gate & SafetySentry fuse recovery
+/Applications/Csound/csound src/frontend/csound/examples/06_trigger_short_and_sentry.csd
+
+# 8. Latent terrain exploration (FourierOrbit / LatentSlew / Quantize)
+/Applications/Csound/csound src/frontend/csound/examples/07_latent_terrain.csd
+
+# 9. Raw weight inspection & i-rate / k-rate injection (getweights / setweights / resetweights)
+/Applications/Csound/csound src/frontend/csound/examples/08_raw_weights_read_write.csd
 ```

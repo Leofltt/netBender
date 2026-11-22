@@ -70,6 +70,15 @@ auto exercise_bending_and_session_rt(BendingManager& bending,
     session.trigger_short_circuit(true);
     session.trigger_short_circuit(false);
 
+    const std::array<float, 4> rt_weights{0.25f, 0.5f, 0.75f, 1.0f};
+    session.set_layer_bend_rt(0, 1.5f, -0.1f, 0.2f, 0.85f, 1, 0);
+    session.set_layer_bend_rt(1, 2.0f, 0.05f);  // partial sentinel update
+    session.set_layer_bridge_rt(0, 1, 0.25f);
+    session.set_layer_weights_rt(0, rt_weights.data(), rt_weights.size());
+    session.request_reset_layer_weights(1);
+    session.request_reset_all_weights();
+    session.request_fuse_reset();
+
     session.process(f_in, 2, f_out, 2, n_small);
     session.process(f_in, 2, f_out, 2, n_oversized);
     session.process(d_in, 2, d_out, 2, n_small);
@@ -669,7 +678,113 @@ auto test_session_streaming_and_json_persistence() -> void {
         CHECK(!dst.get_last_error().empty());
     }
 
-    std::cout << "  [7/8] NetBenderSession streaming & JSON persistence: PASS\n";
+    std::cout << "  [7/9] NetBenderSession streaming & JSON persistence: PASS\n";
+}
+
+//==============================================================================
+auto test_session_multilayer_rt_bending() -> void {
+    SessionConfig cfg;
+    cfg.use_worker_thread = false;
+    NetBenderSession session(cfg);
+
+    MockBackend* mock = nullptr;
+    session.set_backend_creator([&](const std::string&) {
+        auto b = std::make_unique<MockBackend>();
+        b->in_channels = 1;
+        b->out_channels = 1;
+        b->higher_ratio = 64;
+        b->preferred_buffer_size = 64;
+        mock = b.get();
+        return b;
+    });
+
+    session.prepare(48000.0, 64, 2);
+    CHECK(session.load_model("virtual/multilayer_rt.mock"));
+    CHECK(mock != nullptr);
+
+    // Layer introspection
+    CHECK(session.get_layer_count() == 2);
+    CHECK(session.find_layer_index("layer0.weight") == 0);
+    CHECK(session.find_layer_index("layer1.bias") == 1);
+    CHECK(session.find_layer_index("missing") == -1);
+    CHECK(session.get_layer_name(0) == "layer0.weight");
+    CHECK(session.get_layer_name(1) == "layer1.bias");
+    CHECK(session.get_layer_weight_count(0) == 4);
+    CHECK(session.get_layer_weight_count(1) == 2);
+    CHECK(session.get_layer_names().size() == 2);
+
+    std::array<float, 64> in_l{}, out_l{};
+    std::fill(in_l.begin(), in_l.end(), 0.25f);
+    const float* in_ptrs[1]{in_l.data()};
+    float* out_ptrs[1]{out_l.data()};
+
+    // Simultaneous multi-layer RT bending with full parameters + sentinel preservation
+    session.set_layer_bend_rt(0, 1.5f, 0.1f, 0.25f, 0.9f, static_cast<int>(DriftMode::RandomWalk),
+                              1);
+    session.set_layer_bend_rt(1, 3.0f, 0.2f, 0.0f, 0.8f, static_cast<int>(DriftMode::ThermalOU), 0);
+    // Partial sentinel update for layer 0: update scale & offset, keep heat/memory/drift/frozen
+    session.set_layer_bend_rt(0, 2.0f, -0.5f);
+    session.process(in_ptrs, 1, out_ptrs, 1, 64);
+
+    const auto st0 = session.bending().get_layer_state("layer0.weight");
+    CHECK(approx(st0.scale, 2.0f));
+    CHECK(approx(st0.offset, -0.5f));
+    CHECK(approx(st0.heat, 0.25f));
+    CHECK(approx(st0.memory, 0.9f));
+    CHECK(st0.driftMode == DriftMode::RandomWalk);
+    CHECK(st0.frozen);
+
+    const auto w0 = mock->get_layer_weights("layer0.weight");
+    const auto w1 = mock->get_layer_weights("layer1.bias");
+    CHECK(approx(w0[0], 1.5f));
+    CHECK(approx(w0[1], 0.5f));
+    CHECK(approx(w1[0], 0.5f));
+    CHECK(approx(w1[1], -0.1f));
+
+    // to_json captures both layers bent via RT slots
+    const auto preset = session.to_json(false);
+    CHECK(preset["layers"].contains("layer0.weight"));
+    CHECK(preset["layers"].contains("layer1.bias"));
+
+    // Cross-talk bridge + triple-buffered RT weights (back-to-back writes -> latest wins)
+    CHECK(session.prepare_layer_weight_staging(0));
+    const std::array<float, 4> rt_first{1.0f, 1.0f, 1.0f, 1.0f};
+    const std::array<float, 4> rt_latest{0.2f, 0.4f, 0.6f, 0.8f};
+    CHECK(session.set_layer_weights_rt(0, rt_first.data(), rt_first.size()));
+    CHECK(session.set_layer_weights_rt(0, rt_latest.data(), rt_latest.size()));
+    session.set_layer_bend_rt(0, 1.0f, 0.0f, 0.0f, 0.8f, static_cast<int>(DriftMode::ThermalOU), 0);
+    session.set_layer_bridge_rt(0, 1, 0.5f);
+    session.process(in_ptrs, 1, out_ptrs, 1, 64);
+
+    const auto orig0 = session.get_layer_weights(0, true);
+    const auto orig1 = session.get_layer_weights(1, true);
+    const auto bridged0 = mock->get_layer_weights("layer0.weight");
+    for (size_t i = 0; i < 4; ++i) {
+        CHECK(approx(bridged0[i], 0.5f * rt_latest[i] + 0.5f * orig1[i % 2]));
+    }
+    CHECK(session.get_layer_weights(0, false) == bridged0);
+
+    // Sequence ordering: bend -> reset => reset wins; reset -> bend => bend wins
+    session.set_layer_bend_rt(1, 5.0f, 0.0f);
+    session.request_reset_layer_weights(1);
+    session.process(in_ptrs, 1, out_ptrs, 1, 64);
+    CHECK(mock->get_layer_weights("layer1.bias") == orig1);
+
+    session.request_reset_all_weights();
+    session.set_layer_bend_rt(0, 4.0f, 0.0f);
+    session.process(in_ptrs, 1, out_ptrs, 1, 64);
+    CHECK(approx(mock->get_layer_weights("layer0.weight")[0], 4.0f));
+    CHECK(mock->get_layer_weights("layer1.bias") == orig1);
+
+    // SafetySentry trip + RT request_fuse_reset()
+    session.safety_sentry().trip_fuse();
+    CHECK(session.safety_sentry().is_fuse_blown());
+    session.request_fuse_reset();
+    CHECK(!session.safety_sentry().is_fuse_blown());
+    session.process(in_ptrs, 1, out_ptrs, 1, 64);
+    CHECK(mock->get_layer_weights("layer0.weight") == orig0);
+
+    std::cout << "  [8/9] NetBenderSession native multi-layer RT bending & triple buffer: PASS\n";
 }
 
 //==============================================================================
@@ -691,6 +806,7 @@ auto test_bending_and_session_rtsan() -> void {
 
     session.prepare(48000.0, 256, 2);
     CHECK(session.load_model("virtual/rtsan_session.mock"));
+    CHECK(session.prepare_layer_weight_staging(0));
     session.set_active_layer("layer0.weight");
     session.bending().set_layer_heat("layer0.weight", 0.25f);
     session.latent().set_enabled(true);
@@ -718,7 +834,7 @@ auto test_bending_and_session_rtsan() -> void {
     session.release();
     CHECK(mock != nullptr && mock->forward_count >= 1);
 
-    std::cout << "  [8/8] BendingManager & NetBenderSession RTSan safety: PASS (rtsan="
+    std::cout << "  [9/9] BendingManager & NetBenderSession RTSan safety: PASS (rtsan="
               << (netbender::rtsan::is_enabled() ? "enabled" : "off") << ")\n";
 }
 
@@ -734,8 +850,9 @@ int main() {
     test_trigger_modes_and_envelope();
     test_latent_terrain_engine();
     test_session_streaming_and_json_persistence();
+    test_session_multilayer_rt_bending();
     test_bending_and_session_rtsan();
 
-    std::cout << "All 8/8 bending & session tests passed.\n";
+    std::cout << "All 9/9 bending & session tests passed.\n";
     return 0;
 }

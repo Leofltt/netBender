@@ -54,14 +54,18 @@ auto BendingManager::set_layer_state(const std::string& layer_name, const LayerB
 
 auto BendingManager::set_layer_scale(const std::string& layer_name, float scale) -> void {
     std::lock_guard<std::mutex> lock(m_mutex);
-    m_layer_states[layer_name].scale = scale;
-    m_layer_states[layer_name].isApplied = false;
+    auto& state = m_layer_states[layer_name];
+    state.scale = scale;
+    state.isApplied = false;
+    state.lastAppliedEnv = -1.0f;
 }
 
 auto BendingManager::set_layer_offset(const std::string& layer_name, float offset) -> void {
     std::lock_guard<std::mutex> lock(m_mutex);
-    m_layer_states[layer_name].offset = offset;
-    m_layer_states[layer_name].isApplied = false;
+    auto& state = m_layer_states[layer_name];
+    state.offset = offset;
+    state.isApplied = false;
+    state.lastAppliedEnv = -1.0f;
 }
 
 auto BendingManager::set_layer_heat(const std::string& layer_name, float heat) -> void {
@@ -87,21 +91,27 @@ auto BendingManager::set_layer_frozen(const std::string& layer_name, bool frozen
 auto BendingManager::set_layer_bridge_source(const std::string& layer_name,
                                              const std::string& source_layer) -> void {
     std::lock_guard<std::mutex> lock(m_mutex);
-    m_layer_states[layer_name].bridgeSourceLayer = source_layer;
-    m_layer_states[layer_name].isApplied = false;
+    auto& state = m_layer_states[layer_name];
+    state.bridgeSourceLayer = source_layer;
+    state.isApplied = false;
+    state.lastAppliedEnv = -1.0f;
 }
 
 auto BendingManager::set_layer_bridge_depth(const std::string& layer_name, float depth) -> void {
     std::lock_guard<std::mutex> lock(m_mutex);
-    m_layer_states[layer_name].bridgeDepth = std::clamp(depth, 0.0f, 1.0f);
-    m_layer_states[layer_name].isApplied = false;
+    auto& state = m_layer_states[layer_name];
+    state.bridgeDepth = std::clamp(depth, 0.0f, 1.0f);
+    state.isApplied = false;
+    state.lastAppliedEnv = -1.0f;
 }
 
 auto BendingManager::set_layer_drawn_weights(const std::string& layer_name,
                                              const std::vector<float>& weights) -> void {
     std::lock_guard<std::mutex> lock(m_mutex);
-    m_layer_states[layer_name].drawnWeights = weights;
-    m_layer_states[layer_name].isApplied = false;
+    auto& state = m_layer_states[layer_name];
+    state.drawnWeights = weights;
+    state.isApplied = false;
+    state.lastAppliedEnv = -1.0f;
 }
 
 auto BendingManager::set_layer_original_weights(const std::string& layer_name,
@@ -182,6 +192,7 @@ auto BendingManager::restore_layer_state(const std::string& name, float scale, f
     state.driftMode = drift_mode;
     state.frozen = frozen;
     state.isApplied = false;
+    state.lastAppliedEnv = -1.0f;
 }
 
 auto BendingManager::set_random_seed(uint64_t seed) -> void {
@@ -253,6 +264,7 @@ auto BendingManager::apply_bending(IBackend* backend, const std::string& active_
                 state.heat = new_heat;
                 state.memory = new_memory;
                 state.isApplied = false;
+                state.lastAppliedEnv = -1.0f;
             }
         }
     }

@@ -345,6 +345,7 @@ auto CsoundSessionAdapter::close() -> void {
         m_session->engine().detach_backend();
         m_session.reset();
     }
+
     m_in_channels = 0;
     m_out_channels = 0;
     m_in_ratio = 1;
@@ -550,6 +551,140 @@ auto CsoundSessionAdapter::format_dump() const -> std::string {
         oss << ")\n";
     }
     return oss.str();
+}
+
+auto CsoundSessionAdapter::get_layer_count() const -> int {
+    return (m_open && m_session) ? m_session->get_layer_count() : 0;
+}
+
+auto CsoundSessionAdapter::find_layer_index(const std::string& name) const -> int {
+    return (m_open && m_session) ? m_session->find_layer_index(name) : -1;
+}
+
+auto CsoundSessionAdapter::get_layer_name(int index) const -> std::string {
+    return (m_open && m_session) ? m_session->get_layer_name(index) : std::string{};
+}
+
+auto CsoundSessionAdapter::get_layer_weight_count(int index) const -> size_t {
+    return (m_open && m_session) ? m_session->get_layer_weight_count(index) : 0;
+}
+
+auto CsoundSessionAdapter::set_layer_bend(int layer_idx, float scale, float offset, float heat,
+                                          float memory, int drift_mode, bool frozen) noexcept
+    -> void {
+    if (m_open && m_session) {
+        m_session->set_layer_bend_rt(layer_idx, scale, offset, heat, memory, drift_mode,
+                                     frozen ? 1 : 0);
+    }
+}
+
+auto CsoundSessionAdapter::set_layer_bridge(int target_idx, int source_idx, float depth) noexcept
+    -> void {
+    if (m_open && m_session) {
+        m_session->set_layer_bridge_rt(target_idx, source_idx, depth);
+    }
+}
+
+auto CsoundSessionAdapter::set_short_circuit(bool active) noexcept -> void {
+    if (m_open && m_session) {
+        m_session->trigger_short_circuit(active);
+    }
+}
+
+auto CsoundSessionAdapter::set_trigger(int mode, float attack, float release,
+                                       float threshold) noexcept -> void {
+    if (!m_open || !m_session) {
+        return;
+    }
+    auto& bm = m_session->bending();
+    bm.set_trigger_mode(static_cast<TriggerMode>(std::clamp(mode, 0, 2)));
+    if (attack >= 0.0f) {
+        bm.set_envelope_attack(attack);
+    }
+    if (release >= 0.0f) {
+        bm.set_envelope_release(release);
+    }
+    if (threshold >= 0.0f) {
+        bm.set_transient_threshold(threshold);
+    }
+}
+
+auto CsoundSessionAdapter::set_latent(bool enabled, float x, float y, float depth, int mode,
+                                      float slew) noexcept -> void {
+    if (!m_open || !m_session) {
+        return;
+    }
+    auto& lte = m_session->latent();
+    lte.set_enabled(enabled);
+    lte.set_coords(x, y);
+    lte.set_depth(depth);
+    lte.set_mode(static_cast<LatentMode>(std::clamp(mode, 0, 2)));
+    lte.set_slew(slew);
+}
+
+auto CsoundSessionAdapter::get_sentry_blown() const noexcept -> bool {
+    return (m_open && m_session) ? m_session->safety_sentry().is_fuse_blown() : false;
+}
+
+auto CsoundSessionAdapter::set_sentry_auto_reset(bool enabled) noexcept -> void {
+    if (m_open && m_session) {
+        m_session->safety_sentry().set_auto_reset(enabled);
+    }
+}
+
+auto CsoundSessionAdapter::request_fuse_reset() noexcept -> void {
+    if (m_open && m_session) {
+        m_session->request_fuse_reset();
+    }
+}
+
+auto CsoundSessionAdapter::get_layer_weights(int layer_idx, bool original) const
+    -> std::vector<float> {
+    return (m_open && m_session) ? m_session->get_layer_weights(layer_idx, original)
+                                 : std::vector<float>{};
+}
+
+auto CsoundSessionAdapter::prepare_layer_weight_staging(int layer_idx) -> bool {
+    return (m_open && m_session) ? m_session->prepare_layer_weight_staging(layer_idx) : false;
+}
+
+auto CsoundSessionAdapter::set_layer_weights_immediate(int layer_idx, const float* data,
+                                                       size_t count) -> bool {
+    return (m_open && m_session) ? m_session->set_layer_weights_immediate(layer_idx, data, count)
+                                 : false;
+}
+
+auto CsoundSessionAdapter::set_layer_weights_rt(int layer_idx, const float* data,
+                                                size_t count) noexcept -> bool {
+    return (m_open && m_session) ? m_session->set_layer_weights_rt(layer_idx, data, count) : false;
+}
+
+auto CsoundSessionAdapter::request_reset_layer_weights(int layer_idx) noexcept -> void {
+    if (m_open && m_session) {
+        m_session->request_reset_layer_weights(layer_idx);
+    }
+}
+
+auto CsoundSessionAdapter::request_reset_all_weights() noexcept -> void {
+    if (m_open && m_session) {
+        m_session->request_reset_all_weights();
+    }
+}
+
+auto CsoundSessionAdapter::reset_layer_weights_immediate(int layer_idx) -> void {
+    if (!m_open || !m_session) {
+        return;
+    }
+    const std::string name = m_session->get_layer_name(layer_idx);
+    if (!name.empty()) {
+        m_session->clear_layer_bending(name);
+    }
+}
+
+auto CsoundSessionAdapter::reset_all_weights_immediate() -> void {
+    if (m_open && m_session) {
+        m_session->clear_all_layer_bending();
+    }
 }
 
 }  // namespace netbender::csound_fe
