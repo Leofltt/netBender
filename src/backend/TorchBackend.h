@@ -34,6 +34,7 @@ protected:
     std::unordered_map<std::string, torch::Tensor> m_parameter_cache;
     auto prepare_io_tensor(std::vector<float*>& in_buffer, int in_dim, int n_batches, int in_ratio,
                            int n_vec) -> torch::Tensor;
+    std::vector<float> m_decode_gen_latent_history;
     std::string m_last_error;
 
 public:
@@ -76,6 +77,8 @@ public:
 
     auto perform_decode_gen(std::vector<float*>& out_buffer, int n_batches, int n_out_channels,
                             int n_vec, IBackend::LatentHook latent_hook = nullptr) -> void override;
+
+    auto clear_decode_gen_fifo() -> void override;
 
     auto has_method(std::string method_name) -> bool override;
     auto has_prior_decode() -> bool override;

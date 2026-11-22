@@ -1444,7 +1444,11 @@ auto OnnxBackend::perform_decode_gen(std::vector<float*>& out_buffer, int n_batc
                                : std::max(4, (n_vec + (int)kCrossfadeSamples) / ratio);
 
         // Receptive field history frames to carry across callbacks to eliminate boundary transients
-        int hist_lat_steps = (m_output_offset > 0) ? (int)(m_output_offset / ratio) : 0;
+        int left_lat_steps = (m_output_offset > 0) ? (int)(m_output_offset / ratio) : 0;
+        size_t trail_samples =
+            (m_history_samples > m_output_offset) ? (m_history_samples - m_output_offset) : 0;
+        int right_lat_steps = (trail_samples > 0) ? (int)(trail_samples / ratio) : 0;
+        int hist_lat_steps = left_lat_steps + right_lat_steps;
         int total_lat_steps = hist_lat_steps + latent_steps;
 
         // Continuous Ornstein-Uhlenbeck smooth latent random walk
@@ -1472,6 +1476,11 @@ auto OnnxBackend::perform_decode_gen(std::vector<float*>& out_buffer, int n_batc
                 }
                 m_decode_gen_latent_state[c] = prev;
             }
+            if (latent_hook) {
+                IBackend::LatentBuffer hist_buf{m_decode_gen_latent_history.data(),
+                                                (int64_t)latent_dim, (int64_t)hist_lat_steps};
+                latent_hook(hist_buf);
+            }
         }
 
         // Loop synthesis passes until FIFO has enough samples to fulfill n_vec + kCrossfadeSamples
@@ -1480,21 +1489,12 @@ auto OnnxBackend::perform_decode_gen(std::vector<float*>& out_buffer, int n_batc
         while (fifo_samples < (size_t)(n_vec + kCrossfadeSamples) &&
                synth_iterations < max_synth_iterations) {
             synth_iterations++;
-            std::vector<float> latent_data((size_t)(latent_dim * total_lat_steps));
 
-            // 1. Fill leading history steps from rolling history
-            if (hist_lat_steps > 0) {
-                for (int c = 0; c < latent_dim; ++c) {
-                    std::memcpy(latent_data.data() + (c * total_lat_steps),
-                                m_decode_gen_latent_history.data() + (c * hist_lat_steps),
-                                hist_lat_steps * sizeof(float));
-                }
-            }
-
-            // 2. Generate new latent steps via Ornstein-Uhlenbeck random walk
+            // 1. Generate new latent steps via Ornstein-Uhlenbeck random walk
+            std::vector<float> new_latents((size_t)(latent_dim * latent_steps));
             for (int c = 0; c < latent_dim; ++c) {
                 float prev = m_decode_gen_latent_state[c];
-                float* ch_ptr = latent_data.data() + (c * total_lat_steps) + hist_lat_steps;
+                float* ch_ptr = new_latents.data() + (c * latent_steps);
                 for (int t = 0; t < latent_steps; ++t) {
                     float eps = norm_dist(rng_gen);
                     prev = alpha * prev + beta * eps;
@@ -1503,22 +1503,27 @@ auto OnnxBackend::perform_decode_gen(std::vector<float*>& out_buffer, int n_batc
                 m_decode_gen_latent_state[c] = prev;
             }
 
-            // 3. Update rolling history with the tail of newly synthesized latents
-            if (hist_lat_steps > 0) {
-                for (int c = 0; c < latent_dim; ++c) {
-                    const float* ch_end = latent_data.data() + (c * total_lat_steps) +
-                                          (total_lat_steps - hist_lat_steps);
-                    std::memcpy(m_decode_gen_latent_history.data() + (c * hist_lat_steps), ch_end,
-                                hist_lat_steps * sizeof(float));
-                }
+            // Apply latent hook once on full contiguous [latent_dim, latent_steps] buffer
+            if (latent_hook) {
+                IBackend::LatentBuffer buf{new_latents.data(), (int64_t)latent_dim,
+                                           (int64_t)latent_steps};
+                latent_hook(buf);
             }
 
-            // Apply latent hook directly on contiguous new [latent_dim, latent_steps] buffer
-            if (latent_hook) {
-                for (int c = 0; c < latent_dim; ++c) {
-                    float* slice_ptr = latent_data.data() + (c * total_lat_steps) + hist_lat_steps;
-                    IBackend::LatentBuffer buf{slice_ptr, 1, (int64_t)latent_steps};
-                    latent_hook(buf);
+            // 2. Assemble [history | post-hook new_latents] and update rolling tail post-hook
+            std::vector<float> latent_data((size_t)(latent_dim * total_lat_steps));
+            for (int c = 0; c < latent_dim; ++c) {
+                float* dst = latent_data.data() + (c * total_lat_steps);
+                if (hist_lat_steps > 0) {
+                    std::memcpy(dst, m_decode_gen_latent_history.data() + (c * hist_lat_steps),
+                                hist_lat_steps * sizeof(float));
+                }
+                std::memcpy(dst + hist_lat_steps, new_latents.data() + (c * latent_steps),
+                            latent_steps * sizeof(float));
+                if (hist_lat_steps > 0) {
+                    std::memcpy(m_decode_gen_latent_history.data() + (c * hist_lat_steps),
+                                dst + (total_lat_steps - hist_lat_steps),
+                                hist_lat_steps * sizeof(float));
                 }
             }
 
@@ -1543,11 +1548,14 @@ auto OnnxBackend::perform_decode_gen(std::vector<float*>& out_buffer, int n_batc
                                                ? (int)out_shape[2]
                                                : (total_lat_steps * ratio);
 
-                    // Discard the initial transient / receptive field offset
-                    int offset = (hist_lat_steps > 0) ? (int)m_output_offset : 0;
-                    if (offset >= full_out_samples)
+                    // Discard leading left-context offset and trailing right-context tail
+                    int offset = (left_lat_steps > 0) ? (int)m_output_offset : 0;
+                    int trail = (right_lat_steps > 0) ? (int)trail_samples : 0;
+                    if (offset + trail >= full_out_samples) {
                         offset = 0;
-                    int out_samples = std::max(0, full_out_samples - offset);
+                        trail = 0;
+                    }
+                    int out_samples = std::max(0, full_out_samples - offset - trail);
 
                     if (m_decode_gen_fifo.size() < (size_t)num_channels) {
                         m_decode_gen_fifo.resize(num_channels);

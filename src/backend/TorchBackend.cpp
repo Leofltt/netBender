@@ -370,6 +370,23 @@ auto TorchBackend::perform_decode_gen(std::vector<float*>& out_buffer, int n_bat
         std::string prior_method =
             has_method("prior") ? "prior" : (has_method("generate") ? "generate" : "");
 
+        // Symmetric rolling context overlap for stateless non-causal .ts decoders
+        int left_lat_steps = 0;
+        int right_lat_steps = 0;
+        if (prior_method.empty() && n_batches == 1) {
+            if (latent_dim >= 256 && latent_ratio >= 2048) {
+                left_lat_steps = 2;
+                right_lat_steps = 2;
+            } else if (latent_dim >= 64 && latent_ratio >= 1024) {
+                left_lat_steps = 1;
+                right_lat_steps = 1;
+            } else if (latent_dim >= 128 && latent_ratio <= 640) {
+                left_lat_steps = 2;
+                right_lat_steps = 2;
+            }
+        }
+        int hist_lat_steps = left_lat_steps + right_lat_steps;
+
         if (!prior_method.empty()) {
             // If model has a learned prior (RAVE / Darbouka), seed base latents using prior!
             auto prior_params = get_method_params(prior_method);
@@ -416,6 +433,24 @@ auto TorchBackend::perform_decode_gen(std::vector<float*>& out_buffer, int n_bat
                 }
             }
 
+            if (hist_lat_steps > 0 &&
+                m_decode_gen_latent_history.size() != (size_t)(latent_dim * hist_lat_steps)) {
+                m_decode_gen_latent_history.resize(latent_dim * hist_lat_steps);
+                for (int c = 0; c < latent_dim; ++c) {
+                    float prev = m_decode_gen_latent_state[c];
+                    for (int t = 0; t < hist_lat_steps; ++t) {
+                        prev = alpha * prev + beta * norm_dist(rng_gen);
+                        m_decode_gen_latent_history[c * hist_lat_steps + t] = prev;
+                    }
+                    m_decode_gen_latent_state[c] = prev;
+                }
+                if (latent_hook) {
+                    IBackend::LatentBuffer hist_buf{m_decode_gen_latent_history.data(),
+                                                    (int64_t)latent_dim, (int64_t)hist_lat_steps};
+                    latent_hook(hist_buf);
+                }
+            }
+
             auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
             auto cpu_latent = torch::empty({n_batches, latent_dim, latent_steps}, options);
             float* ldata = cpu_latent.data_ptr<float>();
@@ -450,6 +485,26 @@ auto TorchBackend::perform_decode_gen(std::vector<float*>& out_buffer, int n_bat
             }
         }
 
+        if (hist_lat_steps > 0 && n_batches == 1 && latent_tensor.dim() >= 3) {
+            auto cpu_new = latent_tensor.to(CPU).contiguous();
+            int actual_steps = (int)cpu_new.size(2);
+            auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+            auto full_latent =
+                torch::empty({1, latent_dim, hist_lat_steps + actual_steps}, options);
+            float* full_ptr = full_latent.data_ptr<float>();
+            const float* new_ptr = cpu_new.data_ptr<float>();
+            for (int c = 0; c < latent_dim; ++c) {
+                float* dst = full_ptr + c * (hist_lat_steps + actual_steps);
+                std::memcpy(dst, m_decode_gen_latent_history.data() + (c * hist_lat_steps),
+                            hist_lat_steps * sizeof(float));
+                std::memcpy(dst + hist_lat_steps, new_ptr + (c * actual_steps),
+                            actual_steps * sizeof(float));
+                std::memcpy(m_decode_gen_latent_history.data() + (c * hist_lat_steps),
+                            dst + actual_steps, hist_lat_steps * sizeof(float));
+            }
+            latent_tensor = full_latent;
+        }
+
         std::unique_lock<std::mutex> model_lock(m_model_mutex);
         auto kwargs = empty_kwargs();
         std::vector<torch::jit::IValue> decode_inputs = {latent_tensor.to(m_device)};
@@ -471,16 +526,24 @@ auto TorchBackend::perform_decode_gen(std::vector<float*>& out_buffer, int n_bat
         tensor_out = tensor_out.contiguous().to(CPU);
         const float* out_data = tensor_out.data_ptr<float>();
 
+        int lead_trim = left_lat_steps * latent_ratio;
+        int trail_trim = right_lat_steps * latent_ratio;
+        if (lead_trim + trail_trim >= new_samples) {
+            lead_trim = 0;
+            trail_trim = 0;
+        }
+        int valid_samples = std::max(0, new_samples - lead_trim - trail_trim);
+
         // Append synthesized output into per-channel FIFO buffers with equal-power crossfade
         if (m_decode_gen_fifo.size() < (size_t)model_out_ch) {
             m_decode_gen_fifo.resize(model_out_ch);
         }
         size_t prev_available = m_decode_gen_fifo[0].size();
         size_t overlap =
-            std::min(kCrossfadeSamples, std::min(prev_available, (size_t)new_samples / 2));
+            std::min(kCrossfadeSamples, std::min(prev_available, (size_t)valid_samples / 2));
 
         for (int c = 0; c < model_out_ch; ++c) {
-            const float* src = out_data + c * new_samples;
+            const float* src = out_data + c * new_samples + lead_trim;
             if (overlap > 0) {
                 size_t tail_idx = prev_available - overlap;
                 for (size_t i = 0; i < overlap; ++i) {
@@ -492,9 +555,9 @@ auto TorchBackend::perform_decode_gen(std::vector<float*>& out_buffer, int n_bat
                     m_decode_gen_fifo[c][tail_idx + i] = old_s * w_out + new_s * w_in;
                 }
                 m_decode_gen_fifo[c].insert(m_decode_gen_fifo[c].end(), src + overlap,
-                                            src + new_samples);
+                                            src + valid_samples);
             } else {
-                m_decode_gen_fifo[c].insert(m_decode_gen_fifo[c].end(), src, src + new_samples);
+                m_decode_gen_fifo[c].insert(m_decode_gen_fifo[c].end(), src, src + valid_samples);
             }
         }
     }
@@ -529,6 +592,11 @@ auto TorchBackend::perform_decode_gen(std::vector<float*>& out_buffer, int n_bat
             ch.clear();
         m_decode_gen_fifo_read_idx = 0;
     }
+}
+
+auto TorchBackend::clear_decode_gen_fifo() -> void {
+    IBackend::clear_decode_gen_fifo();
+    m_decode_gen_latent_history.clear();
 }
 
 auto TorchBackend::has_prior_decode() -> bool {

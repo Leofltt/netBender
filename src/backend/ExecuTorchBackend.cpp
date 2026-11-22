@@ -773,34 +773,91 @@ auto ExecuTorchBackend::perform_decode_gen(std::vector<float*>& out_buffer, int 
         }
     }
 
-    int latent_steps = std::max(1, m_decode_latent_steps);
+    int total_lat_steps = std::max(1, m_decode_latent_steps);
     int latent_dim = std::max(1, m_latent_dim);
-    int gen_samples = std::max(1, m_buffer_size);
+    int left_lat_steps = (m_output_offset > 0) ? (int)(m_output_offset / ratio) : 0;
+    size_t trail_samples =
+        (m_history_samples > m_output_offset) ? (m_history_samples - m_output_offset) : 0;
+    int right_lat_steps = (trail_samples > 0) ? (int)(trail_samples / ratio) : 0;
+    int hist_lat_steps =
+        std::min(std::max(0, total_lat_steps - 1), left_lat_steps + right_lat_steps);
+    int new_lat_steps = total_lat_steps - hist_lat_steps;
+    int gen_samples = std::max(
+        1,
+        std::min(m_buffer_size > 0 ? m_buffer_size : new_lat_steps * ratio, new_lat_steps * ratio));
 
     const float alpha = (ratio <= 640) ? 0.94f : 0.86f;
     const float beta = std::sqrt(1.0f - alpha * alpha);
     const float latent_scale =
-        (m_latent_scale > 0.0f) ? m_latent_scale : ((latent_dim >= 128) ? 5.0f : 1.0f);
-    if ((int)m_decode_gen_latent_state.size() != latent_dim) {
-        m_decode_gen_latent_state.assign(latent_dim, 0.0f);
-    }
+        (latent_dim >= 256 && m_latent_scale == 1.0f)
+            ? 0.25f
+            : ((m_latent_scale > 0.0f) ? m_latent_scale
+                                       : ((latent_dim >= 128 && ratio <= 640) ? 5.0f : 1.0f));
 
     static thread_local std::mt19937 gen{std::random_device{}()};
     std::normal_distribution<float> dist(0.0f, 1.0f);
 
-    while (fifo_samples < (size_t)(n_vec + kCrossfadeSamples)) {
-        std::vector<float> z_data((size_t)(latent_dim * latent_steps), 0.0f);
-        for (int t = 0; t < latent_steps; ++t) {
-            for (int d = 0; d < latent_dim; ++d) {
-                m_decode_gen_latent_state[d] =
-                    alpha * m_decode_gen_latent_state[d] + beta * dist(gen);
-                z_data[d * latent_steps + t] = m_decode_gen_latent_state[d] * latent_scale;
+    if ((int)m_decode_gen_latent_state.size() != latent_dim) {
+        m_decode_gen_latent_state.resize(latent_dim);
+        for (int d = 0; d < latent_dim; ++d) {
+            m_decode_gen_latent_state[d] = dist(gen);
+        }
+    }
+
+    if (hist_lat_steps > 0 &&
+        m_decode_gen_latent_history.size() != (size_t)(latent_dim * hist_lat_steps)) {
+        m_decode_gen_latent_history.resize(latent_dim * hist_lat_steps);
+        for (int d = 0; d < latent_dim; ++d) {
+            float prev = m_decode_gen_latent_state[d];
+            for (int t = 0; t < hist_lat_steps; ++t) {
+                prev = alpha * prev + beta * dist(gen);
+                m_decode_gen_latent_history[d * hist_lat_steps + t] = prev * latent_scale;
             }
+            m_decode_gen_latent_state[d] = prev;
+        }
+        if (latent_hook) {
+            LatentBuffer hist_buf{m_decode_gen_latent_history.data(), (int64_t)latent_dim,
+                                  (int64_t)hist_lat_steps};
+            latent_hook(hist_buf);
+        }
+    }
+
+    int synth_iterations = 0;
+    const int max_synth_iterations = 8;
+    while (fifo_samples < (size_t)(n_vec + kCrossfadeSamples) &&
+           synth_iterations < max_synth_iterations) {
+        synth_iterations++;
+
+        std::vector<float> new_latents((size_t)(latent_dim * new_lat_steps), 0.0f);
+        for (int d = 0; d < latent_dim; ++d) {
+            float prev = m_decode_gen_latent_state[d];
+            float* ch_ptr = new_latents.data() + (d * new_lat_steps);
+            for (int t = 0; t < new_lat_steps; ++t) {
+                prev = alpha * prev + beta * dist(gen);
+                ch_ptr[t] = prev * latent_scale;
+            }
+            m_decode_gen_latent_state[d] = prev;
         }
 
         if (latent_hook) {
-            LatentBuffer buf{z_data.data(), latent_dim, latent_steps};
+            LatentBuffer buf{new_latents.data(), (int64_t)latent_dim, (int64_t)new_lat_steps};
             latent_hook(buf);
+        }
+
+        std::vector<float> z_data((size_t)(latent_dim * total_lat_steps), 0.0f);
+        for (int d = 0; d < latent_dim; ++d) {
+            float* dst = z_data.data() + (d * total_lat_steps);
+            if (hist_lat_steps > 0) {
+                std::memcpy(dst, m_decode_gen_latent_history.data() + (d * hist_lat_steps),
+                            hist_lat_steps * sizeof(float));
+            }
+            std::memcpy(dst + hist_lat_steps, new_latents.data() + (d * new_lat_steps),
+                        new_lat_steps * sizeof(float));
+            if (hist_lat_steps > 0) {
+                std::memcpy(m_decode_gen_latent_history.data() + (d * hist_lat_steps),
+                            dst + (total_lat_steps - hist_lat_steps),
+                            hist_lat_steps * sizeof(float));
+            }
         }
 
         std::vector<std::vector<float>> gen_out(out_ch, std::vector<float>(gen_samples, 0.0f));
