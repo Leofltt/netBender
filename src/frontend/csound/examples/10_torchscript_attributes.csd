@@ -11,8 +11,9 @@ ksmps  = 128
 nchnls = 2
 0dbfs  = 1
 
-; 1. TorchScript model with registered nn_tilde attributes (learn_target, reset_target, etc.)
-giTsModel netbender_load "models/voice_from_ckpt.ts", "forward", 2048, 0, 0
+; 1. TorchScript model attribute check (if exported with registered nn_tilde attributes such as learn_target,
+;    the toggle test below exercises netbender_attr_set as well)
+giTsModel netbender_load "models/darbouka.ts", "forward", 2048, 0, 0
 prints "\n--- TorchScript (.ts) Attribute Check ---\n"
 netbender_dump giTsModel
 
@@ -20,13 +21,21 @@ gSTsAttrs[] netbender_attrs giTsModel, 1
 giNumTsAttrs lenarray gSTsAttrs
 prints "Settable attributes (%d):\n", giNumTsAttrs
 giIdx = 0
+giHasLearnTarget = 0
 while (giIdx < giNumTsAttrs) do
     SVal netbender_attr_get giTsModel, gSTsAttrs[giIdx]
     prints "  attr[%d] %s = '%s'\n", giIdx, gSTsAttrs[giIdx], SVal
+    if (strcmp(gSTsAttrs[giIdx], "learn_target") == 0) then
+        giHasLearnTarget = 1
+    endif
     giIdx += 1
 od
 
-if (giNumTsAttrs > 0) then
+gSTsRawAttrs[] netbender_attrs giTsModel, 0
+giNumTsRawAttrs lenarray gSTsRawAttrs
+prints "All raw attributes (%d)\n", giNumTsRawAttrs
+
+if (giHasLearnTarget > 0) then
     SBefore netbender_attr_get giTsModel, "learn_target"
     netbender_attr_set giTsModel, "learn_target", 1
     SAfterNum netbender_attr_get giTsModel, "learn_target"
