@@ -2,7 +2,7 @@
 
 Csound 7 plugin opcode frontend built on NetBender's self-contained `NetBender::backend` (`NetBenderSession`, `StreamingEngine`, and `ResamplingRingBufferBank`).
 
-Supports `.pte` (ExecuTorch), `.onnx` (ONNX Runtime), and `.ts` (TorchScript) models with automatic host ↔ model sample-rate resampling, arbitrary `ksmps`, and auto selection between asynchronous worker inference (`-odac`) and synchronous inline inference (`-o file.wav` / `-n`).
+Supports `.pte` (ExecuTorch), `.onnx` (ONNX Runtime), and `.ts` (TorchScript) models with automatic host ↔ model sample-rate resampling, independence from Csound's `ksmps` (control period) and `-b`/`-B` I/O buffer sizes, and auto selection between asynchronous worker inference (`-odac`) and synchronous inline inference (`-o file.wav` / `-n`).
 
 ---
 
@@ -26,6 +26,18 @@ Supports `.pte` (ExecuTorch), `.onnx` (ONNX Runtime), and `.ts` (TorchScript) mo
 1. Exact / relative-to-current-working-directory / absolute path.
 2. Csound's `FindInputFile` (`SSDIR`, `SFDIR`, `INCDIR`).
 3. `~/.netbender/models` (`%USERPROFILE%\.netbender\models` on Windows).
+
+### Recommended Real-Time Flags (`-b` / `-B` / `ksmps`)
+
+Csound separates control timing from audio I/O buffering:
+- **`ksmps`** (`sr / kr`): control-rate period in frames (e.g. `64` or `128`), i.e. how many samples each `aperf()` call processes.
+- **`-b <frames>`**: Csound's software I/O buffer size (read from `OPARMS::outbufsamps`). `NetBender` sizes its `StreamingEngine` rings and resampler scratch to accommodate `-b` bursts even when `ksmps` is small. Keep `-b <= ibufsize` (for example `-b 256` with `ibufsize = 2048`) so worker-thread bursts never overflow a model cycle.
+- **`-B <frames>`**: Csound's hardware audio I/O buffer size (read from `OPARMS::oMaxLag`, e.g. `-B 1024`).
+
+Example real-time `<CsOptions>`:
+```text
+-odac -b 256 -B 1024
+```
 
 ---
 

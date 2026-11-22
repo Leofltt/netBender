@@ -350,6 +350,36 @@ auto test_generate_modes() -> void {
     }
 }
 
+auto test_csound_io_buffer_sizing_and_dump() -> void {
+    CsoundSessionAdapter adapter(
+        [](const std::string&) { return std::make_unique<CsoundMockBackend>(); });
+
+    OpenOptions opts;
+    opts.model_path = "mock_buffers.pte";
+    opts.method = "forward";
+    opts.buffer_size = 2048;
+    opts.host_sample_rate = 48000.0;
+    opts.ksmps = 32;
+    opts.sw_buffer_frames = 1024;
+    opts.hw_buffer_frames = 2048;
+    opts.is_realtime_output = true;
+
+    std::string err;
+    CHECK(adapter.open(opts, err));
+    CHECK(adapter.session() != nullptr);
+    CHECK(adapter.session()->engine().get_config().max_host_block_size >= 1024);
+
+    const auto summary = adapter.get_summary();
+    CHECK(summary.ksmps == 32);
+    CHECK(summary.sw_buffer_frames == 1024);
+    CHECK(summary.hw_buffer_frames == 2048);
+
+    const std::string dump = adapter.format_dump();
+    CHECK(dump.find("ksmps=32") != std::string::npos);
+    CHECK(dump.find("sw_buf(-b)=1024 frames") != std::string::npos);
+    CHECK(dump.find("hw_buf(-B)=2048 frames") != std::string::npos);
+}
+
 }  // namespace
 
 int main() {
@@ -358,6 +388,7 @@ int main() {
     test_process_resampling_and_0dbfs();
     test_encode_decode_multichannel_and_float_overload();
     test_generate_modes();
+    test_csound_io_buffer_sizing_and_dump();
     std::cout << "[PASS] test_csound_adapter\n";
     return 0;
 }

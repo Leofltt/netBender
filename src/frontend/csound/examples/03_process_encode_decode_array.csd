@@ -2,7 +2,8 @@
 <CsOptions>
 ; Verification 03: Split encode -> Csound audio-rate latent manipulation -> decode via a[] array overload
 ; Swap -odac with -o encode_decode_demo.wav for deterministic offline rendering.
--odac
+; -b: Csound software I/O buffer (frames), -B: hardware buffer (frames) — distinct from ksmps (control rate).
+-odac -b 256 -B 1024
 ;--opcode-dir=~/Library/csound/7.0/plugins64
 </CsOptions>
 <CsInstruments>

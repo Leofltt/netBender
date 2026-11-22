@@ -153,6 +153,39 @@ auto is_csound_realtime(CSOUND* cs) -> bool {
            starts_with_ci(parms->outfilename, "devaudio");
 }
 
+auto get_csound_io_buffers(CSOUND* cs, int ksmps_val) -> CsoundIoBuffers {
+    const int safe_ksmps = std::max(1, ksmps_val);
+#if defined(__APPLE__)
+    constexpr int kDefaultSwBuf = 128;
+    constexpr int kDefaultHwBuf = 512;
+#else
+    constexpr int kDefaultSwBuf = 256;
+    constexpr int kDefaultHwBuf = 1024;
+#endif
+
+    const OPARMS* parms = (cs != nullptr && cs->GetOParms != nullptr) ? cs->GetOParms(cs) : nullptr;
+    const int raw_b = (parms != nullptr) ? static_cast<int>(parms->outbufsamps) : 0;
+    const int raw_B = (parms != nullptr) ? static_cast<int>(parms->oMaxLag) : 0;
+
+    int sw = kDefaultSwBuf;
+    if (raw_b < 0) {
+        sw = (-raw_b) * safe_ksmps;
+    } else if (raw_b > 0) {
+        sw = raw_b;
+    }
+    sw = std::max(sw, safe_ksmps);
+
+    int hw = kDefaultHwBuf;
+    if (raw_B < 0) {
+        hw = (-raw_B) * safe_ksmps;
+    } else if (raw_B > 0) {
+        hw = raw_B;
+    }
+    hw = std::max(hw, sw);
+
+    return CsoundIoBuffers{sw, hw};
+}
+
 auto make_csound_file_finder(CSOUND* cs) -> HostFileFinder {
     return [cs](const std::string& candidate) -> std::string {
         if (cs == nullptr || cs->FindInputFile == nullptr || candidate.empty()) {

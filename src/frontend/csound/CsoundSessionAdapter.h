@@ -18,7 +18,9 @@ struct OpenOptions {
         -1};            // -1 = auto (on for audio modes, off for encode/decode), 0 = off, 1 = on
     int dry_delay{-1};  // -1 = auto (on for forward, off for gen/encode/decode), 0 = off, 1 = on
     double host_sample_rate{44100.0};
-    int ksmps{128};
+    int ksmps{128};           // Csound control period (sr / kr): frames per aperf() call
+    int sw_buffer_frames{0};  // Csound -b software I/O buffer in frames (0 = unspecified)
+    int hw_buffer_frames{0};  // Csound -B hardware I/O buffer in frames (0 = unspecified)
     int max_channels{2};
     bool is_realtime_output{true};
 };
@@ -36,6 +38,9 @@ struct ModelSummary {
     bool resampling_active{false};
     int host_latency_samples{0};
     int model_buffer_size{0};
+    int ksmps{128};
+    int sw_buffer_frames{0};
+    int hw_buffer_frames{0};
     bool worker_thread_enabled{false};
     bool safety_sentry_enabled{false};
     bool dry_delay_enabled{false};
@@ -115,6 +120,9 @@ private:
     int m_out_channels{0};
     int m_in_ratio{1};
     int m_out_ratio{1};
+    int m_ksmps{128};
+    int m_sw_buffer_frames{0};
+    int m_hw_buffer_frames{0};
     bool m_worker_thread_enabled{false};
     bool m_safety_sentry_enabled{false};
     bool m_dry_delay_enabled{false};

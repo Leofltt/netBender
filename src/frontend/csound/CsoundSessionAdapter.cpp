@@ -211,6 +211,9 @@ auto CsoundSessionAdapter::open(const OpenOptions& opts, std::string& error_out)
     const bool enable_dry =
         (opts.dry_delay >= 0) ? (opts.dry_delay != 0) : (!latent_mode && !gen_mode);
 
+    const int safe_ksmps = std::max(1, opts.ksmps);
+    const int host_io_block = std::max({256, safe_ksmps, opts.sw_buffer_frames});
+
     SessionConfig cfg;
     cfg.use_worker_thread = use_worker;
     cfg.enable_dry_delay = enable_dry;
@@ -219,7 +222,7 @@ auto CsoundSessionAdapter::open(const OpenOptions& opts, std::string& error_out)
     cfg.duplicate_mono_output = (!latent_mode);
     cfg.resample_mode = ResampleMode::Auto;
     cfg.resample_quality = ResamplerQuality::CatmullRom;
-    cfg.min_host_block_size = std::max(256, opts.ksmps);
+    cfg.min_host_block_size = host_io_block;
     cfg.min_host_channels = std::max(2, opts.max_channels);
 
     m_session = std::make_unique<NetBenderSession>(cfg);
@@ -228,7 +231,7 @@ auto CsoundSessionAdapter::open(const OpenOptions& opts, std::string& error_out)
     }
 
     const double host_sr = (opts.host_sample_rate > 0.0) ? opts.host_sample_rate : 44100.0;
-    m_session->prepare(host_sr, std::max(256, opts.ksmps), std::max(2, opts.max_channels));
+    m_session->prepare(host_sr, host_io_block, std::max(2, opts.max_channels));
 
     std::string target_path = opts.model_path;
     if (!m_has_custom_creator && !is_regular_file_noexcept(target_path)) {
@@ -304,15 +307,18 @@ auto CsoundSessionAdapter::open(const OpenOptions& opts, std::string& error_out)
     // Re-prepare if model needs more channels than initial guess so scratch/dry rings fit cleanly
     const int required_channels = std::max({2, opts.max_channels, m_in_channels, m_out_channels});
     if (required_channels > cfg.min_host_channels) {
-        m_session->prepare(host_sr, std::max(256, opts.ksmps), required_channels);
+        m_session->prepare(host_sr, host_io_block, required_channels);
     }
 
+    m_ksmps = safe_ksmps;
+    m_sw_buffer_frames = std::max(0, opts.sw_buffer_frames);
+    m_hw_buffer_frames = std::max(0, opts.hw_buffer_frames);
     m_worker_thread_enabled = use_worker;
     m_safety_sentry_enabled = enable_sentry;
     m_dry_delay_enabled = enable_dry;
 
     m_scratch_channels = std::max(64, required_channels);
-    m_scratch_frames = std::max(1024, opts.ksmps);
+    m_scratch_frames = std::max(1024, safe_ksmps);
     m_scaled_in_storage.resize(static_cast<size_t>(m_scratch_channels));
     m_scaled_in_ptrs.resize(static_cast<size_t>(m_scratch_channels), nullptr);
     m_scaled_out_storage.resize(static_cast<size_t>(m_scratch_channels));
@@ -343,6 +349,9 @@ auto CsoundSessionAdapter::close() -> void {
     m_out_channels = 0;
     m_in_ratio = 1;
     m_out_ratio = 1;
+    m_ksmps = 128;
+    m_sw_buffer_frames = 0;
+    m_hw_buffer_frames = 0;
     m_worker_thread_enabled = false;
     m_safety_sentry_enabled = false;
     m_dry_delay_enabled = false;
@@ -470,6 +479,9 @@ auto CsoundSessionAdapter::get_summary() const -> ModelSummary {
     s.resampling_active = m_session->is_resampling_active();
     s.host_latency_samples = m_session->get_latency_samples();
     s.model_buffer_size = m_session->get_buffer_size();
+    s.ksmps = m_ksmps;
+    s.sw_buffer_frames = m_sw_buffer_frames;
+    s.hw_buffer_frames = m_hw_buffer_frames;
     s.worker_thread_enabled = m_worker_thread_enabled;
     s.safety_sentry_enabled = m_safety_sentry_enabled;
     s.dry_delay_enabled = m_dry_delay_enabled;
@@ -493,6 +505,13 @@ auto CsoundSessionAdapter::format_dump() const -> std::string {
     oss << "  method:      " << s.method << " (in_ch=" << s.in_channels
         << ", in_ratio=" << s.in_ratio << ", out_ch=" << s.out_channels
         << ", out_ratio=" << s.out_ratio << ")\n";
+    const double kr_hz = (s.ksmps > 0) ? (s.host_sample_rate / static_cast<double>(s.ksmps)) : 0.0;
+    oss << "  host:        sr=" << s.host_sample_rate << " Hz, ksmps=" << s.ksmps
+        << " (kr=" << kr_hz << " Hz), sw_buf(-b)="
+        << (s.sw_buffer_frames > 0 ? std::to_string(s.sw_buffer_frames) + " frames" : "default")
+        << ", hw_buf(-B)="
+        << (s.hw_buffer_frames > 0 ? std::to_string(s.hw_buffer_frames) + " frames" : "default")
+        << "\n";
     oss << "  sample_rate: host=" << s.host_sample_rate << " Hz, model=" << s.model_sample_rate
         << " Hz (resampling=" << (s.resampling_active ? "active" : "bypassed") << ")\n";
     oss << "  streaming:   buffer_size=" << s.model_buffer_size

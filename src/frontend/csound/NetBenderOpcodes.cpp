@@ -14,6 +14,7 @@ namespace {
 
 using netbender::csound_fe::CsoundRegistry;
 using netbender::csound_fe::CsoundSessionAdapter;
+using netbender::csound_fe::get_csound_io_buffers;
 using netbender::csound_fe::is_csound_realtime;
 using netbender::csound_fe::make_csound_file_finder;
 using netbender::csound_fe::ModelSummary;
@@ -87,6 +88,9 @@ auto open_model_handle(csnd::Csound* csound, const std::string& raw_path, const 
         return false;
     }
 
+    const int safe_ksmps = std::max(1, ksmps_val);
+    const auto io_bufs = get_csound_io_buffers(cs, safe_ksmps);
+
     OpenOptions opts;
     opts.model_path = resolved;
     opts.method = method;
@@ -96,7 +100,9 @@ auto open_model_handle(csnd::Csound* csound, const std::string& raw_path, const 
     opts.safety_sentry = safety_sentry;
     opts.dry_delay = dry_delay;
     opts.host_sample_rate = (sr_val > 0.0) ? sr_val : 44100.0;
-    opts.ksmps = std::max(1, ksmps_val);
+    opts.ksmps = safe_ksmps;
+    opts.sw_buffer_frames = io_bufs.sw_buffer_frames;
+    opts.hw_buffer_frames = io_bufs.hw_buffer_frames;
     opts.max_channels = std::max(2, static_cast<int>(csound->nchnls()));
     opts.is_realtime_output = is_csound_realtime(cs);
 
@@ -105,6 +111,16 @@ auto open_model_handle(csnd::Csound* csound, const std::string& raw_path, const 
     if (!adapter->open(opts, open_err)) {
         err_msg = open_err + "\n";
         return false;
+    }
+
+    const ModelSummary summary = adapter->get_summary();
+    if (summary.worker_thread_enabled && summary.sw_buffer_frames > summary.model_buffer_size) {
+        csound->warning("netbender_load: Csound software I/O buffer (-b " +
+                        std::to_string(summary.sw_buffer_frames) +
+                        " frames) exceeds model buffer_size (" +
+                        std::to_string(summary.model_buffer_size) +
+                        "); consider lowering -b <= ibufsize or raising ibufsize for dropout-free "
+                        "async streaming\n");
     }
 
     out_handle = reg->insert(std::move(adapter));

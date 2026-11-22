@@ -75,43 +75,6 @@ if (NEEDS_DL)
     execute_process(COMMAND ${CMAKE_COMMAND} -E make_directory ${torch_dir})
     download_library("https://download.pytorch.org/libtorch/cpu/libtorch-win-shared-with-deps-${torch_version}%2Bcpu.zip" ${torch_dir})
   endif()
-    # Check if architecutre == ARM64
-    # if (NOT DEFINED APPLE_ARM64)
-    #   set (APPLE_ARM64 (CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64"))
-    # endif()
-    ## If ARM, download both libraries and pre-compile UB libraries
-    # if (APPLE_ARM64)
-      # download arm64 library
-      # if (NOT IS_DIRECTORY ${torch_dir})
-      #   download_library("https://anaconda.org/pytorch/pytorch/${torch_version}/download/osx-arm64/pytorch-${torch_version}-py3.10_0.tar.bz2" ${torch_dir}-arm64)
-      #   execute_process(COMMAND mkdir ${torch_dir})
-      #   execute_process(COMMAND cp -r ${torch_dir}-arm64/lib/python3.10/site-packages/torch ${torch_dir}/libtorch)
-      # endif()
-      # # download x86 library
-      # if (EXISTS ${CMAKE_SOURCE_DIR}/../install/torch_x86)
-      #   execute_process(COMMAND cp -r ${CMAKE_SOURCE_DIR}/../install/torch_x86 ${torch_dir}-x86)
-      # else()
-      #   if (NOT DEFINED TORCH_MAC_UB_URL)
-      #     message(FATAL_ERROR "If not provided, please give a valid URL for Apple universal library")
-      #   endif()
-      #   download_library(${TORCH_MAC_X86_URL} ${torch_dir})
-      # endif()
-      # message("found libtorch for x86 at : " ${torch_dir}-x86)
-      # # export UB libs to main path
-      # execute_process(COMMAND mkdir ${torch_dir}-x86)
-      # execute_process(COMMAND cp /opt/homebrew/opt/llvm/lib/libomp.dylib ${torch_dir}/libtorch/lib/)
-      # execute_process(COMMAND find ${torch_dir}/libtorch/lib -maxdepth 1 -type f -execdir lipo -create ${torch_dir}/libtorch/lib/{} ${torch_dir}-x86/libtorch/lib/{} -output ${torch_dir}/libtorch/lib/{} \;)
-    # else()
-    #   if (EXISTS ${CMAKE_SOURCE_DIR}/../install/torch_x86)
-    #     execute_process(COMMAND cp ${CMAKE_SOURCE_DIR}/../install/torch_x86 ${torch_dir})
-    #   else()
-    #     if (NOT DEFINED TORCH_MAC_X86_URL)
-    #       message(FATAL_ERROR "If not provided, please give a valid URL for Apple x86 library")
-    #     endif()
-    #     download_library(${TORCH_MAC_X86_URL} ${torch_dir})
-    #   endif()
-    #   message("found libtorch for x86 at : " ${torch_dir})
-
 endif()
 
 # Find the libraries again
