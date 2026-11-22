@@ -126,6 +126,9 @@ NetBenderAudioProcessorEditor::NetBenderAudioProcessorEditor(NetBenderAudioProce
     decode_gen_smoothness_slider.setValue(audioProcessor.getDecodeGenSmoothness(),
                                           juce::dontSendNotification);
     decode_gen_smoothness_slider.addListener(this);
+    decode_gen_ola_combo.setSelectedId(audioProcessor.getDecodeGenOlaMode() + 1,
+                                       juce::dontSendNotification);
+    decode_gen_ola_combo.addListener(this);
 
     bendingGroup.addAndMakeVisible(sidePanel);
 
@@ -263,6 +266,11 @@ auto NetBenderAudioProcessorEditor::comboBoxChanged(juce::ComboBox* comboBoxThat
         audioProcessor.setLatentMode((NetBenderAudioProcessor::LatentMode)modeIdx);
         updateLatentControlsVisibility();
         resized();
+    } else if (comboBoxThatHasChanged == &decode_gen_ola_combo) {
+        int idx = juce::jlimit(0, 3, decode_gen_ola_combo.getSelectedId() - 1);
+        audioProcessor.setDecodeGenOlaMode(idx);
+        if (auto* param = audioProcessor.getDecodeGenOlaModeParam())
+            param->setValueNotifyingHost(param->convertTo0to1((float)idx));
     }
 }
 
@@ -474,6 +482,8 @@ auto NetBenderAudioProcessorEditor::sync_from_processor_state() -> void {
     latent_slew_slider.setValue(audioProcessor.getLatentSlew(), juce::dontSendNotification);
     decode_gen_smoothness_slider.setValue(audioProcessor.getDecodeGenSmoothness(),
                                           juce::dontSendNotification);
+    decode_gen_ola_combo.setSelectedId(audioProcessor.getDecodeGenOlaMode() + 1,
+                                       juce::dontSendNotification);
     latentPad.setCoords(audioProcessor.getLatentX(), audioProcessor.getLatentY());
     latentPad.setEnabledState(audioProcessor.isLatentEnabled(), audioProcessor.hasAutoencode());
     updateLatentControlsVisibility();
@@ -554,6 +564,15 @@ auto NetBenderAudioProcessorEditor::timerCallback() -> void {
             !decode_gen_smoothness_slider.isMouseButtonDown()) {
             decode_gen_smoothness_slider.setValue(pVal, juce::dontSendNotification);
             audioProcessor.setDecodeGenSmoothness(pVal);
+        }
+    }
+
+    if (auto* p = audioProcessor.getDecodeGenOlaModeParam()) {
+        int pIdx = p->getIndex();
+        if (pIdx + 1 != decode_gen_ola_combo.getSelectedId() &&
+            !decode_gen_ola_combo.isPopupActive()) {
+            decode_gen_ola_combo.setSelectedId(pIdx + 1, juce::dontSendNotification);
+            audioProcessor.setDecodeGenOlaMode(pIdx);
         }
     }
 

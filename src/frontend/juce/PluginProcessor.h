@@ -109,6 +109,16 @@ public:
         return m_decodeGenSmoothnessParam ? m_decodeGenSmoothnessParam->get()
                                           : m_session.get_decode_gen_smoothness();
     }
+    auto setDecodeGenOlaMode(int mode) -> void {
+        int v = juce::jlimit(0, 3, mode);
+        m_session.set_decode_gen_ola_mode(v);
+        if (m_decodeGenOlaModeParam)
+            *m_decodeGenOlaModeParam = v;
+    }
+    auto getDecodeGenOlaMode() const -> int {
+        return m_decodeGenOlaModeParam ? m_decodeGenOlaModeParam->getIndex()
+                                       : m_session.get_decode_gen_ola_mode();
+    }
     auto hasAutoencode() -> bool {
         return m_session.has_backend() ? m_session.backend().has_autoencode() : false;
     }
@@ -250,6 +260,9 @@ public:
     auto getDecodeGenSmoothnessParam() const -> juce::AudioParameterFloat* {
         return m_decodeGenSmoothnessParam;
     }
+    auto getDecodeGenOlaModeParam() const -> juce::AudioParameterChoice* {
+        return m_decodeGenOlaModeParam;
+    }
 
 private:
     // DAW Automatable parameters
@@ -263,6 +276,7 @@ private:
     juce::AudioParameterFloat* m_latentYParam{nullptr};
     juce::AudioParameterFloat* m_latentDepthParam{nullptr};
     juce::AudioParameterFloat* m_decodeGenSmoothnessParam{nullptr};
+    juce::AudioParameterChoice* m_decodeGenOlaModeParam{nullptr};
 
     // Frontend-agnostic backend + streaming + bending + latent + JSON state facade
     NetBenderSession m_session;

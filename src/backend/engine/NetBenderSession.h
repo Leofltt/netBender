@@ -148,6 +148,8 @@ public:
         -> void;
     auto set_decode_gen_smoothness(float smoothness) noexcept NETBENDER_NONBLOCKING -> void;
     [[nodiscard]] auto get_decode_gen_smoothness() const noexcept NETBENDER_NONBLOCKING -> float;
+    auto set_decode_gen_ola_mode(int mode) noexcept NETBENDER_NONBLOCKING -> void;
+    [[nodiscard]] auto get_decode_gen_ola_mode() const noexcept NETBENDER_NONBLOCKING -> int;
     auto trigger_short_circuit(bool active) noexcept NETBENDER_NONBLOCKING -> void {
         m_bending.trigger_short_circuit(active);
     }
@@ -269,6 +271,7 @@ private:
     std::atomic<float> m_auto_latent_y{0.0f};
     std::atomic<float> m_auto_latent_depth{0.5f};
     std::atomic<float> m_decode_gen_smoothness{0.30f};
+    std::atomic<int> m_decode_gen_ola_mode{0};
 
     mutable std::mutex m_state_mutex;  // guards strings / hooks / callbacks below
     std::string m_model_path;

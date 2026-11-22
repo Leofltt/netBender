@@ -1625,6 +1625,8 @@ auto OnnxBackend::perform_decode_gen(std::vector<float*>& out_buffer, int n_batc
             ch.clear();
         m_decode_gen_fifo_read_idx = 0;
     }
+
+    apply_decode_gen_patch_ola(out_buffer, out_ch, n_vec, ratio);
 }
 
 auto OnnxBackend::clear_decode_gen_fifo() -> void {

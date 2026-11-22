@@ -120,6 +120,8 @@ public:
     juce::Label& decode_gen_smoothness_label{side_panel.latent_panel.decode_gen_smoothness_label};
     juce::Slider& decode_gen_smoothness_slider{
         side_panel.latent_panel.decode_gen_smoothness_slider};
+    juce::Label& decode_gen_ola_label{side_panel.latent_panel.decode_gen_ola_label};
+    juce::ComboBox& decode_gen_ola_combo{side_panel.latent_panel.decode_gen_ola_combo};
 
 private:
     auto timerCallback() -> void override;

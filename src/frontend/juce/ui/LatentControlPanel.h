@@ -18,6 +18,8 @@ public:
     juce::Slider latent_slew_slider;
     juce::Label decode_gen_smoothness_label{{}, "Gen Smoothness"};
     juce::Slider decode_gen_smoothness_slider;
+    juce::Label decode_gen_ola_label{{}, "Grain Blend:"};
+    juce::ComboBox decode_gen_ola_combo;
 
 private:
     bool m_decodeGenActive{false};

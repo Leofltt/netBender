@@ -16,3 +16,4 @@ src/frontend/maxmsp/min-api/
 **__pycache__*
 *.py[cod]
 *$py.class
+python_tools/test/model_out/*

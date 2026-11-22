@@ -592,6 +592,10 @@ auto TorchBackend::perform_decode_gen(std::vector<float*>& out_buffer, int n_bat
             ch.clear();
         m_decode_gen_fifo_read_idx = 0;
     }
+
+    if (n_batches == 1) {
+        apply_decode_gen_patch_ola(out_buffer, n_out_channels, n_vec, latent_ratio);
+    }
 }
 
 auto TorchBackend::clear_decode_gen_fifo() -> void {

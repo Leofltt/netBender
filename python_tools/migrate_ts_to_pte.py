@@ -1141,8 +1141,13 @@ def migrate_ts_to_pte(
         latent_dim = int(meta.get("encode_out_dim", meta.get("decode_in_dim", 16)))
         is_rave = hasattr(ts_mod, "_rave") or hasattr(ts_mod, "pqmf") or "rave" in ts_model_path.lower() or "darbouka" in ts_model_path.lower() or "speech" in ts_model_path.lower()
         is_stable_audio = "stable_audio" in ts_model_path.lower()
-        if is_rave and int(meta["higher_ratio"]) >= 1024:
-            history_samples = 28672 if ("speech" in ts_model_path.lower() or latent_dim <= 8) else 4096
+        ratio = int(meta["higher_ratio"])
+        if is_rave and ratio >= 1024:
+            from python_tools.rave_ts_to_onnx import _estimate_rave_history_samples
+
+            history_samples = _estimate_rave_history_samples(
+                ts_model_path, ratio=ratio, latent_dim=latent_dim, default_history=4096
+            )
             output_offset = history_samples
         elif is_stable_audio:
             history_samples = 4096
@@ -1150,7 +1155,6 @@ def migrate_ts_to_pte(
         else:
             history_samples = 0
             output_offset = 0
-        ratio = int(meta["higher_ratio"])
         meta["sample_rate"] = meta["sr"]
         meta["ratio"] = ratio
         meta["latent_dim"] = latent_dim

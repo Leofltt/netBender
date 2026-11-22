@@ -78,6 +78,12 @@ def main():
         help="Methods to export for ONNX (e.g. all, forward, encode, decode, prior). Default: all",
     )
     rave_parser.add_argument("--no-bending", action="store_true", help="Skip promoting initializers to graph inputs")
+    rave_parser.add_argument(
+        "--bend-mode",
+        choices=["delegate", "full", "none"],
+        default="delegate",
+        help="Parameter promotion mode: delegate (1D biases/norms/scales), full (all weights), none (default: delegate)",
+    )
 
     # Stable Audio TorchScript to ONNX
     sa_to_onnx_parser = subparsers.add_parser("stable_audio_to_onnx", help="Convert Stable Audio TorchScript (.ts) to bendable ONNX")
@@ -176,6 +182,7 @@ def main():
             channels=args.channels,
             promote_for_bending=not args.no_bending,
             methods=args.methods,
+            bend_mode=args.bend_mode,
         )
     elif args.command == "migrate_pte":
         from python_tools.migrate_ts_to_pte import migrate_ts_to_pte

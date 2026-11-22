@@ -59,12 +59,26 @@ LatentControlPanel::LatentControlPanel() {
         juce::Slider::TextBoxRight, false, slider_box_width_standard, slider_box_height_standard);
     decode_gen_smoothness_slider.setColour(juce::Slider::trackColourId, sky_blue);
     addChildComponent(decode_gen_smoothness_slider);
+
+    decode_gen_ola_label.setText("Grain Blend:", juce::dontSendNotification);
+    decode_gen_ola_label.setJustificationType(juce::Justification::centredLeft);
+    decode_gen_ola_label.setColour(juce::Label::textColourId, text_light);
+    addChildComponent(decode_gen_ola_label);
+
+    decode_gen_ola_combo.addItem("Auto", 1);
+    decode_gen_ola_combo.addItem("Off", 2);
+    decode_gen_ola_combo.addItem("2-Tap (Half)", 3);
+    decode_gen_ola_combo.addItem("4-Tap (Quarter)", 4);
+    decode_gen_ola_combo.setSelectedId(1, juce::dontSendNotification);
+    addChildComponent(decode_gen_ola_combo);
 }
 
 auto LatentControlPanel::set_decode_gen_active(bool active) -> void {
     m_decodeGenActive = active;
     decode_gen_smoothness_label.setVisible(active);
     decode_gen_smoothness_slider.setVisible(active);
+    decode_gen_ola_label.setVisible(active);
+    decode_gen_ola_combo.setVisible(active);
     resized();
 }
 
@@ -98,8 +112,13 @@ auto LatentControlPanel::resized() -> void {
         area.removeFromTop(gap_large);
         decode_gen_smoothness_label.setBounds(area.removeFromTop(label_height));
         decode_gen_smoothness_slider.setBounds(area.removeFromTop(toggle_height));
+        area.removeFromTop(gap_standard);
+        decode_gen_ola_label.setBounds(area.removeFromTop(label_height));
+        decode_gen_ola_combo.setBounds(area.removeFromTop(row_height_standard));
     } else {
         decode_gen_smoothness_label.setBounds({});
         decode_gen_smoothness_slider.setBounds({});
+        decode_gen_ola_label.setBounds({});
+        decode_gen_ola_combo.setBounds({});
     }
 }

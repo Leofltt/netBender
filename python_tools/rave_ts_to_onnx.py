@@ -101,6 +101,42 @@ def _register_rave_onnx_symbolics(opset_version: int = 17):
     register_custom_op_symbolic("aten::hann_window", symbolic_hann_window, opset_version)
 
 
+def _estimate_rave_history_samples(
+    ts_model_path: str, ratio: int, latent_dim: int, default_history: int = 4096
+) -> int:
+    """Measure causal decode warmup delay on a fresh TorchScript copy."""
+    if "speech" in ts_model_path.lower() or (latent_dim <= 8 and ratio >= 1024):
+        return 28672
+    if ratio < 1024:
+        return default_history
+    try:
+        m = torch.jit.load(ts_model_path, map_location="cpu").eval()
+        if not hasattr(m, "decode"):
+            return default_history
+        gen = torch.Generator().manual_seed(42)
+        z = torch.randn(1, latent_dim, 12, generator=gen) * 2.0
+        with torch.no_grad():
+            y = m.decode(z)
+        if not torch.isfinite(y).all():
+            return default_history
+        y_flat = y.reshape(y.shape[1], -1)
+        num_frames = min(12, y_flat.shape[-1] // ratio)
+        if num_frames <= 0:
+            return default_history
+        frame_rms = [
+            float(torch.sqrt((y_flat[:, i * ratio : (i + 1) * ratio] ** 2).mean()))
+            for i in range(num_frames)
+        ]
+        peak_rms = max(frame_rms)
+        if peak_rms <= 1e-4:
+            return default_history
+        onset_idx = next((i for i, r in enumerate(frame_rms) if r >= 0.25 * peak_rms), 0)
+        hist_frames = max(2, min(14, onset_idx + 2))
+        return hist_frames * ratio
+    except Exception:
+        return default_history
+
+
 def convert_rave_ts_to_onnx(
     ts_model_path: str,
     output_onnx_path: str,
@@ -111,6 +147,7 @@ def convert_rave_ts_to_onnx(
     methods: Optional[List[str]] = None,
     verbose: bool = True,
     trace_samples: Optional[int] = None,
+    bend_mode: str = "delegate",
 ) -> str:
     """
     Loads a TorchScript model and exports it to ONNX.
@@ -118,6 +155,9 @@ def convert_rave_ts_to_onnx(
     If promote_for_bending is True, automatically invokes onnx_bend_prep to convert
     initializers into bendable graph inputs.
     """
+    if not promote_for_bending:
+        bend_mode = "none"
+
     if not os.path.exists(ts_model_path):
         raise FileNotFoundError(f"Model file not found: {ts_model_path}")
 
@@ -188,7 +228,9 @@ def convert_rave_ts_to_onnx(
     except Exception:
         pass
 
-    history_samples = 28672 if ("speech" in ts_model_path.lower() or (latent_dim <= 8 and ratio >= 1024)) else 4096
+    history_samples = _estimate_rave_history_samples(
+        ts_model_path, ratio=ratio, latent_dim=latent_dim, default_history=4096
+    )
     latent_scale = 2.5 if ("speech" in ts_model_path.lower() or (latent_dim <= 8 and ratio >= 1024)) else 1.0
     actual_trace_samples = trace_samples if trace_samples is not None else (history_samples + buffer_size)
     total_decode_frames = max(1, actual_trace_samples // max(1, ratio))
@@ -284,6 +326,7 @@ def convert_rave_ts_to_onnx(
             keep_initializers_as_defaults=True,
             verbose=verbose,
             extra_metadata=extra_meta,
+            bend_mode=bend_mode,
         )
 
         # Clean up intermediate raw file if different
@@ -347,6 +390,7 @@ def convert_rave_ts_to_onnx(
                             keep_initializers_as_defaults=True,
                             verbose=verbose,
                             write_sidecar=False,
+                            bend_mode=bend_mode,
                         )
                         if comp_raw != comp_out and os.path.exists(comp_raw):
                             try:
@@ -620,6 +664,12 @@ def main():
         action="store_true",
         help="Export standard static ONNX without promoting weights to inputs",
     )
+    parser.add_argument(
+        "--bend-mode",
+        choices=["delegate", "full", "none"],
+        default="delegate",
+        help="Parameter promotion mode: delegate (1D biases/norms/scales), full (all weights), none (default: delegate)",
+    )
 
     args = parser.parse_args()
 
@@ -637,6 +687,7 @@ def main():
         promote_for_bending=not args.no_bending,
         methods=args.methods,
         verbose=True,
+        bend_mode=args.bend_mode,
     )
 
 

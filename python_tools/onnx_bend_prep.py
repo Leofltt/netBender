@@ -22,12 +22,38 @@ except ImportError:
     sys.exit(1)
 
 
-def is_bendable_tensor(name: str, tensor: TensorProto, min_elements: int = 1) -> bool:
+DELEGATE_SAFE_KEYWORDS = (
+    "norm",
+    "ln",
+    "gn",
+    "bn",
+    "bias",
+    "snake",
+    "alpha",
+    "beta",
+    "gamma",
+    "scale",
+    "shift",
+    "gain",
+    "weight_g",
+    "act",
+)
+
+
+def is_bendable_tensor(
+    name: str,
+    tensor: TensorProto,
+    min_elements: int = 1,
+    bend_mode: str = "full",
+) -> bool:
     """
     Check if an initializer qualifies as a bendable neural network parameter.
     Includes weights, biases, scale/shift vectors, normalization coefficients.
     Excludes shape constants, sequence indices, or integer scalars.
     """
+    if bend_mode == "none":
+        return False
+
     # Only float / double / float16 parameters are bendable audio weights
     if tensor.data_type not in (
         TensorProto.FLOAT,
@@ -45,6 +71,22 @@ def is_bendable_tensor(name: str, tensor: TensorProto, min_elements: int = 1) ->
     if total_elements < min_elements:
         return False
 
+    if bend_mode == "delegate":
+        non_singleton_dims = sum(1 for d in dims if d > 1)
+        if non_singleton_dims > 1:
+            return False
+        lower_name = name.lower()
+        if any(
+            ex in lower_name
+            for ex in ("onnx::concat", "onnx::slice", "onnx::constantofshape", "cache", ".pad")
+        ):
+            return False
+        if any(k in lower_name for k in DELEGATE_SAFE_KEYWORDS):
+            return True
+        if total_elements <= 4096:
+            return True
+        return False
+
     return True
 
 
@@ -56,6 +98,7 @@ def promote_initializers_to_inputs(
     verbose: bool = True,
     extra_metadata: Optional[dict] = None,
     write_sidecar: bool = True,
+    bend_mode: str = "full",
 ) -> int:
     """
     Reads an ONNX model, finds specified or all eligible float initializers,
@@ -72,6 +115,7 @@ def promote_initializers_to_inputs(
 
     promoted_count = 0
     new_inputs = []
+    promoted_initializers = []
 
     for init in initializers:
         name = init.name
@@ -87,7 +131,7 @@ def promote_initializers_to_inputs(
                 continue
 
         # Verify candidate tensor type and dimensions
-        if not is_bendable_tensor(name, init):
+        if not is_bendable_tensor(name, init, bend_mode=bend_mode):
             continue
 
         # Create corresponding ValueInfoProto for graph.input
@@ -98,6 +142,7 @@ def promote_initializers_to_inputs(
             shape=dims,
         )
         new_inputs.append(value_info)
+        promoted_initializers.append(init)
         promoted_count += 1
 
         if verbose:
@@ -123,8 +168,14 @@ def promote_initializers_to_inputs(
     meta_count.key = "netbender.promoted_layers_count"
     meta_count.value = str(promoted_count)
 
+    meta_mode = model.metadata_props.add()
+    meta_mode.key = "netbender.bend_mode"
+    meta_mode.value = str(bend_mode)
+
     if extra_metadata:
         for k, v in extra_metadata.items():
+            if str(k) in ("netbender.bendable", "netbender.promoted_layers_count", "netbender.bend_mode"):
+                continue
             m = model.metadata_props.add()
             m.key = str(k)
             m.value = str(v)
@@ -147,18 +198,18 @@ def promote_initializers_to_inputs(
         import struct
         base_path, _ = os.path.splitext(output_path)
         sidecar_bin_path = f"{base_path}.bin"
+        sidecar_meta = dict(extra_metadata) if extra_metadata else {}
+        sidecar_meta["netbender.bendable"] = "1"
+        sidecar_meta["netbender.promoted_layers_count"] = str(promoted_count)
+        sidecar_meta["netbender.bend_mode"] = str(bend_mode)
         with open(sidecar_bin_path, "wb") as f:
-            if extra_metadata:
-                # NBND v2: Includes embedded JSON metadata string
-                f.write(b"NBND\x02\x00\x00\x00")
-                json_bytes = json.dumps(extra_metadata).encode("utf-8")
-                f.write(struct.pack("<I", len(json_bytes)))
-                f.write(json_bytes)
-            else:
-                # NBND v1: Weights only
-                f.write(b"NBND\x01\x00\x00\x00")
-            f.write(struct.pack("<I", len(initializers)))
-            for init in initializers:
+            # NBND v2: Includes embedded JSON metadata string
+            f.write(b"NBND\x02\x00\x00\x00")
+            json_bytes = json.dumps(sidecar_meta).encode("utf-8")
+            f.write(struct.pack("<I", len(json_bytes)))
+            f.write(json_bytes)
+            f.write(struct.pack("<I", len(promoted_initializers)))
+            for init in promoted_initializers:
                 arr = numpy_helper.to_array(init).astype("float32")
                 name_bytes = init.name.encode("utf-8")
                 f.write(struct.pack("<I", len(name_bytes)))
@@ -219,6 +270,12 @@ def main():
         action="store_true",
         help="Completely remove promoted weights from initializers (pure dynamic inputs without defaults)",
     )
+    parser.add_argument(
+        "--bend-mode",
+        choices=["delegate", "full", "none"],
+        default="full",
+        help="Parameter promotion mode: delegate (1D biases/norms/scales), full (all weights), none (default: full)",
+    )
 
     args = parser.parse_args()
 
@@ -241,6 +298,7 @@ def main():
         layer_filter=args.filter,
         keep_initializers_as_defaults=not args.strip_initializers,
         verbose=True,
+        bend_mode=args.bend_mode,
     )
 
 

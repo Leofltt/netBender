@@ -91,6 +91,9 @@ public:
         m_decode_gen_fifo.clear();
         m_decode_gen_fifo_read_idx = 0;
         m_decode_gen_latent_state.clear();
+        m_decode_gen_ola_delay.clear();
+        m_decode_gen_ola_write_idx = 0;
+        m_decode_gen_ola_phase = 0;
     }
 
     virtual auto set_decode_gen_smoothness(float smoothness) noexcept -> void {
@@ -111,6 +114,14 @@ public:
         // Nonlinear log-spaced (1 - alpha): s=0 -> 0.50, s=0.30 -> 0.874, s=0.50 -> 0.95, s=1 ->
         // 0.995
         return 1.0f - 0.50f * std::pow(0.01f, s);
+    }
+
+    virtual auto set_decode_gen_ola_mode(int mode) noexcept -> void {
+        m_decode_gen_ola_mode.store(std::clamp(mode, 0, 3), std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] virtual auto get_decode_gen_ola_mode() const noexcept -> int {
+        return m_decode_gen_ola_mode.load(std::memory_order_relaxed);
     }
 
     // Method & Mode Introspection
@@ -156,9 +167,99 @@ public:
     virtual auto get_model_info() -> ModelInfo = 0;
 
 protected:
+    auto apply_decode_gen_patch_ola(std::vector<float*>& out_buffer, int out_ch, int n_vec,
+                                    int ratio) -> void {
+        const int mode = get_decode_gen_ola_mode();
+        const int effective = (mode == 0) ? ((ratio >= 4096) ? 3 : 1) : mode;
+        if (effective <= 1 || out_ch <= 0 || n_vec <= 0)
+            return;
+        const size_t patch = static_cast<size_t>(std::max(ratio, 1024));
+        const int active_ch = std::min(out_ch, static_cast<int>(out_buffer.size()));
+
+        if (effective == 2) {
+            const size_t half_patch = patch / 2;
+            if (half_patch == 0)
+                return;
+            if (m_decode_gen_ola_delay.size() != static_cast<size_t>(active_ch) ||
+                (!m_decode_gen_ola_delay.empty() &&
+                 m_decode_gen_ola_delay[0].size() != half_patch)) {
+                m_decode_gen_ola_delay.assign(static_cast<size_t>(active_ch),
+                                              std::vector<float>(half_patch, 0.0f));
+                m_decode_gen_ola_write_idx = 0;
+                m_decode_gen_ola_phase = 0;
+            }
+            constexpr float kPi = 3.14159265358979323846f;
+            const float step = kPi / static_cast<float>(patch);
+            for (int i = 0; i < n_vec; ++i) {
+                const size_t p = m_decode_gen_ola_phase % patch;
+                const size_t p_shifted = (p + half_patch) % patch;
+                const float w_a = std::sin(step * static_cast<float>(p));
+                const float w_b = std::sin(step * static_cast<float>(p_shifted));
+                const size_t idx = m_decode_gen_ola_write_idx;
+                for (int c = 0; c < active_ch; ++c) {
+                    if (out_buffer[c] == nullptr)
+                        continue;
+                    const float cur = out_buffer[c][i];
+                    const float delayed = m_decode_gen_ola_delay[c][idx];
+                    m_decode_gen_ola_delay[c][idx] = cur;
+                    out_buffer[c][i] = cur * w_a + delayed * w_b;
+                }
+                m_decode_gen_ola_write_idx = (idx + 1) % half_patch;
+                m_decode_gen_ola_phase = (p + 1) % patch;
+            }
+            return;
+        }
+
+        const size_t q = patch / 4;
+        if (q == 0)
+            return;
+        const size_t delay_len = 3 * q;
+        if (m_decode_gen_ola_delay.size() != static_cast<size_t>(active_ch) ||
+            (!m_decode_gen_ola_delay.empty() && m_decode_gen_ola_delay[0].size() != delay_len)) {
+            m_decode_gen_ola_delay.assign(static_cast<size_t>(active_ch),
+                                          std::vector<float>(delay_len, 0.0f));
+            m_decode_gen_ola_write_idx = 0;
+            m_decode_gen_ola_phase = 0;
+        }
+        constexpr float kTwoPi = 6.28318530717958647692f;
+        // 0.5 / sqrt(1.5) so sum of 4 quarter-shifted squared Hann windows equals 1.0
+        constexpr float kHannNorm = 0.40824829046386301637f;
+        const float step = kTwoPi / static_cast<float>(patch);
+        for (int i = 0; i < n_vec; ++i) {
+            const size_t p = m_decode_gen_ola_phase % patch;
+            const float w0 = kHannNorm * (1.0f - std::cos(step * static_cast<float>(p)));
+            const float w1 =
+                kHannNorm * (1.0f - std::cos(step * static_cast<float>((p + 3 * q) % patch)));
+            const float w2 =
+                kHannNorm * (1.0f - std::cos(step * static_cast<float>((p + 2 * q) % patch)));
+            const float w3 =
+                kHannNorm * (1.0f - std::cos(step * static_cast<float>((p + q) % patch)));
+            const size_t idx = m_decode_gen_ola_write_idx;
+            const size_t idx3 = idx;
+            const size_t idx2 = (idx + q) % delay_len;
+            const size_t idx1 = (idx + 2 * q) % delay_len;
+            for (int c = 0; c < active_ch; ++c) {
+                if (out_buffer[c] == nullptr)
+                    continue;
+                const float cur = out_buffer[c][i];
+                const float d1 = m_decode_gen_ola_delay[c][idx1];
+                const float d2 = m_decode_gen_ola_delay[c][idx2];
+                const float d3 = m_decode_gen_ola_delay[c][idx3];
+                m_decode_gen_ola_delay[c][idx] = cur;
+                out_buffer[c][i] = cur * w0 + d1 * w1 + d2 * w2 + d3 * w3;
+            }
+            m_decode_gen_ola_write_idx = (idx + 1) % delay_len;
+            m_decode_gen_ola_phase = (p + 1) % patch;
+        }
+    }
+
     // Decode Gen output FIFO buffer per channel for gapless streaming & latent random walk state
     std::vector<std::vector<float>> m_decode_gen_fifo;
     size_t m_decode_gen_fifo_read_idx{0};
     std::vector<float> m_decode_gen_latent_state;
     std::atomic<float> m_decode_gen_smoothness{-1.0f};
+    std::atomic<int> m_decode_gen_ola_mode{0};
+    std::vector<std::vector<float>> m_decode_gen_ola_delay;
+    size_t m_decode_gen_ola_write_idx{0};
+    size_t m_decode_gen_ola_phase{0};
 };
