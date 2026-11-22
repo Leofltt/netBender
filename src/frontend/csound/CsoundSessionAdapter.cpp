@@ -7,6 +7,8 @@
 #include <filesystem>
 #include <sstream>
 #include <utility>
+#include <fstream>
+#include <nlohmann/json.hpp>
 
 namespace netbender::csound_fe {
 
@@ -231,7 +233,8 @@ auto CsoundSessionAdapter::open(const OpenOptions& opts, std::string& error_out)
     }
 
     const double host_sr = (opts.host_sample_rate > 0.0) ? opts.host_sample_rate : 44100.0;
-    m_session->prepare(host_sr, host_io_block, std::max(2, opts.max_channels));
+    const int initial_channels = std::max(2, opts.max_channels);
+    m_session->prepare(host_sr, host_io_block, initial_channels);
 
     std::string target_path = opts.model_path;
     if (!m_has_custom_creator && !is_regular_file_noexcept(target_path)) {
@@ -284,6 +287,31 @@ auto CsoundSessionAdapter::open(const OpenOptions& opts, std::string& error_out)
         }
     }
 
+    m_ksmps = safe_ksmps;
+    m_host_sample_rate = host_sr;
+    m_host_io_block = host_io_block;
+    m_max_channels = initial_channels;
+    m_sw_buffer_frames = std::max(0, opts.sw_buffer_frames);
+    m_hw_buffer_frames = std::max(0, opts.hw_buffer_frames);
+    m_worker_thread_enabled = use_worker;
+    m_safety_sentry_enabled = enable_sentry;
+    m_dry_delay_enabled = enable_dry;
+
+    if (!sync_mode_metadata(error_out)) {
+        close();
+        return false;
+    }
+
+    m_open = true;
+    return true;
+}
+
+auto CsoundSessionAdapter::sync_mode_metadata(std::string& error_out) -> bool {
+    if (!m_session || !m_session->is_model_loaded()) {
+        error_out = "netbender: no model loaded";
+        return false;
+    }
+
     const std::string active_method = m_session->get_method();
     const auto mode_params = m_session->backend().get_mode_params(active_method);
     if (mode_params.size() >= 4) {
@@ -299,42 +327,38 @@ auto CsoundSessionAdapter::open(const OpenOptions& opts, std::string& error_out)
     }
 
     if (m_out_channels <= 0) {
-        error_out = "netbender_load: method '" + active_method + "' produced 0 output channels";
-        close();
+        error_out = "netbender: method '" + active_method + "' produced 0 output channels";
         return false;
     }
 
     // Re-prepare if model needs more channels than initial guess so scratch/dry rings fit cleanly
-    const int required_channels = std::max({2, opts.max_channels, m_in_channels, m_out_channels});
-    if (required_channels > cfg.min_host_channels) {
-        m_session->prepare(host_sr, host_io_block, required_channels);
+    const int required_channels = std::max({2, m_max_channels, m_in_channels, m_out_channels});
+    if (required_channels > m_max_channels) {
+        m_session->prepare(m_host_sample_rate, m_host_io_block, required_channels);
+        m_max_channels = required_channels;
     }
 
-    m_ksmps = safe_ksmps;
-    m_sw_buffer_frames = std::max(0, opts.sw_buffer_frames);
-    m_hw_buffer_frames = std::max(0, opts.hw_buffer_frames);
-    m_worker_thread_enabled = use_worker;
-    m_safety_sentry_enabled = enable_sentry;
-    m_dry_delay_enabled = enable_dry;
-
-    m_scratch_channels = std::max(64, required_channels);
-    m_scratch_frames = std::max(1024, safe_ksmps);
-    m_scaled_in_storage.resize(static_cast<size_t>(m_scratch_channels));
-    m_scaled_in_ptrs.resize(static_cast<size_t>(m_scratch_channels), nullptr);
-    m_scaled_out_storage.resize(static_cast<size_t>(m_scratch_channels));
-    m_scaled_out_ptrs.resize(static_cast<size_t>(m_scratch_channels), nullptr);
-    for (int c = 0; c < m_scratch_channels; ++c) {
-        m_scaled_in_storage[static_cast<size_t>(c)].assign(static_cast<size_t>(m_scratch_frames),
-                                                           0.0f);
-        m_scaled_in_ptrs[static_cast<size_t>(c)] =
-            m_scaled_in_storage[static_cast<size_t>(c)].data();
-        m_scaled_out_storage[static_cast<size_t>(c)].assign(static_cast<size_t>(m_scratch_frames),
-                                                            0.0f);
-        m_scaled_out_ptrs[static_cast<size_t>(c)] =
-            m_scaled_out_storage[static_cast<size_t>(c)].data();
+    const int needed_scratch_channels = std::max(64, required_channels);
+    const int needed_scratch_frames = std::max(1024, m_ksmps);
+    if (m_scratch_channels < needed_scratch_channels || m_scratch_frames < needed_scratch_frames) {
+        m_scratch_channels = std::max(m_scratch_channels, needed_scratch_channels);
+        m_scratch_frames = std::max(m_scratch_frames, needed_scratch_frames);
+        m_scaled_in_storage.resize(static_cast<size_t>(m_scratch_channels));
+        m_scaled_in_ptrs.resize(static_cast<size_t>(m_scratch_channels), nullptr);
+        m_scaled_out_storage.resize(static_cast<size_t>(m_scratch_channels));
+        m_scaled_out_ptrs.resize(static_cast<size_t>(m_scratch_channels), nullptr);
+        for (int c = 0; c < m_scratch_channels; ++c) {
+            m_scaled_in_storage[static_cast<size_t>(c)].assign(
+                static_cast<size_t>(m_scratch_frames), 0.0f);
+            m_scaled_in_ptrs[static_cast<size_t>(c)] =
+                m_scaled_in_storage[static_cast<size_t>(c)].data();
+            m_scaled_out_storage[static_cast<size_t>(c)].assign(
+                static_cast<size_t>(m_scratch_frames), 0.0f);
+            m_scaled_out_ptrs[static_cast<size_t>(c)] =
+                m_scaled_out_storage[static_cast<size_t>(c)].data();
+        }
     }
 
-    m_open = true;
     return true;
 }
 
@@ -350,6 +374,9 @@ auto CsoundSessionAdapter::close() -> void {
     m_out_channels = 0;
     m_in_ratio = 1;
     m_out_ratio = 1;
+    m_host_sample_rate = 44100.0;
+    m_host_io_block = 256;
+    m_max_channels = 2;
     m_ksmps = 128;
     m_sw_buffer_frames = 0;
     m_hw_buffer_frames = 0;
@@ -685,6 +712,308 @@ auto CsoundSessionAdapter::reset_all_weights_immediate() -> void {
     if (m_open && m_session) {
         m_session->clear_all_layer_bending();
     }
+}
+
+namespace {
+
+auto filter_attr_names(std::vector<std::string> raw) -> std::vector<std::string> {
+    std::vector<std::string> out;
+    out.reserve(raw.size());
+    for (auto& name : raw) {
+        if (!name.empty() && name != "none" &&
+            std::find(out.begin(), out.end(), name) == out.end()) {
+            out.push_back(std::move(name));
+        }
+    }
+    return out;
+}
+
+template <typename Fn>
+auto run_catching_backend(const char* op_name, std::string& error_out, Fn&& fn) -> bool {
+    try {
+        fn();
+        return true;
+    } catch (const std::string& s) {
+        error_out = std::string(op_name) + ": " + s;
+    } catch (const char* s) {
+        error_out = std::string(op_name) + ": " + (s != nullptr ? s : "unknown error");
+    } catch (const std::exception& e) {
+        error_out = std::string(op_name) + ": " + e.what();
+    } catch (...) {
+        error_out = std::string(op_name) + ": unknown backend exception";
+    }
+    return false;
+}
+
+}  // namespace
+
+auto CsoundSessionAdapter::save_state_json(bool include_drawn_weights, bool pretty) const
+    -> std::string {
+    if (!m_open || !m_session || !m_session->is_model_loaded()) {
+        return {};
+    }
+    return m_session->to_json(include_drawn_weights).dump(pretty ? 2 : -1);
+}
+
+auto CsoundSessionAdapter::save_state_file(const std::string& path, bool include_drawn_weights,
+                                           std::string& error_out) const -> bool {
+    error_out.clear();
+    if (!m_open || !m_session || !m_session->is_model_loaded()) {
+        error_out = "netbender_savestate: session is not open or no model is loaded";
+        return false;
+    }
+    if (path.empty()) {
+        error_out = "netbender_savestate: file path cannot be empty";
+        return false;
+    }
+    const std::string json_str = save_state_json(include_drawn_weights, /*pretty=*/true);
+    if (json_str.empty()) {
+        error_out = "netbender_savestate: failed to serialize session state";
+        return false;
+    }
+    std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
+    if (!ofs.is_open()) {
+        error_out = "netbender_savestate: could not open '" + path + "' for writing";
+        return false;
+    }
+    ofs << json_str << "\n";
+    if (!ofs.good()) {
+        error_out = "netbender_savestate: write failed for '" + path + "'";
+        return false;
+    }
+    return true;
+}
+
+auto CsoundSessionAdapter::load_state_json(const std::string& json_str, bool restore_model,
+                                           std::string& error_out,
+                                           const HostFileFinder& host_finder) -> bool {
+    error_out.clear();
+    if (!m_open || !m_session) {
+        error_out = "netbender_loadstate: session is not open";
+        return false;
+    }
+
+    size_t len = json_str.size();
+    while (len > 0 && json_str[len - 1] == '\0') {
+        --len;
+    }
+    if (len == 0) {
+        error_out = "netbender_loadstate: JSON state string is empty";
+        return false;
+    }
+
+    nlohmann::json j = nlohmann::json::parse(json_str.data(), json_str.data() + len, nullptr,
+                                             /*allow_exceptions=*/false);
+    if (j.is_discarded() || !j.is_object()) {
+        error_out = "netbender_loadstate: state is not valid JSON";
+        return false;
+    }
+    if (j.value("format", std::string{}) != NetBenderSession::k_state_format) {
+        error_out = "netbender_loadstate: unexpected preset format (expected 'netbender.session')";
+        return false;
+    }
+    if (j.value("version", 0) > NetBenderSession::k_state_version) {
+        error_out = "netbender_loadstate: preset version is newer than this build supports";
+        return false;
+    }
+
+    if (!restore_model) {
+        // Erase model section so NetBenderSession::from_json leaves active method/buffer intact.
+        j.erase("model");
+    } else if (j.contains("model") && j["model"].is_object() && !m_has_custom_creator) {
+        const std::string raw_path = j["model"].value("path", std::string{});
+        if (!raw_path.empty() && !is_regular_file_noexcept(raw_path)) {
+            std::string resolved = resolve_model_path(raw_path, host_finder);
+            if (resolved.empty()) {
+                const std::string filename = std::filesystem::path(raw_path).filename().string();
+                if (!filename.empty() && filename != raw_path) {
+                    resolved = resolve_model_path(filename, host_finder);
+                }
+            }
+            if (!resolved.empty()) {
+                j["model"]["path"] = resolved;
+            }
+        }
+    }
+
+    if (!m_session->from_json(j, restore_model)) {
+        error_out = m_session->get_last_error();
+        if (error_out.empty()) {
+            error_out = "netbender_loadstate: failed to apply session state";
+        }
+        return false;
+    }
+
+    if (restore_model) {
+        if (!sync_mode_metadata(error_out)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+auto CsoundSessionAdapter::load_state_file(const std::string& raw_path, bool restore_model,
+                                           const HostFileFinder& host_finder,
+                                           std::string& error_out) -> bool {
+    error_out.clear();
+    if (raw_path.empty()) {
+        error_out = "netbender_loadstate: preset path cannot be empty";
+        return false;
+    }
+
+    std::string resolved;
+    if (is_regular_file_noexcept(raw_path)) {
+        resolved = raw_path;
+    } else if (host_finder) {
+        const std::string cand = host_finder(raw_path);
+        if (!cand.empty() && is_regular_file_noexcept(cand)) {
+            resolved = cand;
+        }
+    }
+    if (resolved.empty()) {
+        error_out = "netbender_loadstate: could not find preset file '" + raw_path + "'";
+        return false;
+    }
+
+    std::ifstream ifs(resolved, std::ios::binary);
+    if (!ifs.is_open()) {
+        error_out = "netbender_loadstate: could not open preset file '" + resolved + "'";
+        return false;
+    }
+    std::ostringstream ss;
+    ss << ifs.rdbuf();
+    if (ifs.bad()) {
+        error_out = "netbender_loadstate: failed reading preset file '" + resolved + "'";
+        return false;
+    }
+    return load_state_json(ss.str(), restore_model, error_out, host_finder);
+}
+
+auto CsoundSessionAdapter::load_state_path_or_json(const std::string& input, bool restore_model,
+                                                   const HostFileFinder& host_finder,
+                                                   std::string& error_out) -> bool {
+    size_t first = 0;
+    while (first < input.size() && std::isspace(static_cast<unsigned char>(input[first])) != 0) {
+        ++first;
+    }
+    if (first >= input.size()) {
+        error_out = "netbender_loadstate: preset path or JSON string cannot be empty";
+        return false;
+    }
+    if (input[first] == '{') {
+        return load_state_json(input.substr(first), restore_model, error_out, host_finder);
+    }
+    return load_state_file(input, restore_model, host_finder, error_out);
+}
+
+auto CsoundSessionAdapter::get_available_attributes() const -> std::vector<std::string> {
+    if (!m_open || !m_session || !m_session->is_model_loaded()) {
+        return {};
+    }
+    std::vector<std::string> attrs;
+    std::string ignored_err;
+    run_catching_backend("netbender_attrs", ignored_err, [&] {
+        attrs = filter_attr_names(m_session->backend().get_available_attributes());
+    });
+    return attrs;
+}
+
+auto CsoundSessionAdapter::get_settable_attributes() const -> std::vector<std::string> {
+    if (!m_open || !m_session || !m_session->is_model_loaded()) {
+        return {};
+    }
+    std::vector<std::string> attrs;
+    std::string ignored_err;
+    run_catching_backend("netbender_attrs", ignored_err, [&] {
+        attrs = filter_attr_names(m_session->backend().get_settable_attributes());
+    });
+    return attrs;
+}
+
+auto CsoundSessionAdapter::get_attribute(const std::string& attr_name, std::string& value_out,
+                                         std::string& error_out) const -> bool {
+    error_out.clear();
+    value_out.clear();
+    if (!m_open || !m_session || !m_session->is_model_loaded()) {
+        error_out = "netbender_attr_get: session is not open or no model is loaded";
+        return false;
+    }
+    if (attr_name.empty()) {
+        error_out = "netbender_attr_get: attribute name cannot be empty";
+        return false;
+    }
+
+    bool known = false;
+    if (!run_catching_backend("netbender_attr_get", error_out, [&] {
+            const auto settable = filter_attr_names(m_session->backend().get_settable_attributes());
+            if (std::find(settable.begin(), settable.end(), attr_name) != settable.end()) {
+                known = true;
+            } else {
+                const auto avail =
+                    filter_attr_names(m_session->backend().get_available_attributes());
+                known = (std::find(avail.begin(), avail.end(), attr_name) != avail.end());
+            }
+        })) {
+        return false;
+    }
+    if (!known) {
+        error_out = "netbender_attr_get: unknown attribute '" + attr_name + "'";
+        return false;
+    }
+
+    return run_catching_backend("netbender_attr_get", error_out, [&] {
+        value_out = m_session->backend().get_attribute_as_string(attr_name);
+    });
+}
+
+auto CsoundSessionAdapter::set_attribute(const std::string& attr_name,
+                                         const std::vector<std::string>& args,
+                                         std::string& error_out) -> bool {
+    error_out.clear();
+    if (!m_open || !m_session || !m_session->is_model_loaded()) {
+        error_out = "netbender_attr_set: session is not open or no model is loaded";
+        return false;
+    }
+    if (attr_name.empty()) {
+        error_out = "netbender_attr_set: attribute name cannot be empty";
+        return false;
+    }
+    if (args.empty()) {
+        error_out = "netbender_attr_set: value cannot be empty";
+        return false;
+    }
+
+    bool settable = false;
+    if (!run_catching_backend("netbender_attr_set", error_out, [&] {
+            settable = m_session->backend().has_settable_attribute(attr_name);
+        })) {
+        return false;
+    }
+    if (!settable) {
+        error_out =
+            "netbender_attr_set: attribute '" + attr_name + "' is not settable on this model";
+        return false;
+    }
+
+    return run_catching_backend("netbender_attr_set", error_out, [&] {
+        m_session->backend().set_attribute(attr_name, args, IBackend::BufferMap{});
+    });
+}
+
+auto CsoundSessionAdapter::set_attribute_string(const std::string& attr_name,
+                                                const std::string& raw_value,
+                                                std::string& error_out) -> bool {
+    std::istringstream iss(raw_value);
+    std::vector<std::string> tokens;
+    std::string tok;
+    while (iss >> tok) {
+        tokens.push_back(std::move(tok));
+    }
+    if (tokens.empty()) {
+        error_out = "netbender_attr_set: value cannot be empty";
+        return false;
+    }
+    return set_attribute(attr_name, tokens, error_out);
 }
 
 }  // namespace netbender::csound_fe

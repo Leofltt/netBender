@@ -12,6 +12,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <nlohmann/json.hpp>
 
 namespace {
 
@@ -710,6 +711,233 @@ auto test_raw_weights_and_async_worker_bending() -> void {
     }
 }
 
+auto test_state_save_load_json_and_file() -> void {
+    TempDir tmp("presets");
+    const auto preset_file = tmp.path / "session_preset.json";
+
+    std::string saved_json_with_weights;
+    {
+        CsoundMockBackend* mock = nullptr;
+        CsoundSessionAdapter adapter([&](const std::string&) {
+            auto b = std::make_unique<CsoundMockBackend>();
+            b->higher_ratio = 64;
+            b->preferred_buffer_size = 64;
+            mock = b.get();
+            return b;
+        });
+
+        OpenOptions opts;
+        opts.model_path = "mock_preset.pte";
+        opts.method = "forward";
+        opts.buffer_size = 0;  // sync inline
+        opts.safety_sentry = 1;
+        opts.host_sample_rate = 44100.0;
+        opts.ksmps = 64;
+
+        std::string err;
+        CHECK(adapter.open(opts, err));
+
+        const std::vector<float> custom_w{0.25f, 0.5f, 0.75f, 1.0f};
+        CHECK(adapter.set_layer_weights_immediate(0, custom_w.data(), custom_w.size()));
+        adapter.set_layer_bend(1, 2.0f, 0.1f, 0.0f, 0.75f, 1, false);
+        adapter.set_layer_bridge(1, 0, 0.4f);
+        adapter.set_trigger(1 /*Momentary*/, 1.0f, 0.9f, 0.15f);
+        adapter.set_short_circuit(true);
+        adapter.set_latent(true, 0.35f, -0.45f, 0.8f, 1 /*LatentSlew*/, 0.12f);
+        adapter.set_sentry_auto_reset(false);
+
+        std::vector<double> in(64, 0.1), out(64, 0.0);
+        const double* in_ptrs[1] = {in.data()};
+        double* out_ptrs[1] = {out.data()};
+        adapter.process(in_ptrs, 1, out_ptrs, 1, 64, 1.0, 0.65f, true);
+
+        saved_json_with_weights = adapter.save_state_json(true, false);
+        CHECK(!saved_json_with_weights.empty());
+        const auto parsed = nlohmann::json::parse(saved_json_with_weights);
+        CHECK(parsed.at("format") == "netbender.session");
+        CHECK(parsed.at("version") == 1);
+        CHECK(approx(parsed.at("mix").at("dry_wet").get<float>(), 0.65f));
+        CHECK(parsed.at("mix").at("auto_reset_fuse").get<bool>() == false);
+        CHECK(parsed.at("trigger").at("mode") == "momentary");
+        CHECK(parsed.at("latent").at("enabled").get<bool>() == true);
+        CHECK(parsed.at("latent").at("mode") == "latent_slew");
+        CHECK(parsed.at("layers").at("layer0.weight").contains("drawn_weights"));
+        CHECK(parsed.at("layers").at("layer0.weight").at("drawn_weights").size() == 4);
+        CHECK(approx(parsed.at("layers").at("layer1.bias").at("scale").get<float>(), 2.0f));
+        CHECK(parsed.at("layers").at("layer1.bias").at("bridge_source") == "layer0.weight");
+
+        const std::string saved_no_weights = adapter.save_state_json(false, false);
+        const auto parsed_no_weights = nlohmann::json::parse(saved_no_weights);
+        CHECK(!parsed_no_weights.at("layers").at("layer0.weight").contains("drawn_weights"));
+
+        CHECK(adapter.save_state_file(preset_file.string(), true, err));
+        CHECK(std::filesystem::is_regular_file(preset_file));
+
+        // Reset and scramble session state before reloading from disk
+        adapter.reset_all_weights_immediate();
+        adapter.set_trigger(0, 0.1f, 0.5f, 0.1f);
+        adapter.set_latent(false, 0.0f, 0.0f, 0.0f, 0, 0.0f);
+        adapter.set_sentry_auto_reset(true);
+        adapter.process(in_ptrs, 1, out_ptrs, 1, 64, 1.0, 1.0f, true);
+        CHECK(approx(adapter.get_layer_weights(0, false)[0], 1.0f));
+
+        CHECK(adapter.load_state_path_or_json(preset_file.string(), false, nullptr, err));
+        CHECK(approx(adapter.session()->get_dry_wet(), 0.65f));
+        CHECK(!adapter.session()->safety_sentry().get_auto_reset());
+        CHECK(adapter.session()->bending().get_trigger_mode() == TriggerMode::Momentary);
+        CHECK(adapter.session()->latent().is_enabled());
+        CHECK(adapter.session()->latent().get_mode() == LatentMode::LatentSlew);
+        CHECK(approx(adapter.session()->latent().get_x(), 0.35f));
+        CHECK(approx(adapter.session()->latent().get_y(), -0.45f));
+        CHECK(adapter.get_layer_weights(0, false) == custom_w);
+
+        adapter.set_short_circuit(true);
+        adapter.process(in_ptrs, 1, out_ptrs, 1, 64, 1.0, 0.65f, true);
+        CHECK(mock->get_layer_weights("layer0.weight") == custom_w);
+
+        // Error handling on invalid inputs
+        std::string bad_err;
+        CHECK(!adapter.load_state_path_or_json("   ", false, nullptr, bad_err));
+        CHECK(!bad_err.empty());
+        bad_err.clear();
+        CHECK(!adapter.load_state_path_or_json("{not valid json", false, nullptr, bad_err));
+        CHECK(!bad_err.empty());
+        bad_err.clear();
+        CHECK(!adapter.load_state_path_or_json((tmp.path / "missing.json").string(), false, nullptr,
+                                               bad_err));
+        CHECK(!bad_err.empty());
+        bad_err.clear();
+        CHECK(!adapter.load_state_path_or_json(R"({"format":"other","version":1})", false, nullptr,
+                                               bad_err));
+        CHECK(!bad_err.empty());
+    }
+
+    // 2. Verify restore_model=false preserves active method vs restore_model=true updates method
+    {
+        CsoundMockBackend* mock = nullptr;
+        CsoundSessionAdapter adapter([&](const std::string&) {
+            auto b = std::make_unique<CsoundMockBackend>();
+            b->latent_dim = 4;
+            mock = b.get();
+            return b;
+        });
+
+        OpenOptions opts;
+        opts.model_path = "mock_other.pte";
+        opts.method = "encode";
+        opts.buffer_size = 0;
+        opts.host_sample_rate = 48000.0;
+        opts.ksmps = 64;
+
+        std::string err;
+        CHECK(adapter.open(opts, err));
+        CHECK(adapter.get_out_channels() == 4);
+
+        auto ssdir_finder = [&tmp](const std::string& cand) -> std::string {
+            const auto p = tmp.path / cand;
+            std::error_code ec;
+            return std::filesystem::is_regular_file(p, ec) ? p.string() : std::string{};
+        };
+
+        // Load by basename via HostFileFinder with restore_model=false -> method remains "encode"
+        CHECK(adapter.load_state_path_or_json("session_preset.json", false, ssdir_finder, err));
+        CHECK(adapter.session()->get_model_path() == "mock_other.pte");
+        CHECK(adapter.session()->get_method() == "encode");
+        CHECK(adapter.get_out_channels() == 4);
+
+        // Load raw JSON string (with leading whitespace) with restore_model=true -> reloads
+        // model & restores method="forward" (1 out channel)
+        adapter.reset_all_weights_immediate();
+        CHECK(adapter.load_state_path_or_json("  \n" + saved_json_with_weights, true, ssdir_finder,
+                                              err));
+        CHECK(adapter.session()->get_model_path() == "mock_preset.pte");
+        CHECK(adapter.session()->get_method() == "forward");
+        CHECK(adapter.get_in_channels() == 1);
+        CHECK(adapter.get_out_channels() == 1);
+        CHECK(approx(adapter.get_layer_weights(0, false)[0], 0.25f));
+        CHECK(mock != nullptr);
+    }
+}
+
+class ThrowingAttrMockBackend : public CsoundMockBackend {
+public:
+    auto get_attribute_as_string(std::string) -> std::string override {
+        throw std::string("simulated TorchBackend get error");
+    }
+
+    auto set_attribute(std::string, std::vector<std::string>, const BufferMap&) -> void override {
+        throw std::string("simulated TorchBackend set error");
+    }
+};
+
+auto test_backend_attributes() -> void {
+    // 1. Standard MockBackend attribute listing, get, set, and error validation
+    {
+        CsoundSessionAdapter adapter(
+            [](const std::string&) { return std::make_unique<CsoundMockBackend>(); });
+
+        OpenOptions opts;
+        opts.model_path = "mock_attrs.ts";
+        opts.method = "forward";
+        opts.buffer_size = 0;
+
+        std::string err;
+        CHECK(adapter.open(opts, err));
+
+        const auto settable = adapter.get_settable_attributes();
+        CHECK(settable.size() == 2);
+        CHECK(settable[0] == "temperature");
+        CHECK(settable[1] == "buf_attr");
+
+        const auto all_attrs = adapter.get_available_attributes();
+        CHECK(std::find(all_attrs.begin(), all_attrs.end(), "temperature") != all_attrs.end());
+        CHECK(std::find(all_attrs.begin(), all_attrs.end(), "readonly_info") != all_attrs.end());
+
+        std::string val;
+        CHECK(adapter.get_attribute("temperature", val, err));
+        CHECK(val == "1.0");
+        CHECK(adapter.get_attribute("readonly_info", val, err));
+        CHECK(val == "mock_v1");
+
+        CHECK(!adapter.get_attribute("nonexistent_attr", val, err));
+        CHECK(!err.empty());
+
+        err.clear();
+        CHECK(adapter.set_attribute_string("temperature", "0.75", err));
+        CHECK(adapter.get_attribute("temperature", val, err));
+        CHECK(val == "0.75");
+
+        CHECK(!adapter.set_attribute_string("readonly_info", "nope", err));
+        CHECK(!err.empty());
+
+        err.clear();
+        CHECK(!adapter.set_attribute_string("temperature", "   ", err));
+        CHECK(!err.empty());
+    }
+
+    // 2. TorchBackend-style std::string throws are caught safely without terminating
+    {
+        CsoundSessionAdapter adapter(
+            [](const std::string&) { return std::make_unique<ThrowingAttrMockBackend>(); });
+
+        OpenOptions opts;
+        opts.model_path = "mock_throw_attrs.ts";
+        opts.method = "forward";
+        opts.buffer_size = 0;
+
+        std::string err;
+        CHECK(adapter.open(opts, err));
+
+        std::string val;
+        CHECK(!adapter.get_attribute("temperature", val, err));
+        CHECK(err.find("simulated TorchBackend get error") != std::string::npos);
+
+        err.clear();
+        CHECK(!adapter.set_attribute_string("temperature", "0.5", err));
+        CHECK(err.find("simulated TorchBackend set error") != std::string::npos);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -723,6 +951,8 @@ int main() {
     test_trigger_short_circuit_and_sentry();
     test_latent_terrain_controls();
     test_raw_weights_and_async_worker_bending();
+    test_state_save_load_json_and_file();
+    test_backend_attributes();
     std::cout << "[PASS] test_csound_adapter\n";
     return 0;
 }

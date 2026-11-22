@@ -4,6 +4,8 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <iomanip>
+#include <sstream>
 
 #include "CsoundSessionAdapter.h"
 #include "CsoundRegistry.h"
@@ -41,6 +43,31 @@ auto lookup_adapter(csnd::Csound* csound, cs_float handle_arg, std::string& erro
     return adapter;
 }
 
+auto write_string_dat(CSOUND* cs, STRINGDAT* dst, INSDS* ctx, const std::string& value) -> bool {
+    if (cs == nullptr || dst == nullptr) {
+        return false;
+    }
+    const CS_TYPE* str_type = (cs->GetType != nullptr) ? cs->GetType(cs, "S") : nullptr;
+    if (str_type != nullptr && str_type->copyValue != nullptr) {
+        STRINGDAT src{};
+        src.data = const_cast<char*>(value.c_str());
+        src.size = value.size() + 1;
+        src.refcount = 0;
+        str_type->copyValue(cs, str_type, dst, &src, ctx);
+        return true;
+    }
+    if (cs->Strdup != nullptr) {
+        if (dst->data != nullptr && dst->refcount == 0 && cs->Free != nullptr) {
+            cs->Free(cs, dst->data);
+        }
+        dst->data = cs->Strdup(cs, value.c_str());
+        dst->size = value.size() + 1;
+        dst->refcount = 0;
+        return dst->data != nullptr;
+    }
+    return false;
+}
+
 auto fill_string_array(CSOUND* cs, ARRAYDAT* arr, INSDS* ctx, const std::vector<std::string>& items)
     -> int32_t {
     if (cs == nullptr || arr == nullptr) {
@@ -49,25 +76,23 @@ auto fill_string_array(CSOUND* cs, ARRAYDAT* arr, INSDS* ctx, const std::vector<
     if (tabinit(cs, arr, static_cast<int32_t>(items.size()), ctx) != OK) {
         return NOTOK;
     }
-    const CS_TYPE* str_type = (cs->GetType != nullptr) ? cs->GetType(cs, "S") : nullptr;
     for (size_t i = 0; i < items.size(); ++i) {
         STRINGDAT* dst = csound_string_array_element(arr, i);
-        if (dst == nullptr) {
+        if (!write_string_dat(cs, dst, ctx, items[i])) {
             return NOTOK;
-        }
-        if (str_type != nullptr && str_type->copyValue != nullptr) {
-            STRINGDAT src{};
-            src.data = const_cast<char*>(items[i].c_str());
-            src.size = items[i].size() + 1;
-            src.refcount = 0;
-            str_type->copyValue(cs, str_type, dst, &src, ctx);
-        } else if (cs->Strdup != nullptr) {
-            dst->data = cs->Strdup(cs, items[i].c_str());
-            dst->size = items[i].size() + 1;
-            dst->refcount = 0;
         }
     }
     return OK;
+}
+
+auto format_cs_float_attr(cs_float v) -> std::string {
+    const double d = static_cast<double>(v);
+    if (std::isfinite(d) && std::floor(d) == d && std::abs(d) <= 9007199254740992.0) {
+        return std::to_string(static_cast<long long>(d));
+    }
+    std::ostringstream oss;
+    oss << std::setprecision(9) << d;
+    return oss.str();
 }
 
 auto open_model_handle(csnd::Csound* csound, const std::string& raw_path, const std::string& method,
@@ -1643,6 +1668,137 @@ struct NetBenderResetWeightsLayerKByIndex : csnd::InPlug<3> {
     }
 };
 
+// =============================================================================
+// Phase 3: JSON presets & backend attribute opcodes
+// =============================================================================
+
+struct NetBenderSaveStateFile : csnd::InPlug<3> {
+    int32_t init() {
+        std::string err;
+        auto adapter = lookup_adapter(csound, args[0], err);
+        if (!adapter) {
+            return csound->init_error(err);
+        }
+        const STRINGDAT& path_str = args.str_data(1);
+        const std::string path = (path_str.data != nullptr) ? std::string(path_str.data) : "";
+        const bool include_drawn = (args[2] > cs_float{0.5});
+        if (!adapter->save_state_file(path, include_drawn, err)) {
+            return csound->init_error(err + "\n");
+        }
+        return OK;
+    }
+};
+
+struct NetBenderSaveStateString : csnd::Plugin<1, 2> {
+    int32_t init() {
+        std::string err;
+        auto adapter = lookup_adapter(csound, inargs[0], err);
+        if (!adapter) {
+            return csound->init_error(err);
+        }
+        const bool include_drawn = (inargs[1] > cs_float{0.5});
+        const std::string json_str = adapter->save_state_json(include_drawn, /*pretty=*/false);
+        if (json_str.empty()) {
+            return csound->init_error("netbender_savestate: failed to serialize session state\n");
+        }
+        if (!write_string_dat(csound->get_csound(), &outargs.str_data(0), insdshead, json_str)) {
+            return csound->init_error("netbender_savestate: failed to write output string\n");
+        }
+        return OK;
+    }
+};
+
+struct NetBenderLoadState : csnd::InPlug<3> {
+    int32_t init() {
+        std::string err;
+        auto adapter = lookup_adapter(csound, args[0], err);
+        if (!adapter) {
+            return csound->init_error(err);
+        }
+        const STRINGDAT& input_str = args.str_data(1);
+        const std::string input = (input_str.data != nullptr) ? std::string(input_str.data) : "";
+        const bool restore_model = (args[2] > cs_float{0.5});
+        if (!adapter->load_state_path_or_json(input, restore_model,
+                                              make_csound_file_finder(csound->get_csound()), err)) {
+            return csound->init_error(err + "\n");
+        }
+        return OK;
+    }
+};
+
+struct NetBenderAttrs : csnd::Plugin<1, 2> {
+    int32_t init() {
+        std::string err;
+        auto adapter = lookup_adapter(csound, inargs[0], err);
+        if (!adapter) {
+            return csound->init_error(err);
+        }
+        const bool settable_only = (inargs[1] > cs_float{0.5});
+        const std::vector<std::string> attrs = settable_only ? adapter->get_settable_attributes()
+                                                             : adapter->get_available_attributes();
+        auto* out_arr = reinterpret_cast<ARRAYDAT*>(outargs(0));
+        if (fill_string_array(csound->get_csound(), out_arr, insdshead, attrs) != OK) {
+            return csound->init_error(
+                "netbender_attrs: failed to initialize output string array\n");
+        }
+        return OK;
+    }
+};
+
+struct NetBenderAttrGet : csnd::Plugin<1, 2> {
+    int32_t init() {
+        std::string err;
+        auto adapter = lookup_adapter(csound, inargs[0], err);
+        if (!adapter) {
+            return csound->init_error(err);
+        }
+        const STRINGDAT& attr_str = inargs.str_data(1);
+        const std::string attr_name = (attr_str.data != nullptr) ? std::string(attr_str.data) : "";
+        std::string value;
+        if (!adapter->get_attribute(attr_name, value, err)) {
+            return csound->init_error(err + "\n");
+        }
+        if (!write_string_dat(csound->get_csound(), &outargs.str_data(0), insdshead, value)) {
+            return csound->init_error("netbender_attr_get: failed to write output string\n");
+        }
+        return OK;
+    }
+};
+
+struct NetBenderAttrSetStr : csnd::InPlug<3> {
+    int32_t init() {
+        std::string err;
+        auto adapter = lookup_adapter(csound, args[0], err);
+        if (!adapter) {
+            return csound->init_error(err);
+        }
+        const STRINGDAT& attr_str = args.str_data(1);
+        const STRINGDAT& val_str = args.str_data(2);
+        const std::string attr_name = (attr_str.data != nullptr) ? std::string(attr_str.data) : "";
+        const std::string raw_val = (val_str.data != nullptr) ? std::string(val_str.data) : "";
+        if (!adapter->set_attribute_string(attr_name, raw_val, err)) {
+            return csound->init_error(err + "\n");
+        }
+        return OK;
+    }
+};
+
+struct NetBenderAttrSetNum : csnd::InPlug<3> {
+    int32_t init() {
+        std::string err;
+        auto adapter = lookup_adapter(csound, args[0], err);
+        if (!adapter) {
+            return csound->init_error(err);
+        }
+        const STRINGDAT& attr_str = args.str_data(1);
+        const std::string attr_name = (attr_str.data != nullptr) ? std::string(attr_str.data) : "";
+        if (!adapter->set_attribute_string(attr_name, format_cs_float_attr(args[2]), err)) {
+            return csound->init_error(err + "\n");
+        }
+        return OK;
+    }
+};
+
 }  // namespace
 
 #include <modload.h>
@@ -1713,4 +1869,15 @@ void csnd::on_load(csnd::Csound* csound) {
                                                     csnd::thread::ik);
     csnd::plugin<NetBenderResetWeightsLayerKByIndex>(csound, "netbender_resetweights", "", "iik",
                                                      csnd::thread::ik);
+
+    // Phase 3: JSON preset persistence and backend attribute access
+    csnd::plugin<NetBenderSaveStateFile>(csound, "netbender_savestate", "", "iSp", csnd::thread::i);
+    csnd::plugin<NetBenderSaveStateString>(csound, "netbender_savestate", "S", "ip",
+                                           csnd::thread::i);
+    csnd::plugin<NetBenderLoadState>(csound, "netbender_loadstate", "", "iSo", csnd::thread::i);
+
+    csnd::plugin<NetBenderAttrs>(csound, "netbender_attrs", "S[]", "ip", csnd::thread::i);
+    csnd::plugin<NetBenderAttrGet>(csound, "netbender_attr_get", "S", "iS", csnd::thread::i);
+    csnd::plugin<NetBenderAttrSetStr>(csound, "netbender_attr_set", "", "iSS", csnd::thread::i);
+    csnd::plugin<NetBenderAttrSetNum>(csound, "netbender_attr_set", "", "iSi", csnd::thread::i);
 }

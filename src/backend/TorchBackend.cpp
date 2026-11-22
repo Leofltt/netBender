@@ -880,14 +880,13 @@ auto TorchBackend::get_attribute(std::string attribute_name) -> std::vector<c10:
     std::vector<c10::IValue> getter_inputs = {}, attributes;
     auto kwargs = empty_kwargs();
     try {
-        try {
-            auto output_list =
-                m_model.get_method(attribute_getter_name)(getter_inputs, kwargs).toList();
-            attributes = output_list.vec();
-        } catch (...) {
-            auto output_tuple_ref =
-                m_model.get_method(attribute_getter_name)(getter_inputs, kwargs).toTuple();
-            attributes = (*output_tuple_ref.get()).elements();
+        auto raw_out = m_model.get_method(attribute_getter_name)(getter_inputs, kwargs);
+        if (raw_out.isList()) {
+            attributes = raw_out.toList().vec();
+        } else if (raw_out.isTuple()) {
+            attributes = (*raw_out.toTuple().get()).elements();
+        } else {
+            attributes.push_back(std::move(raw_out));
         }
     } catch (...) {
         model_lock.unlock();
@@ -911,6 +910,9 @@ auto TorchBackend::get_attribute_as_string(std::string attribute_name) -> std::s
     }
     std::string current_attr = "";
     for (int i = 0; i < setter_params.size(0); i++) {
+        if (static_cast<size_t>(i) >= getter_outputs.size()) {
+            throw std::string("getter output size mismatch for attribute ") + attribute_name;
+        }
         int current_id = setter_params[i].item().toInt();
         switch (current_id) {
             // bool case

@@ -135,7 +135,31 @@ public:
     auto reset_layer_weights_immediate(int layer_idx) -> void;
     auto reset_all_weights_immediate() -> void;
 
+    // JSON state / preset persistence (interoperable with JUCE NetBenderSession presets)
+    [[nodiscard]] auto save_state_json(bool include_drawn_weights = true, bool pretty = false) const
+        -> std::string;
+    auto save_state_file(const std::string& path, bool include_drawn_weights,
+                         std::string& error_out) const -> bool;
+    auto load_state_json(const std::string& json_str, bool restore_model, std::string& error_out,
+                         const HostFileFinder& host_finder = nullptr) -> bool;
+    auto load_state_file(const std::string& raw_path, bool restore_model,
+                         const HostFileFinder& host_finder, std::string& error_out) -> bool;
+    auto load_state_path_or_json(const std::string& input, bool restore_model,
+                                 const HostFileFinder& host_finder, std::string& error_out) -> bool;
+
+    // Backend model attributes (primarily TorchScript .ts models; empty on .pte/.onnx)
+    [[nodiscard]] auto get_available_attributes() const -> std::vector<std::string>;
+    [[nodiscard]] auto get_settable_attributes() const -> std::vector<std::string>;
+    auto get_attribute(const std::string& attr_name, std::string& value_out,
+                       std::string& error_out) const -> bool;
+    auto set_attribute(const std::string& attr_name, const std::vector<std::string>& args,
+                       std::string& error_out) -> bool;
+    auto set_attribute_string(const std::string& attr_name, const std::string& raw_value,
+                              std::string& error_out) -> bool;
+
 private:
+    auto sync_mode_metadata(std::string& error_out) -> bool;
+
     template <typename SampleT>
     auto process_impl(const SampleT* const* in_channels, int num_in, SampleT* const* out_channels,
                       int num_out, int num_frames, double zero_dbfs, float dry_wet, bool enabled)
@@ -150,6 +174,9 @@ private:
     int m_out_channels{0};
     int m_in_ratio{1};
     int m_out_ratio{1};
+    double m_host_sample_rate{44100.0};
+    int m_host_io_block{256};
+    int m_max_channels{2};
     int m_ksmps{128};
     int m_sw_buffer_frames{0};
     int m_hw_buffer_frames{0};

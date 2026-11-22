@@ -34,6 +34,16 @@ Supports `.pte` (ExecuTorch), `.onnx` (ONNX Runtime), and `.ts` (TorchScript) mo
 | `netbender_setweights` | `netbender_setweights ihandle, Slayer, iWeights[]`<br>`netbender_setweights ihandle, ilayer, iWeights[]`<br>`netbender_setweights ihandle, Slayer, kWeights[], ktrig`<br>`netbender_setweights ihandle, ilayer, kWeights[], ktrig` | Injects raw flattened weights into a layer at i-time or via wait-free SPSC triple buffering on a `ktrig` rising edge. Array length must match the layer's element count. |
 | `netbender_resetweights` | `netbender_resetweights ihandle`<br>`netbender_resetweights ihandle, Slayer`<br>`netbender_resetweights ihandle, ktrig`<br>`netbender_resetweights ihandle, Slayer, ktrig`<br>`netbender_resetweights ihandle, ilayer, ktrig` | Resets one layer or all layers back to baseline weights (`i` / `iS` at init time; `ik` / `iSk` / `iik` on rising edge of `ktrig`, where `ilayer < 0` resets all layers). |
 
+## Implemented Opcodes (Phase 3 — JSON Presets & Model Attributes)
+
+| Opcode | Signature | Description |
+| :--- | :--- | :--- |
+| `netbender_savestate` | `netbender_savestate ihandle, Spath [, iincludedrawn=1]`<br>`Sjson netbender_savestate ihandle [, iincludedrawn=1]` | Serializes `NetBenderSession` state (model metadata, bends, bridges, latent terrain, trigger/envelope settings, mix/sentry, and optional `drawn_weights`) to a pretty JSON file or an in-memory JSON string (`netbender.session` v1 format, interoperable with the JUCE plugin). |
+| `netbender_loadstate` | `netbender_loadstate ihandle, SpathOrJson [, irestoremodel=0]` | Loads a `netbender.session` preset from either a JSON string (when trimmed input starts with `'{'`) or a file path (resolved via cwd or Csound `SSDIR`/`SFDIR`/`INCDIR`). When `irestoremodel=0`, only bends, bridges, trigger, latent terrain, and mix/sentry are restored (keeping the active handle's model/method/buffer config intact); when `irestoremodel=1`, the serialized model path, method, buffer size, and GPU preference are also restored. |
+| `netbender_attrs` | `SAttrs[] netbender_attrs ihandle [, isettableonly=1]` | Returns registered backend attributes as `S[]` (`1`=registered settable attributes, `0`=all raw model attributes; empty on `.pte`/`.onnx`). |
+| `netbender_attr_get` | `Sval netbender_attr_get ihandle, Sattr` | Queries a model attribute as a string (primarily TorchScript `.ts` `nn_tilde` attributes). |
+| `netbender_attr_set` | `netbender_attr_set ihandle, Sattr, Sval`<br>`netbender_attr_set ihandle, Sattr, ival` | Sets a model attribute from a whitespace-delimited string or scalar numeric value at init time. |
+
 ### Model Path Resolution Order
 
 `netbender_load` searches in the following order (probing `.pte`, `.onnx`, `.ts` automatically if `Spath` omits an extension):
@@ -128,4 +138,10 @@ Run from the repository root so relative paths to `models/*` resolve:
 
 # 9. Raw weight inspection & i-rate / k-rate injection (getweights / setweights / resetweights)
 /Applications/Csound/csound src/frontend/csound/examples/08_raw_weights_read_write.csd
+
+# 10. JSON preset save/load round-trip (file + string)
+/Applications/Csound/csound src/frontend/csound/examples/09_preset_save_load_state.csd
+
+# 11. Model attribute inspection and mutation (.ts and .pte check)
+/Applications/Csound/csound src/frontend/csound/examples/10_torchscript_attributes.csd
 ```
