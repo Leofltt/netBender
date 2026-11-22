@@ -4,7 +4,7 @@
 > **Pre-built Installers & Nightly Binaries**:
 > Looking to quickly install the VST3, AU, or Standalone plugins without building from source? Download pre-built installers and packages from the latest completed run of the [Release Plugins GitHub Action Workflow](https://github.com/Leofltt/nn_tilde_bending/actions/workflows/release_plugins.yaml) (under the **Artifacts** section).
 
-**NetBender** (`nn_tilde_bending`) is a performative neural audio synthesis and live circuit-bending engine evolved from [IRCAM's `nn~`](https://github.com/acids-ircam/nn_tilde), started as a fork of [nn_tilde_bending](https://github.com/blazejkotowski/nn_tilde_bending) and inspired by modern runtimes such as ([`neural_tilde`](https://github.com/jasper-zheng/neural_tilde)). It transforms deep learning audio models such as [RAVE](https://github.com/acids-ircam/RAVE), [Stable Audio Open VAE](https://huggingface.co/stabilityai/stable-audio-open-1.0), and [Meta EnCodec](https://github.com/facebookresearch/encodec)—into expressive, tactile instruments via real-time weight mutation, layer-selective trace isolation, momentary short-circuiting, thermal drift, resonant cross-talk, latent space terrain navigation, and safety circuit breakers.
+**NetBender** (`nn_tilde_bending`) is a performative neural audio synthesis and live circuit-bending engine evolved from [IRCAM's `nn~`](https://github.com/acids-ircam/nn_tilde), started as a fork of [nn_tilde_bending](https://github.com/blazejkotowski/nn_tilde_bending) and inspired by modern runtimes such as [`neural_tilde`](https://github.com/jasper-zheng/neural_tilde). It transforms deep learning audio models—such as [RAVE](https://github.com/acids-ircam/RAVE), [Stable Audio Open VAE](https://huggingface.co/stabilityai/stable-audio-open-1.0), Stable Audio 3 (SAME-S), and [Meta EnCodec](https://github.com/facebookresearch/encodec)—into expressive, tactile instruments via real-time weight mutation, layer-selective trace isolation, momentary short-circuiting, thermal drift, resonant cross-talk, latent space terrain navigation, and safety circuit breakers.
 
 ---
 
@@ -114,7 +114,7 @@ python3 -m venv .venv
 
 ### 1. Exporting to ExecuTorch (`.pte`) & Migrating `.ts` Models
 
-ExecuTorch exports support two bend promotion modes (`--bend-mode`) and four hardware delegates (`--delegate {coreml,mps,xnnpack,portable}`):
+ExecuTorch exports support three bend promotion modes (`--bend-mode`) and four hardware delegates (`--delegate {coreml,mps,xnnpack,portable}`):
 
 - **`--bend-mode delegate` (Default, Recommended for CoreML / XNNPACK)**:
   Promotes 1D/channelwise normalization (`norm`, `weight_g`, $\gamma$, $\beta$), biases, and activation parameters (`snake` $\alpha/\beta$, channel scales) to dynamic inputs while keeping heavy convolution kernels static inside the delegated CoreML/XNNPACK subgraph. This gives you full Apple Neural Engine / GPU acceleration **and** expressive, stable real-time circuit bending.
@@ -167,17 +167,26 @@ ExecuTorch exports support two bend promotion modes (`--bend-mode`) and four har
 
 ### 2. Exporting & Converting Models to Bendable ONNX (`.onnx`)
 
+`rave_to_onnx` and `onnx_bend_prep.py` support `--bend-mode {delegate,full,none}` (`delegate` by default in `rave_to_onnx`, promoting 1D biases, norms, scales, and activation parameters into compact `NBND` v2 `.bin` sidecars while keeping Conv/MatMul weights constant for ONNX Runtime const-folding and CoreML EP acceleration). RAVE v1 and legacy PyTorch 1.13 RAVE v2 `.ts` models are handled automatically via eager graph reconstruction and measured causal decode warmup (`history_samples`).
+
 ```bash
-# Convert RAVE TorchScript (.ts) models to bendable ONNX (exports forward, encode, decode + .bin sidecar):
+# Convert RAVE v1/v2 TorchScript (.ts) models to bendable ONNX (exports forward, encode, decode + .bin sidecar):
 .venv/bin/python -m python_tools.export_cli rave_to_onnx \
     -i models/darbouka.ts \
     -o models/darbouka_bendable.onnx \
-    --buffer-size 2048
+    --buffer-size 2048 \
+    --bend-mode delegate
 
 .venv/bin/python -m python_tools.export_cli rave_to_onnx \
     -i models/speech.ts \
     -o models/speech_bendable.onnx \
-    --buffer-size 2048
+    --buffer-size 2048 \
+    --bend-mode delegate
+
+.venv/bin/python -m python_tools.export_cli rave_to_onnx \
+    -i models/voice_vocalset_b2048_r48000_z16.ts \
+    -o models/voice_vocalset_b2048_r48000_z16_bendable.onnx \
+    --bend-mode delegate
 
 # Convert Stable Audio Open 1.0 (v1 VAE) (.ts) or EnCodec (.ts) to bendable ONNX:
 .venv/bin/python -m python_tools.export_cli stable_audio_to_onnx \
@@ -213,10 +222,11 @@ If you already have a standard `.onnx` model, you can promote its weights and ge
 
 ```bash
 # Inspect an ONNX model's inputs, outputs, and initializers:
-python python_tools/onnx_bend_prep.py -i model.onnx --inspect
+.venv/bin/python python_tools/onnx_bend_prep.py -i model.onnx --inspect
 
-# Promote all float initializers (or filter specific layers) and generate <model>_bendable.onnx + .bin:
-python python_tools/onnx_bend_prep.py -i model.onnx -o model_bendable.onnx --filter norm bias snake
+# Promote delegate-safe 1D weights (or filter specific layers) and generate <model>_bendable.onnx + .bin:
+.venv/bin/python python_tools/onnx_bend_prep.py -i model.onnx -o model_bendable.onnx --bend-mode delegate
+.venv/bin/python python_tools/onnx_bend_prep.py -i model.onnx -o model_bendable.onnx --filter norm bias snake
 ```
 
 In Python scripts, you can export any custom `torch.nn.Module` to a bendable `.pte` bundle using `export_bendable_pte` from `python_tools/pte_bend_prep.py`:
@@ -247,6 +257,7 @@ export_bendable_pte(
    - **1D Multi-Trace Oscilloscope**: Draw, invert, quantize, or scramble weights directly on the selected layer's parameter curve.
    - **2D Filter Matrix Heatmap**: Inspect and bend 2D convolution kernels and projection matrices with cross-channel trace bridges.
    - **Latent Topographic Vector Pad**: Navigate the autoencoder bottleneck (`encode` $\rightarrow$ Latent Terrain Hook $\rightarrow$ `decode`) using Random Fourier Feature orbits (`FourierOrbit`), latent slew limiting (`LatentSlew`), and step quantization (`Quantize`). Works identically across `.pte`, `.onnx`, and `.ts` models without any runtime dependency on LibTorch.
+   - **Generative `decode gen` Controls**: When the **`decode gen`** method is selected, configure **Gen Smoothness** (Ornstein-Uhlenbeck latent walk persistence) and **Grain Blend** (`Auto`, `Off`, `2-Tap (Half)`, `4-Tap (Quarter)` single-inference overlap-add smoothing, where `Auto` selects `4-Tap` for `ratio >= 4096` patch models such as Stable Audio 3 SAME-S).
 3. **Trace Isolation & Macro Controls**:
    - Isolate specific architectural groups (**Norm / Gain ($\gamma, \beta$)**, **Early Transients**, **Internal Latents**, **Output Heads**) to bend dynamics, pitch/formants, or texture independently.
    - Trigger momentary **SHORT [!]** bursts with Attack/Hold/Release envelopes or audio sidechain transient detection.
@@ -439,7 +450,9 @@ NetBender models configure their streaming buffer, receptive field discard, and 
 
 | Property | Default | Description |
 | --- | --- | --- |
-| `history_samples` | `0` | Number of past audio samples kept in the streaming rolling buffer to provide context for non-causal convolutions. Eliminates boundary jump clicks (e.g. 4096 for Stable Audio Open, 28672 for RAVE Speech, 16384 for SAME-S). |
+| `bend_mode` | `delegate` | Parameter promotion strategy embedded during export (`delegate`, `full`, or `none`). |
+| `buffer_size` | `2048` | Preferred streaming frame block size in samples (`0` if dynamic). |
+| `history_samples` | `0` | Number of past audio samples kept in the streaming rolling buffer to provide context for non-causal convolutions and causal warmup delays (e.g. `4096` for Stable Audio Open, `28672` for RAVE Speech, `16384` for SAME-S, and auto-measured causal warmup for RAVE v2 such as `18432` for VocalSet and `10240` for Sax Soprano). |
 | `output_offset` | `0` | Initial transient / receptive-field latency samples discarded from synthesized output so the audio stream begins at steady state without silence gaps. |
-| `latent_scale` | `1.0` | Ornstein-Uhlenbeck random walk standard deviation scale for `decode gen` synthesis, matched to the decoder's expected latent variance (e.g. `5.0` for EnCodec SEANet, `2.5` for RAVE Speech, `1.0` for unit-normal VAEs). |
+| `latent_scale` | `1.0` | Ornstein-Uhlenbeck random walk standard deviation scale for `decode gen` synthesis, matched to the decoder's expected latent variance (e.g. `5.0` for EnCodec SEANet, `2.5` for RAVE Speech, `0.25` for Stable Audio 3 SAME-S, `1.0` for unit-normal VAEs). |
 | `decode_latent_steps` | `1` | Number of latent frames expected by the companion `decode` method. |

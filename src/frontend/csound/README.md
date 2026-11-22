@@ -6,21 +6,21 @@ Supports `.pte` (ExecuTorch), `.onnx` (ONNX Runtime), and `.ts` (TorchScript) mo
 
 ---
 
-## Implemented Opcodes (Phase 1)
+## Core Loading, Streaming & Introspection Opcodes
 
 | Opcode | Signature | Description |
 | :--- | :--- | :--- |
-| `netbender_load` | `ihandle netbender_load Spath [, ibufsize, igpu, ithread, isentry, idrydelay]`<br>`ihandle netbender_load Spath, Smethod [, ibufsize, igpu, ithread, isentry, idrydelay]` | Loads a `.pte`/`.onnx`/`.ts` model once (typically in `instr 0`) and returns an integer handle. Defaults: `Smethod="forward"`, `ibufsize=-1` (backend preferred; `0` forces synchronous inline), `igpu=0`, `ithread=-1` (auto async for `-odac`, sync for file/null output), `isentry=-1` (auto on except `encode`/`decode`), `idrydelay=-1` (auto on for `forward`). |
+| `netbender_load` | `ihandle netbender_load Spath [, ibufsize, igpu, ithread, isentry, idrydelay]`<br>`ihandle netbender_load Spath, Smethod [, ibufsize, igpu, ithread, isentry, idrydelay]` | Loads a `.pte`/`.onnx`/`.ts` model once (typically in `instr 0`) and returns an integer handle. Accepts `"forward"`, `"encode"`, `"decode"`, `"prior"`, `"generate"`, and `"decode gen"` (or alias `"decode_gen"`). Defaults: `Smethod="forward"`, `ibufsize=-1` (backend preferred; `0` forces synchronous inline), `igpu=0`, `ithread=-1` (auto async for `-odac`, sync for file/null output), `isentry=-1` (auto on except `encode`/`decode`), `idrydelay=-1` (auto on for `forward`). |
 | `netbender_free` | `netbender_free ihandle` | Explicitly closes and frees a loaded handle (all handles also auto-clean on Csound reset/exit). |
-| `netbender_reset` | `netbender_reset ihandle`<br>`netbender_reset ihandle, ktrig` | Clears streaming ring buffers, `decode gen` FIFO, and resets the `SafetySentry` fuse (at i-time or on rising edge of `ktrig`). |
+| `netbender_reset` | `netbender_reset ihandle`<br>`netbender_reset ihandle, ktrig` | Clears streaming ring buffers, `decode gen` FIFO (including patch-OLA delay state), and resets the `SafetySentry` fuse (at i-time or on rising edge of `ktrig`). |
 | `netbender_process` | `aout netbender_process ihandle, ain [, kdrywet=1, kenable=1]`<br>`aL, aR netbender_process ihandle, ainL, ainR [, kdrywet=1, kenable=1]`<br>`aOuts[] netbender_process ihandle, aIns[] [, kdrywet=1, kenable=1]` | Real-time neural audio or latent streaming (`forward`, `encode`, `decode`, etc.). Automatically resamples between Csound `sr` and model SR and normalizes by `0dbfs`. `aOuts[]` is auto-sized in `init()` to `model_out_channels`. |
-| `netbender_gen` | `aout netbender_gen ihandle [, kenable=1]`<br>`aL, aR netbender_gen ihandle [, kenable=1]`<br>`aOuts[] netbender_gen ihandle [, kenable=1]` | 0-input generative synthesis (`decode gen`, `prior`, `generate`). |
+| `netbender_gen` | `aout netbender_gen ihandle [, kenable=1]`<br>`aL, aR netbender_gen ihandle [, kenable=1]`<br>`aOuts[] netbender_gen ihandle [, kenable=1]` | 0-input generative synthesis (`decode gen` / `decode_gen`, `prior`, `generate`). In `decode gen`, `Auto` grain-blend smoothing automatically applies 4-tap quarter-patch Hann overlap-add for large-ratio models (`ratio >= 4096`, e.g. Stable Audio 3 SAME-S). |
 | `netbender_info` | `iInCh, iOutCh, iModelSR, iLatency, iNumLayers netbender_info ihandle` | Returns model input/output channels, native model SR, host-side latency in samples, and number of bendable layers. |
 | `netbender_dump` | `netbender_dump ihandle` | Prints model diagnostics, resampling state, methods, attributes, and bendable layers/shapes to the Csound console. |
 | `netbender_layers` | `SLayers[] netbender_layers ihandle` | Returns an `S[]` array containing all bendable layer names. |
 | `netbender_methods` | `SMethods[] netbender_methods ihandle` | Returns an `S[]` array containing available model methods/modes. |
 
-## Implemented Opcodes (Phase 2 — Live Circuit Bending & Weights)
+## Live Circuit Bending, Latent Terrain & Raw Weight Opcodes
 
 | Opcode | Signature | Description |
 | :--- | :--- | :--- |
@@ -34,12 +34,12 @@ Supports `.pte` (ExecuTorch), `.onnx` (ONNX Runtime), and `.ts` (TorchScript) mo
 | `netbender_setweights` | `netbender_setweights ihandle, Slayer, iWeights[]`<br>`netbender_setweights ihandle, ilayer, iWeights[]`<br>`netbender_setweights ihandle, Slayer, kWeights[], ktrig`<br>`netbender_setweights ihandle, ilayer, kWeights[], ktrig` | Injects raw flattened weights into a layer at i-time or via wait-free SPSC triple buffering on a `ktrig` rising edge. Array length must match the layer's element count. |
 | `netbender_resetweights` | `netbender_resetweights ihandle`<br>`netbender_resetweights ihandle, Slayer`<br>`netbender_resetweights ihandle, ktrig`<br>`netbender_resetweights ihandle, Slayer, ktrig`<br>`netbender_resetweights ihandle, ilayer, ktrig` | Resets one layer or all layers back to baseline weights (`i` / `iS` at init time; `ik` / `iSk` / `iik` on rising edge of `ktrig`, where `ilayer < 0` resets all layers). |
 
-## Implemented Opcodes (Phase 3 — JSON Presets & Model Attributes)
+## JSON Presets & Model Attribute Opcodes
 
 | Opcode | Signature | Description |
 | :--- | :--- | :--- |
-| `netbender_savestate` | `netbender_savestate ihandle, Spath [, iincludedrawn=1]`<br>`Sjson netbender_savestate ihandle [, iincludedrawn=1]` | Serializes `NetBenderSession` state (model metadata, bends, bridges, latent terrain, trigger/envelope settings, mix/sentry, and optional `drawn_weights`) to a pretty JSON file or an in-memory JSON string (`netbender.session` v1 format, interoperable with the JUCE plugin). |
-| `netbender_loadstate` | `netbender_loadstate ihandle, SpathOrJson [, irestoremodel=0]` | Loads a `netbender.session` preset from either a JSON string (when trimmed input starts with `'{'`) or a file path (resolved via cwd or Csound `SSDIR`/`SFDIR`/`INCDIR`). When `irestoremodel=0`, only bends, bridges, trigger, latent terrain, and mix/sentry are restored (keeping the active handle's model/method/buffer config intact); when `irestoremodel=1`, the serialized model path, method, buffer size, and GPU preference are also restored. |
+| `netbender_savestate` | `netbender_savestate ihandle, Spath [, iincludedrawn=1]`<br>`Sjson netbender_savestate ihandle [, iincludedrawn=1]` | Serializes `NetBenderSession` state (model metadata, bends, bridges, latent terrain plus `decode_gen_smoothness` and `decode_gen_ola_mode`, trigger/envelope settings, mix/sentry, and optional `drawn_weights`) to a pretty JSON file or an in-memory JSON string (`netbender.session` v1 format, interoperable with the JUCE plugin). |
+| `netbender_loadstate` | `netbender_loadstate ihandle, SpathOrJson [, irestoremodel=0]` | Loads a `netbender.session` preset from either a JSON string (when trimmed input starts with `'{'`) or a file path (resolved via cwd or Csound `SSDIR`/`SFDIR`/`INCDIR`). Restores `decode_gen_smoothness` and `decode_gen_ola_mode` alongside latent terrain/bends/bridges (`irestoremodel=0` keeps the active handle's model/method/buffer config intact; `irestoremodel=1` also restores the serialized model path, method, buffer size, and GPU preference). |
 | `netbender_attrs` | `SAttrs[] netbender_attrs ihandle [, isettableonly=1]` | Returns registered backend attributes as `S[]` (`1`=registered settable attributes, `0`=all raw model attributes; empty on `.pte`/`.onnx`). |
 | `netbender_attr_get` | `Sval netbender_attr_get ihandle, Sattr` | Queries a model attribute as a string (primarily TorchScript `.ts` `nn_tilde` attributes). |
 | `netbender_attr_set` | `netbender_attr_set ihandle, Sattr, Sval`<br>`netbender_attr_set ihandle, Sattr, ival` | Sets a model attribute from a whitespace-delimited string or scalar numeric value at init time. |
