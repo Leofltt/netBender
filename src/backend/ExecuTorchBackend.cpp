@@ -786,7 +786,7 @@ auto ExecuTorchBackend::perform_decode_gen(std::vector<float*>& out_buffer, int 
         1,
         std::min(m_buffer_size > 0 ? m_buffer_size : new_lat_steps * ratio, new_lat_steps * ratio));
 
-    const float alpha = (ratio <= 640) ? 0.94f : 0.86f;
+    const float alpha = compute_decode_gen_alpha(get_decode_gen_smoothness(), ratio);
     const float beta = std::sqrt(1.0f - alpha * alpha);
     const float latent_scale =
         (latent_dim >= 256 && m_latent_scale == 1.0f)

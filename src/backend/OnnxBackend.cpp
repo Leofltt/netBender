@@ -1452,7 +1452,7 @@ auto OnnxBackend::perform_decode_gen(std::vector<float*>& out_buffer, int n_batc
         int total_lat_steps = hist_lat_steps + latent_steps;
 
         // Continuous Ornstein-Uhlenbeck smooth latent random walk
-        const float alpha = (ratio <= 640) ? 0.94f : 0.86f;
+        const float alpha = compute_decode_gen_alpha(get_decode_gen_smoothness(), ratio);
         const float beta = std::sqrt(1.0f - alpha * alpha);
 
         static std::mt19937 rng_gen(1337);

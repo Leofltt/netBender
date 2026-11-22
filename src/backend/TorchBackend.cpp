@@ -420,7 +420,7 @@ auto TorchBackend::perform_decode_gen(std::vector<float*>& out_buffer, int n_bat
             float latent_scale = (latent_dim >= 128 && latent_ratio <= 640)
                                      ? 8.5f
                                      : ((latent_dim >= 256) ? 0.25f : 1.0f);
-            const float alpha = (latent_ratio <= 640) ? 0.94f : 0.86f;
+            const float alpha = compute_decode_gen_alpha(get_decode_gen_smoothness(), latent_ratio);
             const float beta = std::sqrt(1.0f - alpha * alpha);
 
             static std::mt19937 rng_gen(1337);

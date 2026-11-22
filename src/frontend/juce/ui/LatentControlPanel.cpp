@@ -46,6 +46,26 @@ LatentControlPanel::LatentControlPanel() {
                                        slider_box_height_standard);
     latent_slew_slider.setColour(juce::Slider::trackColourId, sky_blue);
     addAndMakeVisible(latent_slew_slider);
+
+    decode_gen_smoothness_label.setText("Gen Smoothness", juce::dontSendNotification);
+    decode_gen_smoothness_label.setJustificationType(juce::Justification::centredLeft);
+    decode_gen_smoothness_label.setColour(juce::Label::textColourId, text_light);
+    addChildComponent(decode_gen_smoothness_label);
+
+    decode_gen_smoothness_slider.setRange(0.0, 1.0, 0.01);
+    decode_gen_smoothness_slider.setValue(0.30);
+    decode_gen_smoothness_slider.setSliderStyle(juce::Slider::LinearBar);
+    decode_gen_smoothness_slider.setTextBoxStyle(
+        juce::Slider::TextBoxRight, false, slider_box_width_standard, slider_box_height_standard);
+    decode_gen_smoothness_slider.setColour(juce::Slider::trackColourId, sky_blue);
+    addChildComponent(decode_gen_smoothness_slider);
+}
+
+auto LatentControlPanel::set_decode_gen_active(bool active) -> void {
+    m_decodeGenActive = active;
+    decode_gen_smoothness_label.setVisible(active);
+    decode_gen_smoothness_slider.setVisible(active);
+    resized();
 }
 
 auto LatentControlPanel::resized() -> void {
@@ -72,5 +92,14 @@ auto LatentControlPanel::resized() -> void {
         latent_depth_slider.setBounds(area.removeFromTop(toggle_height));
         latent_slew_label.setBounds({});
         latent_slew_slider.setBounds({});
+    }
+
+    if (m_decodeGenActive) {
+        area.removeFromTop(gap_large);
+        decode_gen_smoothness_label.setBounds(area.removeFromTop(label_height));
+        decode_gen_smoothness_slider.setBounds(area.removeFromTop(toggle_height));
+    } else {
+        decode_gen_smoothness_label.setBounds({});
+        decode_gen_smoothness_slider.setBounds({});
     }
 }

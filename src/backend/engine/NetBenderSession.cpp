@@ -135,6 +135,7 @@ NetBenderSession::NetBenderSession(SessionConfig config)
 
     m_engine.set_pre_inference_callback([this](IBackend& backend) {
         drain_pending_rt_bending();
+        backend.set_decode_gen_smoothness(m_decode_gen_smoothness.load(std::memory_order_relaxed));
         std::string active_layer;
         {
             std::lock_guard<std::mutex> lock(m_state_mutex);
@@ -279,6 +280,8 @@ auto NetBenderSession::load_model(const std::string& path) -> bool {
 
         // Reset latent terrain cached matrices, stale layer bending states, and rebuild RT slots
         m_latent.reset();
+        m_backend->set_decode_gen_smoothness(
+            m_decode_gen_smoothness.load(std::memory_order_relaxed));
         m_bending.clear_all_layer_bending();
         rebuild_layer_slots();
 
@@ -618,6 +621,15 @@ auto NetBenderSession::set_latent_automation(float x, float y,
     m_latent_automation_active.store(true);
 }
 
+auto NetBenderSession::set_decode_gen_smoothness(float smoothness) noexcept NETBENDER_NONBLOCKING
+    -> void {
+    m_decode_gen_smoothness.store(std::clamp(smoothness, 0.0f, 1.0f), std::memory_order_relaxed);
+}
+
+auto NetBenderSession::get_decode_gen_smoothness() const noexcept NETBENDER_NONBLOCKING -> float {
+    return m_decode_gen_smoothness.load(std::memory_order_relaxed);
+}
+
 //==============================================================================
 auto NetBenderSession::set_active_layer(const std::string& name) -> void {
     std::lock_guard<std::mutex> lock(m_state_mutex);
@@ -867,6 +879,7 @@ auto NetBenderSession::to_json(bool include_drawn_weights) const -> nlohmann::js
         {"y", m_latent.get_y()},
         {"depth", m_latent.get_depth()},
         {"slew", m_latent.get_slew()},
+        {"decode_gen_smoothness", get_decode_gen_smoothness()},
     };
 
     json layers = json::object();
@@ -963,6 +976,7 @@ auto NetBenderSession::from_json(const nlohmann::json& state, bool restore_model
             m_latent.set_coords(l.value("x", 0.0f), l.value("y", 0.0f));
             m_latent.set_depth(l.value("depth", 0.5f));
             m_latent.set_slew(l.value("slew", 0.0f));
+            set_decode_gen_smoothness(l.value("decode_gen_smoothness", 0.30f));
         }
 
         // 5. Active layer & per-layer bending (clear first so omitted layers do not leak)

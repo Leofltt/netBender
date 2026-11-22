@@ -5,6 +5,9 @@
 #include <map>
 #include <functional>
 #include <cstdint>
+#include <algorithm>
+#include <atomic>
+#include <cmath>
 #include "static_buffer.h"
 
 struct MethodProperties {
@@ -90,6 +93,26 @@ public:
         m_decode_gen_latent_state.clear();
     }
 
+    virtual auto set_decode_gen_smoothness(float smoothness) noexcept -> void {
+        m_decode_gen_smoothness.store(std::clamp(smoothness, 0.0f, 1.0f),
+                                      std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] virtual auto get_decode_gen_smoothness() const noexcept -> float {
+        return m_decode_gen_smoothness.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] static auto compute_decode_gen_alpha(float smoothness, int ratio) noexcept
+        -> float {
+        if (smoothness < 0.0f) {
+            return (ratio <= 640) ? 0.94f : 0.86f;
+        }
+        const float s = std::clamp(smoothness, 0.0f, 1.0f);
+        // Nonlinear log-spaced (1 - alpha): s=0 -> 0.50, s=0.30 -> 0.874, s=0.50 -> 0.95, s=1 ->
+        // 0.995
+        return 1.0f - 0.50f * std::pow(0.01f, s);
+    }
+
     // Method & Mode Introspection
     virtual auto has_method(std::string method_name) -> bool = 0;
     virtual auto has_prior_decode() -> bool = 0;
@@ -137,4 +160,5 @@ protected:
     std::vector<std::vector<float>> m_decode_gen_fifo;
     size_t m_decode_gen_fifo_read_idx{0};
     std::vector<float> m_decode_gen_latent_state;
+    std::atomic<float> m_decode_gen_smoothness{-1.0f};
 };

@@ -99,6 +99,16 @@ public:
     }
     auto setLatentSlew(float slew) -> void { m_session.latent().set_slew(slew); }
     auto getLatentSlew() const -> float { return m_session.latent().get_slew(); }
+    auto setDecodeGenSmoothness(float smoothness) -> void {
+        float v = juce::jlimit(0.0f, 1.0f, smoothness);
+        m_session.set_decode_gen_smoothness(v);
+        if (m_decodeGenSmoothnessParam)
+            *m_decodeGenSmoothnessParam = v;
+    }
+    auto getDecodeGenSmoothness() const -> float {
+        return m_decodeGenSmoothnessParam ? m_decodeGenSmoothnessParam->get()
+                                          : m_session.get_decode_gen_smoothness();
+    }
     auto hasAutoencode() -> bool {
         return m_session.has_backend() ? m_session.backend().has_autoencode() : false;
     }
@@ -237,6 +247,9 @@ public:
     auto getLatentXParam() const -> juce::AudioParameterFloat* { return m_latentXParam; }
     auto getLatentYParam() const -> juce::AudioParameterFloat* { return m_latentYParam; }
     auto getLatentDepthParam() const -> juce::AudioParameterFloat* { return m_latentDepthParam; }
+    auto getDecodeGenSmoothnessParam() const -> juce::AudioParameterFloat* {
+        return m_decodeGenSmoothnessParam;
+    }
 
 private:
     // DAW Automatable parameters
@@ -249,6 +262,7 @@ private:
     juce::AudioParameterFloat* m_latentXParam{nullptr};
     juce::AudioParameterFloat* m_latentYParam{nullptr};
     juce::AudioParameterFloat* m_latentDepthParam{nullptr};
+    juce::AudioParameterFloat* m_decodeGenSmoothnessParam{nullptr};
 
     // Frontend-agnostic backend + streaming + bending + latent + JSON state facade
     NetBenderSession m_session;

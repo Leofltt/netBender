@@ -117,6 +117,9 @@ public:
     juce::ComboBox& latent_mode_combo{side_panel.latent_panel.latent_mode_combo};
     juce::Label& latent_slew_label{side_panel.latent_panel.latent_slew_label};
     juce::Slider& latent_slew_slider{side_panel.latent_panel.latent_slew_slider};
+    juce::Label& decode_gen_smoothness_label{side_panel.latent_panel.decode_gen_smoothness_label};
+    juce::Slider& decode_gen_smoothness_slider{
+        side_panel.latent_panel.decode_gen_smoothness_slider};
 
 private:
     auto timerCallback() -> void override;

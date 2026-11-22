@@ -52,6 +52,10 @@ NetBenderAudioProcessor::NetBenderAudioProcessor()
                      juce::ParameterID("latent_depth", 1), "Latent Depth",
                      juce::NormalisableRange<float>(0.0f, 2.0f, 0.01f), 0.5f));
 
+    addParameter(m_decodeGenSmoothnessParam = new juce::AudioParameterFloat(
+                     juce::ParameterID("decode_gen_smoothness", 1), "Decode Gen Smoothness",
+                     juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.30f));
+
     m_session.set_latency_callback([this](int latency) { setLatencySamples(latency); });
     m_session.set_error_callback([](const std::string& msg) {
         juce::ignoreUnused(msg);
@@ -124,6 +128,9 @@ auto NetBenderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
         m_session.set_latent_automation(m_latentXParam->get(), m_latentYParam->get(),
                                         m_latentDepthParam->get());
     }
+    if (m_decodeGenSmoothnessParam) {
+        m_session.set_decode_gen_smoothness(m_decodeGenSmoothnessParam->get());
+    }
 
     // Session zero-fills output when no model is loaded, runs the sidechain envelope follower,
     // and streams through StreamingEngine (resampling, dry/wet, SafetySentry)
@@ -154,6 +161,8 @@ auto NetBenderAudioProcessor::syncParametersFromSession() -> void {
         *m_latentYParam = m_session.latent().get_y();
     if (m_latentDepthParam)
         *m_latentDepthParam = m_session.latent().get_depth();
+    if (m_decodeGenSmoothnessParam)
+        *m_decodeGenSmoothnessParam = m_session.get_decode_gen_smoothness();
     if (m_shortCircuitParam)
         *m_shortCircuitParam = false;
 
@@ -190,6 +199,8 @@ auto NetBenderAudioProcessor::getStateInformation(juce::MemoryBlock& destData) -
         m_session.latent().set_coords(m_latentXParam->get(), m_latentYParam->get());
     if (m_latentDepthParam)
         m_session.latent().set_depth(m_latentDepthParam->get());
+    if (m_decodeGenSmoothnessParam)
+        m_session.set_decode_gen_smoothness(m_decodeGenSmoothnessParam->get());
 
     const std::string activeLayer = m_session.get_active_layer();
     if (!activeLayer.empty()) {

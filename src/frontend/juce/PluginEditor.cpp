@@ -123,6 +123,9 @@ NetBenderAudioProcessorEditor::NetBenderAudioProcessorEditor(NetBenderAudioProce
     latent_mode_combo.addListener(this);
     latent_slew_slider.setValue(audioProcessor.getLatentSlew());
     latent_slew_slider.addListener(this);
+    decode_gen_smoothness_slider.setValue(audioProcessor.getDecodeGenSmoothness(),
+                                          juce::dontSendNotification);
+    decode_gen_smoothness_slider.addListener(this);
 
     bendingGroup.addAndMakeVisible(sidePanel);
 
@@ -197,6 +200,7 @@ auto NetBenderAudioProcessorEditor::comboBoxChanged(juce::ComboBox* comboBoxThat
     if (comboBoxThatHasChanged == &method_combo) {
         audioProcessor.setCurrentMethod(method_combo.getText());
         update_model_info();
+        updateLatentControlsVisibility();
     } else if (comboBoxThatHasChanged == &layer_combo) {
         select_layer(layer_combo.getText());
     } else if (comboBoxThatHasChanged == &category_combo) {
@@ -310,6 +314,11 @@ auto NetBenderAudioProcessorEditor::sliderValueChanged(juce::Slider* slider) -> 
     } else if (slider == &latent_slew_slider) {
         float val = (float)latent_slew_slider.getValue();
         audioProcessor.setLatentSlew(val);
+    } else if (slider == &decode_gen_smoothness_slider) {
+        float val = (float)decode_gen_smoothness_slider.getValue();
+        audioProcessor.setDecodeGenSmoothness(val);
+        if (auto* param = audioProcessor.getDecodeGenSmoothnessParam())
+            param->setValueNotifyingHost(param->convertTo0to1(val));
     } else {
         apply_knob_bending();
     }
@@ -463,6 +472,8 @@ auto NetBenderAudioProcessorEditor::sync_from_processor_state() -> void {
                                     juce::dontSendNotification);
     latent_depth_slider.setValue(audioProcessor.getLatentDepth(), juce::dontSendNotification);
     latent_slew_slider.setValue(audioProcessor.getLatentSlew(), juce::dontSendNotification);
+    decode_gen_smoothness_slider.setValue(audioProcessor.getDecodeGenSmoothness(),
+                                          juce::dontSendNotification);
     latentPad.setCoords(audioProcessor.getLatentX(), audioProcessor.getLatentY());
     latentPad.setEnabledState(audioProcessor.isLatentEnabled(), audioProcessor.hasAutoencode());
     updateLatentControlsVisibility();
@@ -534,6 +545,15 @@ auto NetBenderAudioProcessorEditor::timerCallback() -> void {
             !latent_depth_slider.isMouseButtonDown()) {
             latent_depth_slider.setValue(pVal, juce::dontSendNotification);
             audioProcessor.setLatentDepth(pVal);
+        }
+    }
+
+    if (auto* p = audioProcessor.getDecodeGenSmoothnessParam()) {
+        float pVal = p->get();
+        if (std::abs(pVal - (float)decode_gen_smoothness_slider.getValue()) > 0.005f &&
+            !decode_gen_smoothness_slider.isMouseButtonDown()) {
+            decode_gen_smoothness_slider.setValue(pVal, juce::dontSendNotification);
+            audioProcessor.setDecodeGenSmoothness(pVal);
         }
     }
 
@@ -699,6 +719,7 @@ auto NetBenderAudioProcessorEditor::update_model_info() -> void {
             method_combo.addItem(m, id++);
         }
         method_combo.setText(audioProcessor.getCurrentMode(), juce::dontSendNotification);
+        updateLatentControlsVisibility();
 
         // Update Layer combo box respecting selected Category
         layer_combo.clear(juce::dontSendNotification);
@@ -1330,5 +1351,6 @@ auto NetBenderAudioProcessorEditor::set_view_mode(ViewMode newMode) -> void {
 }
 
 auto NetBenderAudioProcessorEditor::updateLatentControlsVisibility() -> void {
-    side_panel.latent_panel.resized();
+    const bool isDecodeGen = audioProcessor.getCurrentMethod().equalsIgnoreCase("decode gen");
+    side_panel.latent_panel.set_decode_gen_active(isDecodeGen);
 }

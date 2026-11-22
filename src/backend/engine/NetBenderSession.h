@@ -146,6 +146,8 @@ public:
     // Host automation for the latent terrain hook (overrides LatentTerrainEngine coords/depth)
     auto set_latent_automation(float x, float y, float depth) noexcept NETBENDER_NONBLOCKING
         -> void;
+    auto set_decode_gen_smoothness(float smoothness) noexcept NETBENDER_NONBLOCKING -> void;
+    [[nodiscard]] auto get_decode_gen_smoothness() const noexcept NETBENDER_NONBLOCKING -> float;
     auto trigger_short_circuit(bool active) noexcept NETBENDER_NONBLOCKING -> void {
         m_bending.trigger_short_circuit(active);
     }
@@ -266,6 +268,7 @@ private:
     std::atomic<float> m_auto_latent_x{0.0f};
     std::atomic<float> m_auto_latent_y{0.0f};
     std::atomic<float> m_auto_latent_depth{0.5f};
+    std::atomic<float> m_decode_gen_smoothness{0.30f};
 
     mutable std::mutex m_state_mutex;  // guards strings / hooks / callbacks below
     std::string m_model_path;
