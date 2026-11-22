@@ -110,6 +110,7 @@ def convert_rave_ts_to_onnx(
     promote_for_bending: bool = True,
     methods: Optional[List[str]] = None,
     verbose: bool = True,
+    trace_samples: Optional[int] = None,
 ) -> str:
     """
     Loads a TorchScript model and exports it to ONNX.
@@ -131,50 +132,22 @@ def convert_rave_ts_to_onnx(
 
     # Determine in_channels if metadata exists, else fallback to param
     in_channels = channels
-    # Dummy audio tensor [batch=1, channels=in_channels, samples=buffer_size]
-    dummy_input = torch.zeros(1, in_channels, buffer_size, dtype=torch.float32)
-
-    # Temporary standard onnx path
-    base, ext = os.path.splitext(output_onnx_path)
-    std_onnx_path = output_onnx_path if not promote_for_bending else f"{base}_raw.onnx"
-
-    os.makedirs(os.path.dirname(os.path.abspath(std_onnx_path)), exist_ok=True)
-
-    if verbose:
-        print(f"[2/3] Exporting to standard ONNX (opset {opset_version}): {std_onnx_path}...")
-
-    # Export forward pass with dynamic length axis
-    export_kwargs = dict(
-        input_names=["audio_in"],
-        output_names=["audio_out"],
-        dynamic_axes={
-            "audio_in": {0: "batch", 2: "samples"},
-            "audio_out": {0: "batch", 2: "samples"},
-        },
-        opset_version=opset_version,
-        do_constant_folding=True,
-    )
-    import inspect
-    if "dynamo" in inspect.signature(torch.onnx.export).parameters:
-        export_kwargs["dynamo"] = False
-    torch.onnx.export(model, (dummy_input,), std_onnx_path, **export_kwargs)
-
-    if verbose:
-        print(f"  -> Exported standard ONNX successfully.")
-
-    # Sanitize graph to bypass NaN-producing DFT noise branch in ONNX Runtime C++
-    _sanitize_rave_onnx_graph(std_onnx_path, verbose=verbose)
 
     # Extract metadata properties if available on the model
     sr = 48000
     try:
+        sr_found = False
         if hasattr(model, "sr"):
             val = model.sr() if callable(model.sr) else model.sr
-            sr = int(val)
-        elif hasattr(model, "sample_rate"):
+            if val is not None and int(val) > 0:
+                sr = int(val)
+                sr_found = True
+        if not sr_found and hasattr(model, "sample_rate"):
             val = model.sample_rate() if callable(model.sample_rate) else model.sample_rate
-            sr = int(val)
-        elif hasattr(model, "named_buffers"):
+            if val is not None and int(val) > 0:
+                sr = int(val)
+                sr_found = True
+        if not sr_found and hasattr(model, "named_buffers"):
             for bname, buf in model.named_buffers():
                 if "sampling_rate" in bname.lower() or "sample_rate" in bname.lower():
                     sr = int(buf.item())
@@ -217,7 +190,72 @@ def convert_rave_ts_to_onnx(
 
     history_samples = 28672 if ("speech" in ts_model_path.lower() or (latent_dim <= 8 and ratio >= 1024)) else 4096
     latent_scale = 2.5 if ("speech" in ts_model_path.lower() or (latent_dim <= 8 and ratio >= 1024)) else 1.0
-    decode_latent_steps = max(1, (history_samples + buffer_size + ratio - 1) // max(1, ratio))
+    actual_trace_samples = trace_samples if trace_samples is not None else (history_samples + buffer_size)
+    total_decode_frames = max(1, actual_trace_samples // max(1, ratio))
+
+    # Dummy audio tensor [batch=1, channels=in_channels, samples=actual_trace_samples]
+    dummy_input = torch.zeros(1, in_channels, actual_trace_samples, dtype=torch.float32)
+
+    # Temporary standard onnx path
+    base, ext = os.path.splitext(output_onnx_path)
+    std_onnx_path = output_onnx_path if not promote_for_bending else f"{base}_raw.onnx"
+
+    os.makedirs(os.path.dirname(os.path.abspath(std_onnx_path)), exist_ok=True)
+
+    if verbose:
+        print(f"[2/3] Exporting to standard ONNX (opset {opset_version}): {std_onnx_path}...")
+
+    # Export forward pass with dynamic length axis
+    export_kwargs = dict(
+        input_names=["audio_in"],
+        output_names=["audio_out"],
+        dynamic_axes={
+            "audio_in": {0: "batch", 2: "samples"},
+            "audio_out": {0: "batch", 2: "samples"},
+        },
+        opset_version=opset_version,
+        do_constant_folding=True,
+    )
+    import inspect
+    if "dynamo" in inspect.signature(torch.onnx.export).parameters:
+        export_kwargs["dynamo"] = False
+
+    used_eager_fallback = False
+    fallback_reason = None
+    try:
+        torch.onnx.export(model, (dummy_input,), std_onnx_path, **export_kwargs)
+        _chk = onnx.load(std_onnx_path)
+        has_control_flow = any(n.op_type in ("If", "Loop") for n in _chk.graph.node)
+        if has_control_flow:
+            used_eager_fallback = True
+            fallback_reason = "direct TorchScript ONNX graph contains If/Loop control-flow ops"
+    except Exception as direct_err:
+        used_eager_fallback = True
+        fallback_reason = str(direct_err)
+
+    if used_eager_fallback:
+        if verbose:
+            print(
+                f"  [Note] Direct TorchScript->ONNX export unsuitable ({fallback_reason}); "
+                "reconstructing eager graph via TorchScriptGraphEagerModule..."
+            )
+        from python_tools.migrate_ts_to_pte import TorchScriptGraphEagerModule
+
+        eager_fwd = TorchScriptGraphEagerModule(model, method_name="forward").eval()
+        torch.onnx.export(eager_fwd, (dummy_input,), std_onnx_path, **export_kwargs)
+
+    if verbose:
+        print(f"  -> Exported standard ONNX successfully.")
+
+    # Sanitize graph to bypass NaN-producing DFT noise branch in ONNX Runtime C++
+    _sanitize_rave_onnx_graph(std_onnx_path, verbose=verbose)
+
+    if used_eager_fallback:
+        hist_lat_steps = history_samples // max(1, ratio)
+        decode_latent_steps = max(1, total_decode_frames - hist_lat_steps)
+    else:
+        decode_latent_steps = max(1, (history_samples + buffer_size + ratio - 1) // max(1, ratio))
+
     extra_meta = {
         "netbender.architecture": "rave",
         "netbender.sample_rate": str(sr),
@@ -230,6 +268,8 @@ def convert_rave_ts_to_onnx(
         "netbender.latent_scale": str(latent_scale),
         "netbender.decode_latent_steps": str(decode_latent_steps),
     }
+    if used_eager_fallback:
+        extra_meta["netbender.buffer_size"] = str(buffer_size)
 
     if promote_for_bending:
         # Step 3: Run parameter promotion
@@ -264,7 +304,57 @@ def convert_rave_ts_to_onnx(
             export_list = [m for m in methods if m in available_ts_methods and m != "forward"]
 
         if export_list:
-            slice_rave_onnx_subgraphs(output_onnx_path, base, export_list, latent_dim=latent_dim, verbose=verbose)
+            sliced = slice_rave_onnx_subgraphs(
+                output_onnx_path, base, export_list, latent_dim=latent_dim, verbose=verbose
+            )
+            if not sliced and any(m in export_list for m in ("encode", "decode")):
+                from python_tools.migrate_ts_to_pte import TorchScriptGraphEagerModule
+
+                for comp_m in ("encode", "decode"):
+                    if comp_m not in export_list:
+                        continue
+                    comp_out = f"{base}_{comp_m}.onnx"
+                    comp_raw = comp_out if not promote_for_bending else f"{base}_{comp_m}_raw.onnx"
+                    if verbose:
+                        print(f"  -> Exporting RAVE companion method '{comp_m}' -> {comp_out}...")
+                    if comp_m == "encode":
+                        comp_dummy = torch.zeros(1, in_channels, actual_trace_samples, dtype=torch.float32)
+                        in_name, out_name = "audio_in", "latent_out"
+                        dyn_axes = {in_name: {0: "batch", 2: "samples"}, out_name: {0: "batch", 2: "frames"}}
+                    else:
+                        comp_dummy = torch.zeros(1, latent_dim, total_decode_frames, dtype=torch.float32)
+                        in_name, out_name = "latent_in", "audio_out"
+                        dyn_axes = {in_name: {0: "batch", 2: "frames"}, out_name: {0: "batch", 2: "samples"}}
+                    eager_comp = TorchScriptGraphEagerModule(model, method_name=comp_m).eval()
+                    comp_kwargs = dict(
+                        input_names=[in_name],
+                        output_names=[out_name],
+                        dynamic_axes=dyn_axes,
+                        opset_version=opset_version,
+                        do_constant_folding=True,
+                    )
+                    if "dynamo" in inspect.signature(torch.onnx.export).parameters:
+                        comp_kwargs["dynamo"] = False
+                    torch.onnx.export(eager_comp, (comp_dummy,), comp_raw, **comp_kwargs)
+                    if comp_m == "decode":
+                        _sanitize_rave_onnx_graph(comp_raw, verbose=verbose)
+                    if promote_for_bending:
+                        from python_tools.onnx_bend_prep import promote_initializers_to_inputs
+
+                        promote_initializers_to_inputs(
+                            input_path=comp_raw,
+                            output_path=comp_out,
+                            keep_initializers_as_defaults=True,
+                            verbose=verbose,
+                            write_sidecar=False,
+                        )
+                        if comp_raw != comp_out and os.path.exists(comp_raw):
+                            try:
+                                os.remove(comp_raw)
+                            except OSError:
+                                pass
+                    if verbose:
+                        print(f"  -> Companion '{comp_m}' exported successfully.")
 
         # Direct companion export for 'prior' if present on the TorchScript model
         if "prior" in export_list and hasattr(model, "prior"):
@@ -328,34 +418,33 @@ def convert_rave_ts_to_onnx(
     return output_onnx_path
 
 
-def slice_rave_onnx_subgraphs(full_onnx_path: str, base_path: str, methods: List[str], latent_dim: int = 4, verbose: bool = True):
+def slice_rave_onnx_subgraphs(full_onnx_path: str, base_path: str, methods: List[str], latent_dim: int = 4, verbose: bool = True) -> bool:
     """
-    Slices the verified bendable RAVE ONNX graph into companion models for 'encode' and 'decode'
+    Slices a verified bendable RAVE v1 ONNX graph into companion models for 'encode' and 'decode'
     using the bottleneck latent tensor /_rave/Slice_1_output_0.
+    Returns True if the RAVE v1 bottleneck tensor was found and sliced, False otherwise.
     """
     try:
         import onnx
         from onnx import helper, TensorProto
         import copy
     except ImportError:
-        return
+        return False
 
     full_model = onnx.load(full_onnx_path)
     latent_tensor_name = "/_rave/Slice_1_output_0"
 
-    # Find actual latent tensor if name was modified or differently named
+    # Find actual RAVE v1 bottleneck tensor (strictly under /_rave/ so PQMF / decoder Slice_1 nodes never collide)
     has_latent = any(latent_tensor_name in n.output for n in full_model.graph.node)
     if not has_latent:
         for n in full_model.graph.node:
-            if n.name.endswith("/Slice_1"):
+            if n.name == "/_rave/Slice_1" or n.name.endswith("/_rave/Slice_1"):
                 latent_tensor_name = n.output[0]
                 has_latent = True
                 break
 
     if not has_latent:
-        if verbose:
-            print("  [Warning] Could not find latent bottleneck tensor in ONNX graph for slicing.")
-        return
+        return False
 
     # 1. ENCODE SUBGRAPH
     if "encode" in methods:
@@ -433,13 +522,14 @@ def slice_rave_onnx_subgraphs(full_onnx_path: str, base_path: str, methods: List
         if verbose:
             print(f"  -> Companion 'decode' exported successfully ({len(dec_model.graph.node)} nodes).")
 
+    return True
+
 
 def _sanitize_rave_onnx_graph(onnx_path: str, verbose: bool = True):
     """
-    Sanitizes RAVE's exported ONNX graph by pruning the noise synthesis branch (branch 2)
-    that invokes torch.fft.irfft / DFT with onesided=1 & inverse=1, which is strictly
-    forbidden by ONNX runtime shape inference specifications. The main audio reconstruction
-    waveform is preserved intact via Identity bypass.
+    Sanitizes RAVE's exported ONNX graph by pruning any noise synthesis branch containing
+    torch.fft.irfft / DFT ops that cannot run dynamically or in ONNX Runtime / ExecuTorch.
+    Supports both RAVE v1 (/_rave/decoder/Add_1) and generic RAVE v2 graphs (via DFT taint pass).
     """
     try:
         import onnx
@@ -448,19 +538,54 @@ def _sanitize_rave_onnx_graph(onnx_path: str, verbose: bool = True):
 
     model = onnx.load(onnx_path)
 
-    # 1. Bypass /_rave/decoder/Add_1 to pass through tonal waveform (/Mul_1_output_0)
+    # 1. RAVE v1 explicit pass: bypass /_rave/decoder/Add_1 to pass through tonal waveform (/Mul_1_output_0)
+    bypassed_v1 = False
     for n in model.graph.node:
         if n.name == "/_rave/decoder/Add_1":
             n.op_type = "Identity"
             del n.input[:]
             n.input.append("/_rave/decoder/Mul_1_output_0")
+            bypassed_v1 = True
             if verbose:
                 print("  [Sanitizer] Bypassed /_rave/decoder/Add_1 noise summation with tonal waveform.")
 
-    # 2. Prune all nodes belonging to synth noise branch 2
-    nodes_to_keep = [n for n in model.graph.node if "/_rave/decoder/synth/2/" not in n.name]
-    del model.graph.node[:]
-    model.graph.node.extend(nodes_to_keep)
+    if bypassed_v1:
+        nodes_to_keep = [n for n in model.graph.node if "/_rave/decoder/synth/2/" not in n.name]
+        del model.graph.node[:]
+        model.graph.node.extend(nodes_to_keep)
+
+    # 2. Generic DFT-branch pruning (handles RAVE v2 noise modules regardless of node naming)
+    has_dft = any(n.op_type == "DFT" for n in model.graph.node)
+    if has_dft:
+        tainted = set()
+        replaced = 0
+        for n in model.graph.node:
+            if n.op_type == "DFT":
+                tainted.update(n.output)
+                continue
+            if not any(inp in tainted for inp in n.input):
+                continue
+            if n.op_type == "Add" and len(n.input) == 2:
+                clean = [inp for inp in n.input if inp not in tainted]
+                if len(clean) == 1:
+                    n.op_type = "Identity"
+                    del n.input[:]
+                    n.input.append(clean[0])
+                    replaced += 1
+                    continue
+            tainted.update(n.output)
+
+        needed = {o.name for o in model.graph.output}
+        kept_nodes = []
+        for n in reversed(model.graph.node):
+            if any(o in needed for o in n.output):
+                needed.update(n.input)
+                kept_nodes.append(n)
+        kept_nodes.reverse()
+        del model.graph.node[:]
+        model.graph.node.extend(kept_nodes)
+        if verbose and replaced > 0:
+            print(f"  [Sanitizer] Pruned {replaced} DFT/noise summation branch(es).")
 
     # 3. Prune unreferenced initializers
     referenced_inputs = set()
