@@ -7,12 +7,14 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include <unordered_map>
 #include <nlohmann/json_fwd.hpp>
 #include "IBackend.h"
 #include "bending/BendingManager.h"
 #include "bending/LatentTerrainEngine.h"
 #include "engine/StreamingEngine.h"
 #include "dsp/rtsan_utils.h"
+#include "dsp/RtGate.h"
 
 /**
  * Host-agnostic session configuration (how the session drives its StreamingEngine).
@@ -100,6 +102,15 @@ public:
         return m_engine.is_resampling_active();
     }
 
+    // Bendable layer introspection (populated on load_model())
+    [[nodiscard]] auto get_layer_count() const noexcept NETBENDER_NONBLOCKING -> int {
+        return m_layer_count.load(std::memory_order_acquire);
+    }
+    [[nodiscard]] auto get_layer_names() const -> std::vector<std::string>;
+    [[nodiscard]] auto find_layer_index(const std::string& name) const -> int;
+    [[nodiscard]] auto get_layer_name(int index) const -> std::string;
+    [[nodiscard]] auto get_layer_weight_count(int index) const -> size_t;
+
     // ---------------------------------------------------------------------------------------
     // Real-time audio thread
     auto process(const float* const* host_in, int num_in_channels, float* const* host_out,
@@ -117,6 +128,21 @@ public:
     // layer's stored memory.
     auto set_bending_automation(float scale, float offset, float heat, float memory,
                                 bool short_active) noexcept NETBENDER_NONBLOCKING -> void;
+    // Wait-free per-layer real-time bending (safe for concurrent multi-layer modulation from audio
+    // thread, e.g. Csound k-rate opcodes, multi-layer 3D waveplot UIs, or DAW automation).
+    // Negative sentinel values for heat / memory / drift_mode / frozen preserve the layer's current
+    // stored setting so callers can modulate a subset of parameters (e.g. scale & offset only).
+    auto set_layer_bend_rt(int layer_idx, float scale, float offset, float heat = -1.0f,
+                           float memory = -1.0f, int drift_mode = -1,
+                           int frozen = -1) noexcept NETBENDER_NONBLOCKING -> void;
+    auto set_layer_bridge_rt(int target_idx, int source_idx,
+                             float depth) noexcept NETBENDER_NONBLOCKING -> void;
+    auto set_layer_weights_rt(int layer_idx, const float* data,
+                              size_t count) noexcept NETBENDER_NONBLOCKING -> bool;
+    auto request_reset_layer_weights(int layer_idx) noexcept NETBENDER_NONBLOCKING -> void;
+    auto request_reset_all_weights() noexcept NETBENDER_NONBLOCKING -> void;
+    auto request_fuse_reset() noexcept NETBENDER_NONBLOCKING -> void;
+
     // Host automation for the latent terrain hook (overrides LatentTerrainEngine coords/depth)
     auto set_latent_automation(float x, float y, float depth) noexcept NETBENDER_NONBLOCKING
         -> void;
@@ -132,6 +158,10 @@ public:
     auto clear_all_layer_bending() -> void;
     auto reset_fuse() -> void;
     auto set_latent_hook(IBackend::LatentHook hook) -> void;  // user hook overrides terrain
+    [[nodiscard]] auto get_layer_weights(int layer_idx, bool original = false) const
+        -> std::vector<float>;
+    auto prepare_layer_weight_staging(int layer_idx) -> bool;
+    auto set_layer_weights_immediate(int layer_idx, const float* data, size_t count) -> bool;
 
     // ---------------------------------------------------------------------------------------
     // Subsystems
@@ -156,8 +186,51 @@ public:
     auto load_state(const std::string& serialized, bool restore_model = true) -> bool;
 
 private:
+    struct AtomicLayerSlot {
+        std::atomic<float> scale{1.0f};
+        std::atomic<float> offset{0.0f};
+        std::atomic<bool> scale_offset_dirty{false};
+        std::atomic<uint64_t> bend_seq{0};
+
+        std::atomic<float> heat{0.0f};
+        std::atomic<bool> heat_dirty{false};
+        std::atomic<uint64_t> heat_seq{0};
+
+        std::atomic<float> memory{0.8f};
+        std::atomic<bool> memory_dirty{false};
+        std::atomic<uint64_t> memory_seq{0};
+
+        std::atomic<int> drift_mode{1};
+        std::atomic<bool> drift_dirty{false};
+        std::atomic<uint64_t> drift_seq{0};
+
+        std::atomic<int> frozen{0};
+        std::atomic<bool> frozen_dirty{false};
+        std::atomic<uint64_t> frozen_seq{0};
+
+        std::atomic<int> bridge_source_idx{-1};
+        std::atomic<float> bridge_depth{0.0f};
+        std::atomic<bool> bridge_dirty{false};
+        std::atomic<uint64_t> bridge_seq{0};
+
+        std::atomic<bool> reset_requested{false};
+        std::atomic<uint64_t> reset_seq{0};
+
+        // SPSC wait-free triple buffer for RT raw weight injection
+        std::mutex tb_init_mutex;
+        std::atomic<bool> tb_ready{false};
+        std::vector<float> tb_buf[3];
+        int tb_write_idx{0};
+        int tb_read_idx{1};
+        std::atomic<int> tb_middle{2};  // bits 0..1 = buffer index (0..2), bit 2 (4) = dirty flag
+        std::atomic<uint64_t> weights_seq{0};
+    };
+
     auto configure_engine() -> void;
     auto update_mode_channels(const std::string& method) -> void;
+    auto clear_layer_slots() -> void;
+    auto rebuild_layer_slots() -> void;
+    auto drain_pending_rt_bending() -> void;
     auto notify_latency() -> void;
     auto set_error(const std::string& msg) -> void;
 
@@ -203,9 +276,22 @@ private:
     LatencyCallback m_latency_callback{nullptr};
     ErrorCallback m_error_callback{nullptr};
 
+    // Wait-free per-layer RT bending staging (must outlive m_engine)
+    mutable RtGate m_layer_slots_gate;
+    std::vector<std::string> m_layer_names;
+    std::unordered_map<std::string, int> m_layer_name_to_idx;
+    std::vector<size_t> m_layer_weight_counts;
+    std::vector<std::unique_ptr<AtomicLayerSlot>> m_layer_slots;
+    std::atomic<int> m_layer_count{0};
+    std::atomic<uint64_t> m_op_seq{0};
+    std::atomic<bool> m_any_slot_dirty{false};
+    std::atomic<bool> m_reset_all_requested{false};
+    std::atomic<uint64_t> m_reset_all_seq{0};
+
     BendingManager m_bending;
     LatentTerrainEngine m_latent;
 
-    // Declared last so it is destroyed first (worker stops before backend / bending go away)
+    // Declared last so it is destroyed first (worker stops before backend / bending / slots go
+    // away)
     StreamingEngine m_engine;
 };

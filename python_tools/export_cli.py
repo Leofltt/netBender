@@ -66,7 +66,7 @@ def main():
     rave_ckpt_parser.add_argument("--channels", type=int, default=1, help="Input audio channels (default: 1)")
 
     # RAVE TorchScript to ONNX
-    rave_parser = subparsers.add_parser("rave_to_onnx", help="Convert RAVE TorchScript (.ts) to bendable ONNX")
+    rave_parser = subparsers.add_parser("rave_to_onnx", help="Convert RAVE v1/v2 TorchScript (.ts, including legacy PyTorch 1.13) to bendable ONNX")
     rave_parser.add_argument("-i", "--input", required=True, help="Input TorchScript .ts model path")
     rave_parser.add_argument("-o", "--output", default=None, help="Output .onnx file path")
     rave_parser.add_argument("--buffer-size", type=int, default=2048, help="Buffer size (default: 2048)")
@@ -93,9 +93,9 @@ def main():
     )
     sa_to_onnx_parser.add_argument("--no-bending", action="store_true", help="Skip promoting initializers to graph inputs")
 
-    # TorchScript to ExecuTorch (.pte) Migration
-    migrate_pte_parser = subparsers.add_parser("migrate_pte", help="Migrate TorchScript (.ts) model to bendable ExecuTorch (.pte)")
-    migrate_pte_parser.add_argument("-i", "--input", required=True, help="Input TorchScript .ts model path")
+    # TorchScript / ONNX to ExecuTorch (.pte) Migration
+    migrate_pte_parser = subparsers.add_parser("migrate_pte", help="Migrate TorchScript (.ts, RAVE v1/v2, Stable Audio, EnCodec) or ONNX (.onnx) to bendable ExecuTorch (.pte)")
+    migrate_pte_parser.add_argument("-i", "--input", required=True, help="Input .ts or .onnx model path")
     migrate_pte_parser.add_argument("-o", "--output", default=None, help="Output .pte file path")
     migrate_pte_parser.add_argument("--delegate", choices=["portable", "xnnpack", "coreml", "mps"], default="coreml", help="ExecuTorch delegate (default: coreml)")
     migrate_pte_parser.add_argument("--bend-mode", choices=["delegate", "full", "none"], default="delegate", help="Bend promotion mode (default: delegate)")

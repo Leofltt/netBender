@@ -62,7 +62,9 @@ class OnnxGraphEagerModule(nn.Module):
                 is_cache_or_const = ("cache" in init.name.lower()) or (
                     init.name.startswith("onnx::") and not any(k in init.name for k in ("Conv", "LSTM", "MatMul", "Gemm"))
                 )
-                if is_cache_or_const:
+                if is_cache_or_const and t.numel() == 1:
+                    self.constants[init.name] = arr
+                elif is_cache_or_const:
                     self.register_buffer(safe_name, t.float().contiguous())
                     self.const_buffers[init.name] = safe_name
                 else:
@@ -77,7 +79,7 @@ class OnnxGraphEagerModule(nn.Module):
             attrs = self._parse_attrs(node)
             if node.op_type == "Constant" and "value" in attrs:
                 val = attrs["value"]
-                if isinstance(val, torch.Tensor) and val.is_floating_point():
+                if isinstance(val, torch.Tensor) and val.is_floating_point() and val.numel() > 1:
                     safe_c = f"_cnode_{self._sanitize_name(node.output[0])}"
                     self.register_buffer(safe_c, val.float().contiguous())
                     self.const_buffers[node.output[0]] = safe_c
@@ -171,7 +173,7 @@ class OnnxGraphEagerModule(nn.Module):
                     if not o_name or o_val is None:
                         continue
                     is_dynamic[o_name] = False
-                    if isinstance(o_val, torch.Tensor) and o_val.is_floating_point():
+                    if isinstance(o_val, torch.Tensor) and o_val.is_floating_point() and o_val.numel() > 1:
                         buf_name = f"_cbuf_{self._sanitize_name(o_name)}"
                         self.register_buffer(buf_name, o_val.detach().clone().float().contiguous())
                         self.const_buffers[o_name] = buf_name
@@ -420,6 +422,13 @@ class OnnxGraphEagerModule(nn.Module):
                 i = self._to_scalar_int(args[1])
                 return x.select(axis, i)
             return torch.index_select(x, axis, idx.reshape(-1).long()).reshape(*x.shape[:axis], *idx.shape, *x.shape[axis + 1:])
+        if op == "TopK":
+            x = self._ensure_tensor(args[0])
+            k = self._to_scalar_int(args[1])
+            axis = int(attrs.get("axis", -1))
+            largest = bool(attrs.get("largest", 1))
+            sorted_ = bool(attrs.get("sorted", 1))
+            return torch.topk(x, k, dim=axis, largest=largest, sorted=sorted_)
         if op == "Cast":
             to_type = int(attrs.get("to", 1))
             t0 = self._ensure_tensor(args[0])
@@ -659,11 +668,16 @@ class TorchScriptGraphEagerModule(nn.Module):
         target_fn = getattr(ts_mod, method_name) if method_name != "forward" else ts_mod
         self._ts_graph = target_fn.inlined_graph
         top_input_name = list(self._ts_graph.inputs())[0].debugName()
-        used_top_attrs = {
-            node.s("name")
-            for node in self._ts_graph.nodes()
-            if node.kind() == "prim::GetAttr" and list(node.inputs())[0].debugName() == top_input_name
-        }
+        used_top_attrs = set()
+
+        def _collect_top_attrs(block):
+            for node in block.nodes():
+                if node.kind() == "prim::GetAttr" and list(node.inputs())[0].debugName() == top_input_name:
+                    used_top_attrs.add(node.s("name"))
+                for sub_b in node.blocks():
+                    _collect_top_attrs(sub_b)
+
+        _collect_top_attrs(self._ts_graph)
         for mod_name, sub_ts in ts_mod.named_modules():
             sub_eg = self._ensure_submodule(mod_name) if mod_name else self
             sub_eg.__dict__["_ts_ref"] = sub_ts
@@ -881,6 +895,64 @@ class TorchScriptGraphEagerModule(nn.Module):
             size = args[0]
             dtype = args[1] if len(args) > 1 and isinstance(args[1], torch.dtype) else torch.float32
             return torch.zeros(size, dtype=dtype)
+        if op_name in ("ones", "empty", "randn", "rand"):
+            size = args[0]
+            dtype = args[1] if len(args) > 1 and isinstance(args[1], torch.dtype) else None
+            fn = torch.zeros if op_name in ("randn", "rand") else getattr(torch, op_name)
+            return fn(size, dtype=dtype)
+        if op_name == "full":
+            size, fill = args[0], args[1]
+            dtype = args[2] if len(args) > 2 and isinstance(args[2], torch.dtype) else None
+            return torch.full(size, fill, dtype=dtype)
+        if op_name in ("ones_like", "zeros_like", "empty_like", "randn_like", "rand_like"):
+            dtype = args[1] if len(args) > 1 and isinstance(args[1], torch.dtype) else None
+            fn = torch.zeros_like if op_name in ("randn_like", "rand_like") else getattr(torch, op_name)
+            return fn(args[0], dtype=dtype)
+        if op_name == "full_like":
+            dtype = args[2] if len(args) > 2 and isinstance(args[2], torch.dtype) else None
+            return torch.full_like(args[0], args[1], dtype=dtype)
+        if op_name == "tensor":
+            dtype = args[1] if len(args) > 1 and isinstance(args[1], torch.dtype) else None
+            return torch.tensor(args[0], dtype=dtype)
+        if op_name == "hann_window":
+            n = int(args[0])
+            if len(args) >= 2 and isinstance(args[1], bool):
+                periodic = args[1]
+                dtype = args[2] if len(args) > 2 and isinstance(args[2], torch.dtype) else torch.float32
+            else:
+                periodic = True
+                dtype = args[1] if len(args) > 1 and isinstance(args[1], torch.dtype) else torch.float32
+            return torch.hann_window(n, periodic=periodic, dtype=dtype)
+        if op_name == "sum":
+            t = args[0]
+            if len(args) == 1:
+                return t.sum()
+            if len(args) == 2 and (args[1] is None or isinstance(args[1], torch.dtype)):
+                return t.sum(dtype=args[1])
+            dim = args[1]
+            keepdim = bool(args[2]) if len(args) > 2 and args[2] is not None else False
+            dtype = args[3] if len(args) > 3 and isinstance(args[3], torch.dtype) else None
+            return t.sum(dim=dim, keepdim=keepdim, dtype=dtype)
+        if op_name == "mean":
+            t = args[0]
+            if len(args) == 1:
+                return t.mean()
+            if len(args) == 2 and (args[1] is None or isinstance(args[1], torch.dtype)):
+                return t.mean(dtype=args[1])
+            dim = args[1]
+            keepdim = bool(args[2]) if len(args) > 2 and args[2] is not None else False
+            dtype = args[3] if len(args) > 3 and isinstance(args[3], torch.dtype) else None
+            return t.mean(dim=dim, keepdim=keepdim, dtype=dtype)
+        if op_name == "repeat_interleave":
+            t, reps = args[0], args[1]
+            dim = args[2] if len(args) > 2 else None
+            out_sz = args[3] if len(args) > 3 else None
+            return torch.repeat_interleave(t, reps, dim=dim, output_size=out_sz)
+        if op_name == "slice" and isinstance(args[0], (list, tuple, str)):
+            start = args[1] if len(args) > 1 else None
+            end = args[2] if len(args) > 2 else None
+            step = args[3] if len(args) > 3 and args[3] is not None else 1
+            return args[0][start:end:step]
         if op_name == "lstm":
             return TorchScriptGraphEagerModule._run_aten_lstm(*args)
         if op_name == "to":
@@ -1005,7 +1077,7 @@ def migrate_ts_to_pte(
         out_dim = int(meta_props.get("netbender.out_channels", str(in_dim)))
         history_samples = int(meta_props.get("netbender.history_samples", "0"))
         output_offset = int(meta_props.get("netbender.output_offset", str(history_samples)))
-        is_rave_onnx = any(n.name.startswith("/_rave/") for n in onnx_mod.graph.node) or "rave" in ts_model_path.lower() or "darbouka" in ts_model_path.lower() or "speech" in ts_model_path.lower()
+        is_rave_onnx = any(n.name.startswith("/_rave/") or "pqmf" in n.name.lower() for n in onnx_mod.graph.node) or "rave" in ts_model_path.lower() or "darbouka" in ts_model_path.lower() or "speech" in ts_model_path.lower()
         is_stable_audio = "stable_audio" in ts_model_path.lower()
         if is_rave_onnx and history_samples == 0 and ratio >= 1024:
             history_samples = 28672 if ("speech" in ts_model_path.lower() or latent_dim <= 8) else 4096
@@ -1067,7 +1139,7 @@ def migrate_ts_to_pte(
         in_dim = int(meta["in_dim"])
         seq_len = int(meta["buffer_size"])
         latent_dim = int(meta.get("encode_out_dim", meta.get("decode_in_dim", 16)))
-        is_rave = hasattr(ts_mod, "_rave") or "rave" in ts_model_path.lower() or "darbouka" in ts_model_path.lower() or "speech" in ts_model_path.lower()
+        is_rave = hasattr(ts_mod, "_rave") or hasattr(ts_mod, "pqmf") or "rave" in ts_model_path.lower() or "darbouka" in ts_model_path.lower() or "speech" in ts_model_path.lower()
         is_stable_audio = "stable_audio" in ts_model_path.lower()
         if is_rave and int(meta["higher_ratio"]) >= 1024:
             history_samples = 28672 if ("speech" in ts_model_path.lower() or latent_dim <= 8) else 4096
@@ -1095,9 +1167,14 @@ def migrate_ts_to_pte(
         if target_module is None:
             # 1. Try direct TorchScript IR -> Eager ATen Module translation first (like neural_tilde.migrate)
             try:
+                fft_kinds = ("fft_irfft", "fft_rfft", "view_as_complex")
+                for n in ts_mod.forward.inlined_graph.nodes():
+                    if any(k in n.kind() for k in fft_kinds):
+                        raise RuntimeError(f"Non-exportable complex/FFT op {n.kind()}")
                 candidate_mod = TorchScriptGraphEagerModule(ts_mod, method_name="forward").eval()
                 with torch.no_grad():
                     _ = candidate_mod(sample_input)
+                    _ = torch.export.export(candidate_mod, (sample_input,), strict=False)
                 target_module = candidate_mod
                 if verbose:
                     print("  -> Directly translated TorchScript IR (inlined_graph) to eager PyTorch module.")
@@ -1130,11 +1207,12 @@ def migrate_ts_to_pte(
                         convert_rave_ts_to_onnx(
                             ts_model_path=ts_model_path,
                             output_onnx_path=tmp_onnx,
-                            buffer_size=history_samples + seq_len,
+                            buffer_size=seq_len,
                             channels=in_dim,
                             promote_for_bending=False,
                             methods=comp_methods,
                             verbose=verbose,
+                            trace_samples=history_samples + seq_len,
                         )
                     else:
                         from python_tools.stable_audio_ts_to_onnx import convert_stable_audio_ts_to_onnx

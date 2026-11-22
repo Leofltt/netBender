@@ -10,7 +10,7 @@
 
 ## Multi-Backend Runtime Architecture
 
-Because TorchScript (`torch.jit`) is deprecated in PyTorch 2.x+, NetBender uses a unified, runtime-agnostic `IBackend` architecture (`BackendFactory`) across all frontends (JUCE VST3/AU/Standalone, Max/MSP, and PureData). Simply load any `.pte`, `.onnx`, or `.ts` model file and NetBender automatically dispatches to the appropriate engine:
+Because TorchScript (`torch.jit`) is deprecated in PyTorch 2.x+, NetBender uses a unified, runtime-agnostic `IBackend` architecture (`BackendFactory`) across all frontends (JUCE VST3/AU/Standalone, Max/MSP, PureData, and Csound 7). Simply load any `.pte`, `.onnx`, or `.ts` model file and NetBender automatically dispatches to the appropriate engine:
 
 | Extension | Backend Class | Hardware Acceleration / Delegates | Weight-Bending Mechanism |
 | --- | --- | --- | --- |
@@ -68,14 +68,14 @@ All multi-byte numeric fields are encoded in **little-endian** byte order:
 
 ### Unified Real-Time DSP & Streaming Engine (`netbender_dsp` & `netbender_backend`)
 
-All frontends (JUCE VST3/AU/Standalone, Max/MSP, and PureData) share a single standalone C++20 backend and real-time DSP stack (`NetBender::backend` and `NetBender::dsp`) with zero UI framework dependencies:
+All frontends (JUCE VST3/AU/Standalone, Max/MSP, PureData, and Csound 7) share a single standalone C++20 backend and real-time DSP stack (`NetBender::backend` and `NetBender::dsp`) with zero UI framework dependencies:
 
 | Layer / Component | Location | Responsibility |
 | --- | --- | --- |
 | **`NetBenderSession`** | `src/backend/engine/NetBenderSession.*` | High-level, frontend-agnostic facade composing `IBackend`, `StreamingEngine`, `BendingManager`, and `LatentTerrainEngine` with `nlohmann::json` preset/state persistence (`to_json` / `from_json`, `save_state` / `load_state`). |
 | **`StreamingEngine`** | `src/backend/engine/StreamingEngine.*` | Frontend-agnostic real-time streaming orchestrator handling lock-free SPSC audio buffering, automatic host $\leftrightarrow$ model fractional sample-rate conversion, asynchronous worker-thread or synchronous (`bufsize 0`) inference dispatch, dry/wet latency compensation (`dry_delay`), `SafetySentry` circuit breaking, and generative modes (`forward`, `encode`, `decode`, `prior`, `decode gen`). |
 | **`BendingManager` & `LatentTerrainEngine`** | `src/backend/bending/*` | JUCE-free real-time circuit-bending engine: deterministic `Xoshiro128Plus` PRNG (`BendRandom.h`), layer trace classification, thermal/random-walk drift, cross-talk trace bridging, momentary/transient envelopes, and Random Fourier Feature / slew / quantized latent hooks. |
-| **`Resampler` & `ResamplingRingBufferBank`** | `src/backend/dsp/Resampler.h`, `src/backend/dsp/ResamplingRingBuffer.h` | Real-time safe fractional sample-rate conversion (Catmull-Rom 4-point cubic Hermite & linear interpolation, bit-exact with JUCE's `CatmullRomInterpolator` / `LinearInterpolator`) integrated directly into multi-channel lock-free SPSC ring buffers (`float*` and `double*` host I/O). Gives **Max/MSP, PureData, and JUCE** automatic sample-rate adaptation whenever the host sample rate differs from the model's native rate. |
+| **`Resampler` & `ResamplingRingBufferBank`** | `src/backend/dsp/Resampler.h`, `src/backend/dsp/ResamplingRingBuffer.h` | Real-time safe fractional sample-rate conversion (Catmull-Rom 4-point cubic Hermite & linear interpolation, bit-exact with JUCE's `CatmullRomInterpolator` / `LinearInterpolator`) integrated directly into multi-channel lock-free SPSC ring buffers (`float*` and `double*` host I/O). Gives **Max/MSP, PureData, Csound 7, and JUCE** automatic sample-rate adaptation whenever the host sample rate differs from the model's native rate. |
 | **`AudioRingBuffer`** | `src/backend/dsp/AudioRingBuffer.h` | Wait-free, cache-line-aligned single-producer / single-consumer (SPSC) ring buffer with zero-pad underflow and drop-newest overflow semantics. |
 | **`SafetySentry`** | `src/backend/dsp/SafetySentry.h` | Real-time output circuit breaker: `NaN`/`Inf` scrubbing, hard peak clamping ($\pm 4.0$), consecutive runaway frame detection ($\ge 16.0$), instant fuse trip, and automatic recovery after clean frames. |
 | **`RtGate` & `WorkerThread`** | `src/backend/dsp/RtGate.h`, `src/backend/dsp/WorkerThread.h` | Lock-free audio-thread gate with deterministic callback drain (`wait_until_closed()`) for safe hot-reconfiguration, plus a condition-variable inference worker thread with a `NETBENDER_NONBLOCKING` atomic wake trigger. |
@@ -84,7 +84,7 @@ All frontends (JUCE VST3/AU/Standalone, Max/MSP, and PureData) share a single st
 
 ## Frontends & Build Targets
 
-NetBender provides native frontends for DAWs, standalone desktop performance, and modular patching environments, built on top of the modular `netbender_dsp` and `netbender_backend` CMake targets:
+NetBender provides native frontends for DAWs, standalone desktop performance, and modular/live-coding environments, built on top of the modular `netbender_dsp` and `netbender_backend` CMake targets:
 
 | Target | Description | Output / Installation |
 | --- | --- | --- |
@@ -94,7 +94,8 @@ NetBender provides native frontends for DAWs, standalone desktop performance, an
 | `standalone` | **JUCE Standalone Application** (`NetBender`) | Desktop app with direct audio/MIDI I/O and full interactive circuit-bending UI. |
 | `maxmsp` | **Max/MSP Externals** (`netBender~`, `mc.netBender~`, `mcs.netBender~`, `netBender.info`) | Built as `.mxo` / `.mxe64` bundles for Max 8+. |
 | `puredata` | **PureData External** (`netBender~`, with legacy `nn~` alias) | Built as `netBender~.pd_darwin` / `netBender~.pd_linux` / `netBender~.dll`. |
-| `all` (default) | Builds all enabled library, frontend, and test targets | Builds all configured targets. |
+| `csound` | **Csound 7 Plugin Opcodes** (`netbender_*`) | Built as `libnetbender.dylib` / `.so` / `netbender.dll` (installed into Csound 7's `plugins64` user plugin directory via `--component csound`). |
+| `all` (default) | Builds all enabled library, frontend, and test targets | Builds all configured targets (including `csound` when Csound 7 is detected). |
 
 ---
 
@@ -295,6 +296,14 @@ Connect a message box to the left inlet of `netBender~` and route the rightmost 
 
 ---
 
+## Using NetBender in Csound 7
+
+NetBender provides a full Csound 7 plugin opcode suite (`src/frontend/csound`) built directly on `NetBenderSession`, supporting `.pte`, `.onnx`, and `.ts` models, automatic host $\leftrightarrow$ model resampling, lock-free multi-layer circuit bending (`netbender_bend`, `netbender_bridge`, `netbender_short`, `netbender_trigger`, `netbender_latent`, `netbender_sentry`), raw tensor read/write (`netbender_getweights`, `netbender_setweights`, `netbender_resetweights`), JUCE-interoperable JSON presets (`netbender_savestate`, `netbender_loadstate`), and model attributes (`netbender_attrs`, `netbender_attr_get`, `netbender_attr_set`).
+
+See [src/frontend/csound/README.md](src/frontend/csound/README.md) for the complete opcode reference, macOS signing notes, and runnable `.csd` examples (`src/frontend/csound/examples/01_*.csd` through `10_*.csd`).
+
+---
+
 ## Building from Source
 
 ### Prerequisites
@@ -303,6 +312,7 @@ Connect a message box to the left inlet of `netBender~` and route the rightmost 
 - **ONNX Runtime** (`src/cmake/add_onnxruntime.cmake` automatically downloads the matching ONNX Runtime release if `ort_dir` is not specified).
 - **ExecuTorch**: Automatically discovered from the project's Python virtual environment (`.venv`) once `pip install -r requirements.txt` (`executorch>=1.0.0`) has been installed, or via `-DEXECUTORCH_ROOT=/path/to/executorch`.
 - **LibTorch**: Download from [pytorch.org](https://pytorch.org/get-started/locally/) into `./libtorch` or pass `-DCMAKE_PREFIX_PATH=/path/to/libtorch`.
+- **Csound 7** *(optional, for `csound` opcodes)*: Automatically discovered from standard install locations (`CsoundLib64.framework` on macOS, system/user CMake prefixes on Linux/Windows) or via `-DCsound_DIR=...`.
 
 ### 1. Configure CMake
 
@@ -330,6 +340,10 @@ cmake --build build --target maxmsp
 # Build the PureData external (netBender~):
 cmake --build build --target puredata
 
+# Build and install the Csound 7 opcodes:
+cmake --build build --target csound
+cmake --install build --component csound
+
 # Build all enabled targets:
 cmake --build build --target all
 ```
@@ -341,6 +355,8 @@ cmake --build build --target all
 | `-DBUILD_JUCE_PLUGIN=ON\|OFF` | `ON` | Build JUCE VST3, AU, and Standalone plugin targets. |
 | `-DBUILD_MAXMSP=ON\|OFF` | `ON` | Build Max/MSP externals (`netBender~`, `mc.netBender~`, `mcs.netBender~`, `netBender.info`). |
 | `-DBUILD_PUREDATA=ON\|OFF` | `ON` | Build PureData external (`netBender~`). |
+| `-DBUILD_CSOUND=ON\|OFF` | `ON` | Build Csound 7 plugin opcodes (`csound` / `all` targets; skipped cleanly if Csound 7 is absent). |
+| `-DCSOUND_USE_DOUBLE=ON\|OFF` | `ON` | Build Csound 7 opcodes for 64-bit (`plugins64`) vs 32-bit (`plugins`) float precision. |
 | `-DENABLE_EXECUTORCH_BACKEND=ON\|OFF` | `ON` | Enable ExecuTorch `.pte` backend discovery and linking (`EXECUTORCH_ROOT`). |
 | `-DENABLE_RTSAN=ON\|OFF` | `OFF` | Enable Clang RealtimeSanitizer (`-fsanitize=realtime`) for audio-thread real-time safety verification (requires upstream LLVM/Clang 20+). |
 | `-DBUNDLE_DEPENDENCIES=ON\|OFF` | `OFF` | Bundle and relocate shared libraries into `support/` for redistributable packages. |
@@ -360,6 +376,7 @@ NetBender includes a fast, self-contained CTest unit test suite that runs in sec
 | `test_bending` | `NetBender::backend` | `Xoshiro128Plus` PRNG determinism, `BendingManager` layer classification/drift/bridging/triggers, `LatentTerrainEngine` (`FourierOrbit`, `LatentSlew`, `Quantize`), `NetBenderSession` streaming & JSON state round-trip, and `NETBENDER_NONBLOCKING` RTSan safety. |
 | `test_resampler_parity` | `NetBender::dsp` + `juce::juce_audio_basics` | Direct bit-exact sample-by-sample parity of `Resampler` against `juce::CatmullRomInterpolator` ($\le 10^{-6}$) and `juce::LinearInterpolator` ($\le 2 \times 10^{-6}$), random block-boundary seam continuity, round-trip impulse group delay, and $10^6$-sample phase accumulation. |
 | `test_rtsan` | `NetBender::dsp` + `NetBenderAudioProcessor` | Headless DSP primitive smoke checks and `NetBenderAudioProcessor::processBlock` bypass + JSON preset save/load round-trip (plus loaded-model streaming when a model path argument is passed). |
+| `test_csound_adapter` *(via `csound_tests`)* | `CsoundSessionAdapter` + `NetBender::backend` | Model path resolution, `-b`/`-B`/`ksmps` sizing, resampling & `0dbfs`, `encode`/`decode`/`gen`, multi-layer RT bends/bridges/resets, triggers, latent terrain, triple-buffered raw weights, JSON preset save/load, and backend attributes. |
 
 ```bash
 # Build and run all model-free CTest unit tests:
