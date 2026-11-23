@@ -369,17 +369,22 @@ auto test_rt_gate_multithread_stress() -> void {
 
     std::thread r1(reader_fn);
     std::thread r2(reader_fn);
+    CHECK(wait_until([&] { return reader_entries.load(std::memory_order_acquire) > 0; }));
 
     std::thread reconf_thread([&]() {
         for (int cycle = 0; cycle < 200; ++cycle) {
-            ScopedReconfigureGate reconf(gate);
-            CHECK(active_readers.load(std::memory_order_acquire) == 0);
-            active_reconf.fetch_add(1, std::memory_order_acq_rel);
-            std::this_thread::yield();
-            CHECK(active_readers.load(std::memory_order_acquire) == 0);
-            active_reconf.fetch_sub(1, std::memory_order_acq_rel);
+            {
+                ScopedReconfigureGate reconf(gate);
+                CHECK(active_readers.load(std::memory_order_acquire) == 0);
+                active_reconf.fetch_add(1, std::memory_order_acq_rel);
+                std::this_thread::yield();
+                CHECK(active_readers.load(std::memory_order_acquire) == 0);
+                active_reconf.fetch_sub(1, std::memory_order_acq_rel);
+            }
             if ((cycle % 10) == 0) {
                 std::this_thread::sleep_for(std::chrono::microseconds(100));
+            } else {
+                std::this_thread::yield();
             }
         }
         done.store(true, std::memory_order_release);
