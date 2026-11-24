@@ -3,8 +3,6 @@
 #include "IBackend.h"
 #include <atomic>
 #include <vector>
-#include <cstdint>
-#include <mutex>
 
 enum class LatentMode {
     FourierOrbit =

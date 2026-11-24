@@ -9,11 +9,9 @@ graph inputs for real-time NetBender circuit bending, and slices companion encod
 
 import argparse
 import copy
-import logging
 import os
 import sys
 from pathlib import Path
-from typing import List, Optional
 
 # Add project root to sys.path
 project_root = str(Path(__file__).resolve().parents[1])
@@ -24,15 +22,18 @@ import torch
 
 try:
     import onnx
-    from onnx import helper, TensorProto
+    from onnx import TensorProto, helper
 except ImportError:
-    print("Warning: 'onnx' library is not installed. Run `pip install onnx` for full verification.", file=sys.stderr)
+    print(
+        "Warning: 'onnx' library is not installed. Run `pip install onnx` for full verification.",
+        file=sys.stderr,
+    )
 
 
 def slice_stable_audio_onnx_subgraphs(
     full_onnx_path: str,
     base_path: str,
-    methods: List[str],
+    methods: list[str],
     latent_dim: int = 64,
     verbose: bool = True,
 ):
@@ -44,7 +45,9 @@ def slice_stable_audio_onnx_subgraphs(
         full_model = onnx.load(full_onnx_path)
     except Exception as e:
         if verbose:
-            print(f"  [Warning] Could not load {full_onnx_path} for companion slicing: {e}")
+            print(
+                f"  [Warning] Could not load {full_onnx_path} for companion slicing: {e}"
+            )
         return
 
     # Automatically identify the bottleneck latent tensor
@@ -64,7 +67,9 @@ def slice_stable_audio_onnx_subgraphs(
         latent_tensor_name = "/encoder_module/Slice_output_0"
 
     if verbose:
-        print(f"  -> Identified Stable Audio latent bottleneck tensor: '{latent_tensor_name}'")
+        print(
+            f"  -> Identified Stable Audio latent bottleneck tensor: '{latent_tensor_name}'"
+        )
 
     # 1. ENCODE SUBGRAPH
     if "encode" in methods:
@@ -73,7 +78,9 @@ def slice_stable_audio_onnx_subgraphs(
             print(f"  -> Slicing companion method 'encode' -> {enc_path}...")
         enc_model = copy.deepcopy(full_model)
         del enc_model.graph.output[:]
-        latent_out = helper.make_tensor_value_info("latent_out", TensorProto.FLOAT, ["batch", latent_dim, "frames"])
+        latent_out = helper.make_tensor_value_info(
+            "latent_out", TensorProto.FLOAT, ["batch", latent_dim, "frames"]
+        )
         enc_model.graph.output.append(latent_out)
 
         for n in enc_model.graph.node:
@@ -92,7 +99,9 @@ def slice_stable_audio_onnx_subgraphs(
         del enc_model.graph.node[:]
         enc_model.graph.node.extend(nodes_to_keep)
 
-        enc_inits = [init for init in enc_model.graph.initializer if init.name in needed]
+        enc_inits = [
+            init for init in enc_model.graph.initializer if init.name in needed
+        ]
         del enc_model.graph.initializer[:]
         enc_model.graph.initializer.extend(enc_inits)
 
@@ -102,7 +111,9 @@ def slice_stable_audio_onnx_subgraphs(
 
         onnx.save(enc_model, enc_path)
         if verbose:
-            print(f"  -> Companion 'encode' exported successfully ({len(enc_model.graph.node)} nodes).")
+            print(
+                f"  -> Companion 'encode' exported successfully ({len(enc_model.graph.node)} nodes)."
+            )
 
     # 2. DECODE SUBGRAPH
     if "decode" in methods:
@@ -110,7 +121,9 @@ def slice_stable_audio_onnx_subgraphs(
         if verbose:
             print(f"  -> Slicing companion method 'decode' -> {dec_path}...")
         dec_model = copy.deepcopy(full_model)
-        latent_in = helper.make_tensor_value_info("latent_in", TensorProto.FLOAT, ["batch", latent_dim, "frames"])
+        latent_in = helper.make_tensor_value_info(
+            "latent_in", TensorProto.FLOAT, ["batch", latent_dim, "frames"]
+        )
         dec_model.graph.input.insert(0, latent_in)
 
         for n in dec_model.graph.node:
@@ -130,7 +143,9 @@ def slice_stable_audio_onnx_subgraphs(
         dec_model.graph.node.extend(nodes_to_keep)
 
         needed.add("latent_in")
-        dec_inits = [init for init in dec_model.graph.initializer if init.name in needed]
+        dec_inits = [
+            init for init in dec_model.graph.initializer if init.name in needed
+        ]
         del dec_model.graph.initializer[:]
         dec_model.graph.initializer.extend(dec_inits)
 
@@ -140,17 +155,19 @@ def slice_stable_audio_onnx_subgraphs(
 
         onnx.save(dec_model, dec_path)
         if verbose:
-            print(f"  -> Companion 'decode' exported successfully ({len(dec_model.graph.node)} nodes).")
+            print(
+                f"  -> Companion 'decode' exported successfully ({len(dec_model.graph.node)} nodes)."
+            )
 
 
 def convert_stable_audio_ts_to_onnx(
     ts_model_path: str,
-    output_onnx_path: Optional[str] = None,
+    output_onnx_path: str | None = None,
     buffer_size: int = 8192,
     channels: int = 2,
     opset_version: int = 17,
     promote_for_bending: bool = True,
-    methods: Optional[List[str]] = None,
+    methods: list[str] | None = None,
     verbose: bool = True,
 ) -> str:
     """
@@ -162,7 +179,9 @@ def convert_stable_audio_ts_to_onnx(
 
     if output_onnx_path is None:
         base, _ = os.path.splitext(ts_model_path)
-        output_onnx_path = f"{base}_bendable.onnx" if promote_for_bending else f"{base}.onnx"
+        output_onnx_path = (
+            f"{base}_bendable.onnx" if promote_for_bending else f"{base}.onnx"
+        )
 
     base, ext = os.path.splitext(output_onnx_path)
     std_onnx_path = output_onnx_path if not promote_for_bending else f"{base}_raw.onnx"
@@ -181,7 +200,11 @@ def convert_stable_audio_ts_to_onnx(
             val = model.sr() if callable(model.sr) else model.sr
             sr = int(val)
         elif hasattr(model, "sample_rate"):
-            val = model.sample_rate() if callable(model.sample_rate) else model.sample_rate
+            val = (
+                model.sample_rate()
+                if callable(model.sample_rate)
+                else model.sample_rate
+            )
             sr = int(val)
     except Exception:
         pass
@@ -193,13 +216,21 @@ def convert_stable_audio_ts_to_onnx(
 
     try:
         if hasattr(model, "encode_params"):
-            ep = model.encode_params() if callable(model.encode_params) else model.encode_params
+            ep = (
+                model.encode_params()
+                if callable(model.encode_params)
+                else model.encode_params
+            )
             if hasattr(ep, "__iter__") or isinstance(ep, (list, tuple, torch.Tensor)):
                 in_channels = int(ep[0])
                 latent_dim = int(ep[2])
                 ratio = int(ep[3])
         elif hasattr(model, "decode_params"):
-            dp = model.decode_params() if callable(model.decode_params) else model.decode_params
+            dp = (
+                model.decode_params()
+                if callable(model.decode_params)
+                else model.decode_params
+            )
             if hasattr(dp, "__iter__") or isinstance(dp, (list, tuple, torch.Tensor)):
                 latent_dim = int(dp[0])
                 ratio = int(dp[1])
@@ -210,8 +241,12 @@ def convert_stable_audio_ts_to_onnx(
     dummy_audio = torch.zeros(1, in_channels, buffer_size, dtype=torch.float32)
 
     if verbose:
-        print(f"[2/3] Exporting to standard ONNX (opset {opset_version}): {std_onnx_path}...")
-        print(f"      Channels: {in_channels} -> {out_channels} | Latent Dim: {latent_dim} | Ratio: {ratio} | SR: {sr} Hz")
+        print(
+            f"[2/3] Exporting to standard ONNX (opset {opset_version}): {std_onnx_path}..."
+        )
+        print(
+            f"      Channels: {in_channels} -> {out_channels} | Latent Dim: {latent_dim} | Ratio: {ratio} | SR: {sr} Hz"
+        )
 
     export_kwargs = dict(
         input_names=["audio_in"],
@@ -224,6 +259,7 @@ def convert_stable_audio_ts_to_onnx(
         do_constant_folding=True,
     )
     import inspect
+
     if "dynamo" in inspect.signature(torch.onnx.export).parameters:
         export_kwargs["dynamo"] = False
     torch.onnx.export(model, (dummy_audio,), std_onnx_path, **export_kwargs)
@@ -246,7 +282,9 @@ def convert_stable_audio_ts_to_onnx(
 
     if promote_for_bending:
         if verbose:
-            print(f"[3/3] Promoting weights to graph inputs for real-time bending: {output_onnx_path}...")
+            print(
+                f"[3/3] Promoting weights to graph inputs for real-time bending: {output_onnx_path}..."
+            )
 
         from python_tools.onnx_bend_prep import promote_initializers_to_inputs
 
@@ -265,9 +303,13 @@ def convert_stable_audio_ts_to_onnx(
                 pass
     else:
         if verbose:
-            print(f"[3/3] Preserving constant initializers (no-bending mode): {output_onnx_path}...")
+            print(
+                f"[3/3] Preserving constant initializers (no-bending mode): {output_onnx_path}..."
+            )
         import onnx
+
         from python_tools.pte_bend_prep import write_nbnd_sidecar
+
         m = onnx.load(std_onnx_path)
         for k, v in extra_meta.items():
             entry = m.metadata_props.add()
@@ -302,7 +344,9 @@ def convert_stable_audio_ts_to_onnx(
         if "all" in methods:
             export_list = ["encode", "decode"]
         else:
-            export_list = [m for m in methods if m in candidate_methods and m != "forward"]
+            export_list = [
+                m for m in methods if m in candidate_methods and m != "forward"
+            ]
 
         if export_list:
             slice_stable_audio_onnx_subgraphs(
@@ -320,12 +364,29 @@ def convert_stable_audio_ts_to_onnx(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert Stable Audio TorchScript (.ts) to NetBender ONNX")
-    parser.add_argument("-i", "--input", required=True, help="Input TorchScript model (.ts)")
-    parser.add_argument("-o", "--output", default=None, help="Output ONNX model (.onnx)")
-    parser.add_argument("--buffer-size", type=int, default=8192, help="Buffer size for tracing (default: 8192)")
-    parser.add_argument("--channels", type=int, default=2, help="Audio channels (default: 2 for stereo)")
-    parser.add_argument("--no-bending", action="store_true", help="Skip promoting initializers to graph inputs")
+    parser = argparse.ArgumentParser(
+        description="Convert Stable Audio TorchScript (.ts) to NetBender ONNX"
+    )
+    parser.add_argument(
+        "-i", "--input", required=True, help="Input TorchScript model (.ts)"
+    )
+    parser.add_argument(
+        "-o", "--output", default=None, help="Output ONNX model (.onnx)"
+    )
+    parser.add_argument(
+        "--buffer-size",
+        type=int,
+        default=8192,
+        help="Buffer size for tracing (default: 8192)",
+    )
+    parser.add_argument(
+        "--channels", type=int, default=2, help="Audio channels (default: 2 for stereo)"
+    )
+    parser.add_argument(
+        "--no-bending",
+        action="store_true",
+        help="Skip promoting initializers to graph inputs",
+    )
     parser.add_argument(
         "--methods",
         nargs="+",

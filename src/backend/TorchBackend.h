@@ -6,7 +6,6 @@
 #include "static_buffer.h"
 #include <torch/torch.h>
 #include <vector>
-#include <functional>
 
 struct LockedModel {
     torch::jit::script::Module* model;

@@ -11,10 +11,6 @@
 #include <iomanip>
 #include <sstream>
 #include <thread>
-#include <mutex>
-#include <condition_variable>
-#include <atomic>
-#include "AudioRingBuffer.h"
 #include "SafetySentry.h"
 #include "engine/StreamingEngine.h"
 

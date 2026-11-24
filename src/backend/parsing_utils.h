@@ -1,6 +1,4 @@
 #pragma once
-#include <algorithm>
-#include <iomanip>
 #include <string>
 
 auto to_bool(std::string str) -> bool;

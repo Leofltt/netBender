@@ -1,15 +1,14 @@
-import inspect
 import logging
-from typing import Any,  List, Optional, Sequence, Tuple, Union
+from collections.abc import Sequence
 from types import MethodType
+from typing import Any, Optional
 
 import cached_conv as cc
+
 import torch
 
-from . import TYPE_HASH
-
-from .buffer import Buffer, BUFFER_ATTRIBUTES_TYPE
-from . import templates
+from . import TYPE_HASH, templates
+from .buffer import Buffer
 from .codegen import *
 
 
@@ -18,8 +17,8 @@ class Module(torch.nn.Module):
     def __init__(self, sr: int | None = None) -> None:
         super().__init__()
         self._methods = []
-        self._attributes = torch.jit.Attribute([], List[str])
-        self._buffer_attributes = torch.jit.Attribute([], List[str])
+        self._attributes = torch.jit.Attribute([], list[str])
+        self._buffer_attributes = torch.jit.Attribute([], list[str])
         self.tmp_file_session = tmp_file_session(self)
         self._ready = False
         self.sr = torch.jit.Attribute(sr, int | None) 
@@ -31,8 +30,8 @@ class Module(torch.nn.Module):
         in_ratio: int,
         out_channels: int,
         out_ratio: int,
-        input_labels: Optional[Sequence[str]] = None,
-        output_labels: Optional[Sequence[str]] = None,
+        input_labels: Sequence[str] | None = None,
+        output_labels: Sequence[str] | None = None,
         test_method: bool = True,
         test_buffer_size: int = 8192,
     ):
@@ -67,8 +66,8 @@ class Module(torch.nn.Module):
             ]
         if len(input_labels) != in_channels:
             raise ValueError(
-                (f"Method {method_name}, expected "
-                 f"{in_channels} input labels, got {len(input_labels)}"))
+                f"Method {method_name}, expected "
+                 f"{in_channels} input labels, got {len(input_labels)}")
         setattr(self, f"{method_name}_input_labels", input_labels)
 
         if output_labels is None:
@@ -77,8 +76,8 @@ class Module(torch.nn.Module):
             ]
         if len(output_labels) != out_channels:
             raise ValueError(
-                (f"Method {method_name}, expected "
-                 f"{out_channels} output labels, got {len(output_labels)}"))
+                f"Method {method_name}, expected "
+                 f"{out_channels} output labels, got {len(output_labels)}")
         setattr(self, f"{method_name}_output_labels", output_labels)
 
         if test_method:
@@ -88,20 +87,20 @@ class Module(torch.nn.Module):
 
             if len(y.shape) != 3:
                 raise ValueError(
-                    ("Output tensor must have exactly 3 dimensions, "
-                     f"got {len(y.shape)}"))
+                    "Output tensor must have exactly 3 dimensions, "
+                     f"got {len(y.shape)}")
             if y.shape[0] != 1:
                 raise ValueError(
                     f"Expecting single batch output, got {y.shape[0]}")
             if y.shape[1] != out_channels:
-                raise ValueError((
+                raise ValueError(
                     f"Wrong number of output channels for method \"{method_name}\", "
-                    f"expected {out_channels} got {y.shape[1]}"))
+                    f"expected {out_channels} got {y.shape[1]}")
             if y.shape[2] != test_buffer_size // out_ratio:
                 raise ValueError(
-                    (f"Wrong output length for method \"{method_name}\", "
+                    f"Wrong output length for method \"{method_name}\", "
                      f"expected {test_buffer_size//out_ratio} "
-                     f"got {y.shape[2]}"))
+                     f"got {y.shape[2]}")
             if y.dtype != torch.float:
                 raise ValueError(f"Output tensor must be of type float, got {y.dtype}")
 
@@ -112,33 +111,33 @@ class Module(torch.nn.Module):
 
                 if len(y.shape) != 3:
                     raise ValueError(
-                        ("Output tensor must have exactly 3 dimensions, "
-                         f"got {len(y.shape)}"))
+                        "Output tensor must have exactly 3 dimensions, "
+                         f"got {len(y.shape)}")
                 if y.shape[0] != 4:
                     raise ValueError(
                         f"Expecting 4 batch output, got {y.shape[0]}")
                 if y.shape[1] != out_channels:
-                    raise ValueError((
+                    raise ValueError(
                         f"Wrong number of output channels for method \"{method_name}\", "
-                        f"expected {out_channels} got {y.shape[1]}"))
+                        f"expected {out_channels} got {y.shape[1]}")
                 if y.shape[2] != test_buffer_size // out_ratio:
                     raise ValueError(
-                        (f"Wrong output length for method \"{method_name}\", "
+                        f"Wrong output length for method \"{method_name}\", "
                          f"expected {test_buffer_size//out_ratio} "
-                         f"got {y.shape[2]}"))
-                logging.info((f"Added method \"{method_name}\" "
-                              f"tested with buffer size {test_buffer_size}"))
+                         f"got {y.shape[2]}")
+                logging.info(f"Added method \"{method_name}\" "
+                              f"tested with buffer size {test_buffer_size}")
             else:
                 logging.info(
                     f"Skipping method {method_name} with mc.nn~ API as cc.MAX_BATCH_SIZE={cc.MAX_BATCH_SIZE}"
                 )
         else:
-            logging.warn(f"Added method \"{method_name}\" without testing it.")
+            logging.warning(f"Added method \"{method_name}\" without testing it.")
 
         self._methods.append(method_name)
 
     def register_attribute(self, attribute_name: str,
-                           values: Union[Any, Tuple[Any]]):
+                           values: Any | tuple[Any]):
         """Register an attribute visible by nn~.
 
         Args:
@@ -147,7 +146,7 @@ class Module(torch.nn.Module):
         """
         assert attribute_name not in self.__reserved_attribute_names__, f"attribute_name {attribute_name} is reserved."
 
-        if not isinstance(values, (List, Tuple)):
+        if not isinstance(values, (list, tuple)):
             values = list([values])
         else:
             values = list(values)
@@ -179,7 +178,7 @@ class Module(torch.nn.Module):
         return self._methods
 
     @torch.jit.export
-    def get_attributes(self) -> List[str]:
+    def get_attributes(self) -> list[str]:
         return self._attributes
 
     def export_to_ts(self, path):
@@ -189,7 +188,7 @@ class Module(torch.nn.Module):
 
     # buffer attributes handling
     @torch.jit.export
-    def get_buffer_attributes(self) -> List[str]:
+    def get_buffer_attributes(self) -> list[str]:
         if torch.jit.is_scripting():
             return self._buffer_attributes
         else:

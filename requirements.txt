@@ -1,5 +1,12 @@
 # Core requirements for nn_tilde_bending model export
+# Install stable-audio-3 separately with --no-deps (its pyproject.toml pins torch==2.7.1,
+# which conflicts with executorch's torch>=2.11.0,<=2.12.1 requirement):
+#   uv pip install --no-deps "stable-audio-3 @ git+https://github.com/Stability-AI/stable-audio-3.git"
 torch>=2.11.0,<=2.12.1
+transformers
+einops-exts
+soundfile
+tqdm
 cached_conv>=2.5.0
 numpy
 git+https://github.com/leofltt/RAVE.git
