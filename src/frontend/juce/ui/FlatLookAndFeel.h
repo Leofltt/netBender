@@ -61,6 +61,12 @@ struct FlatLookAndFeel : public juce::LookAndFeel_V4 {
     auto drawGroupComponentOutline(juce::Graphics& g, int width, int height,
                                    const juce::String& text, const juce::Justification& position,
                                    juce::GroupComponent& group) -> void override;
+
+    // =========================================================================
+    // ProgressBar
+    // =========================================================================
+    auto drawProgressBar(juce::Graphics& g, juce::ProgressBar& bar, int width, int height,
+                         double progress, const juce::String& textToShow) -> void override;
 };
 
 using FlatTabLookAndFeel = FlatLookAndFeel;

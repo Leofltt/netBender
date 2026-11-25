@@ -2,7 +2,6 @@
 #include "../ui/UIConstants.h"
 
 #include <algorithm>
-#include <cctype>
 #include <cmath>
 #include <random>
 
@@ -37,733 +36,9 @@ auto format_stage(netbender::sampler::GenerationProgress::Stage stage, int cur, 
     return "Ready";
 }
 
-auto sanitize_filename(const std::string& raw) -> juce::String {
-    std::string out;
-    out.reserve(std::min<size_t>(raw.size(), 40));
-    for (unsigned char c : raw) {
-        if (out.size() >= 40) {
-            break;
-        }
-        if (std::isalnum(c)) {
-            out.push_back(static_cast<char>(std::tolower(c)));
-        } else if ((c == ' ' || c == '-' || c == '_') && !out.empty() && out.back() != '_') {
-            out.push_back('_');
-        }
-    }
-    while (!out.empty() && out.back() == '_') {
-        out.pop_back();
-    }
-    return out.empty() ? juce::String("netbender_sample") : juce::String(out);
-}
-
-auto spectrum_colour(float v, bool inside_loop) -> juce::Colour {
-    const float t = std::pow(std::clamp(v, 0.0f, 1.0f), 0.65f);
-    juce::Colour c;
-    if (t < 0.20f) {
-        c = UIConstants::Canvas::inner_canvas.interpolatedWith(UIConstants::Colors::dark_violet,
-                                                               t / 0.20f);
-    } else if (t < 0.45f) {
-        c = UIConstants::Colors::dark_violet.interpolatedWith(UIConstants::Colors::violet,
-                                                              (t - 0.20f) / 0.25f);
-    } else if (t < 0.70f) {
-        c = UIConstants::Colors::violet.interpolatedWith(UIConstants::Colors::magenta,
-                                                         (t - 0.45f) / 0.25f);
-    } else if (t < 0.90f) {
-        c = UIConstants::Colors::magenta.interpolatedWith(UIConstants::Colors::amber_light,
-                                                          (t - 0.70f) / 0.20f);
-    } else {
-        c = UIConstants::Colors::amber_light.interpolatedWith(UIConstants::Colors::text_white,
-                                                              (t - 0.90f) / 0.10f);
-    }
-    return inside_loop ? c : c.withMultipliedBrightness(0.40f);
-}
-
-auto write_slot_audio_to_file(const netbender::sampler::SampleSlot& snap, juce::File dest,
-                              bool apply_range, float start_norm, float end_norm, int format_id,
-                              juce::String& out_error) -> bool {
-    const bool is_aiff = (format_id == 4);
-    const juce::String ext = is_aiff ? ".aiff" : ".wav";
-    if (dest.getFileExtension().isEmpty()) {
-        dest = dest.withFileExtension(ext);
-    }
-    if (dest.existsAsFile()) {
-        dest.deleteFile();
-    }
-
-    const int total_samples = snap.num_samples;
-    if (total_samples <= 0 || snap.audio.empty()) {
-        out_error = "Slot has no audio";
-        return false;
-    }
-
-    const int start_idx =
-        apply_range ? std::clamp(static_cast<int>(start_norm * total_samples), 0, total_samples - 1)
-                    : 0;
-    const int end_idx = apply_range ? std::clamp(static_cast<int>(end_norm * total_samples),
-                                                 start_idx + 1, total_samples)
-                                    : total_samples;
-    const int count = std::max(1, end_idx - start_idx);
-    const int num_ch = static_cast<int>(snap.audio.size());
-
-    juce::AudioBuffer<float> out_buf(num_ch, count);
-    for (int c = 0; c < num_ch; ++c) {
-        const auto& src = snap.audio[static_cast<size_t>(c)];
-        const int avail = std::max(0, static_cast<int>(src.size()) - start_idx);
-        const int to_copy = std::min(count, avail);
-        if (to_copy > 0) {
-            out_buf.copyFrom(c, 0, src.data() + start_idx, to_copy);
-        }
-        if (to_copy < count) {
-            out_buf.clear(c, to_copy, count - to_copy);
-        }
-    }
-
-    std::unique_ptr<juce::AudioFormat> audio_fmt;
-    int bits = 24;
-    auto sample_fmt = juce::AudioFormatWriterOptions::SampleFormat::automatic;
-    if (is_aiff) {
-        audio_fmt = std::make_unique<juce::AiffAudioFormat>();
-        bits = 24;
-    } else {
-        audio_fmt = std::make_unique<juce::WavAudioFormat>();
-        if (format_id == 2) {
-            bits = 16;
-        } else if (format_id == 3) {
-            bits = 32;
-            sample_fmt = juce::AudioFormatWriterOptions::SampleFormat::floatingPoint;
-        } else {
-            bits = 24;
-        }
-    }
-
-    std::unique_ptr<juce::OutputStream> out_stream = dest.createOutputStream();
-    if (!out_stream) {
-        out_error = "Cannot open file for writing";
-        return false;
-    }
-
-    const auto writer_opts = juce::AudioFormatWriterOptions{}
-                                 .withSampleRate(static_cast<double>(std::max(1, snap.sample_rate)))
-                                 .withNumChannels(num_ch)
-                                 .withBitsPerSample(bits)
-                                 .withSampleFormat(sample_fmt);
-    auto writer = audio_fmt->createWriterFor(out_stream, writer_opts);
-    if (!writer) {
-        out_error = "Unsupported audio format options";
-        return false;
-    }
-
-    if (!writer->writeFromAudioSampleBuffer(out_buf, 0, count)) {
-        out_error = "Write error";
-        return false;
-    }
-    return true;
-}
-
-class ExportModalContent final : public juce::Component {
-public:
-    ExportModalContent(
-        const netbender::sampler::SamplerEngine& engine, int initial_slot,
-        bool select_all_populated, bool initial_apply_range,
-        std::function<void(std::vector<int>, bool, float, float, int)> on_export_requested)
-        : m_engine(engine),
-          m_slotCount(engine.get_slot_count()),
-          m_onExport(std::move(on_export_requested)) {
-        m_slotsHeaderLabel.setColour(juce::Label::textColourId, UIConstants::Colors::text_muted);
-        m_slotsHeaderLabel.setFont(juce::FontOptions(UIConstants::Typography::font_small));
-        addAndMakeVisible(m_slotsHeaderLabel);
-
-        m_selectAllBtn.onClick = [this]() { setAllPopulated(true); };
-        addAndMakeVisible(m_selectAllBtn);
-
-        m_selectNoneBtn.onClick = [this]() { setAllPopulated(false); };
-        addAndMakeVisible(m_selectNoneBtn);
-
-        for (int i = 0; i < m_slotCount; ++i) {
-            auto& tb = m_slotToggles[static_cast<size_t>(i)];
-            const auto snap = m_engine.get_slot_snapshot(i);
-            const bool has_audio = (snap && snap->num_samples > 0);
-            juce::String text = "Slot " + juce::String(i + 1);
-            if (has_audio) {
-                text += " (" + juce::String(snap->duration_sec, 2) + "s, #" +
-                        juce::String(snap->seed) + ")";
-            } else {
-                text += " (empty)";
-            }
-            tb.setButtonText(text);
-            tb.setEnabled(has_audio);
-            const bool checked = has_audio && (select_all_populated || i == initial_slot);
-            tb.setToggleState(checked, juce::dontSendNotification);
-            tb.onClick = [this]() { refreshRangeAndState(); };
-            addAndMakeVisible(tb);
-        }
-
-        m_formatLabel.setColour(juce::Label::textColourId, UIConstants::Colors::text_muted);
-        m_formatLabel.setFont(juce::FontOptions(UIConstants::Typography::font_small));
-        addAndMakeVisible(m_formatLabel);
-
-        m_formatCombo.addItem("WAV 24-bit PCM", 1);
-        m_formatCombo.addItem("WAV 16-bit PCM", 2);
-        m_formatCombo.addItem("WAV 32-bit Float", 3);
-        m_formatCombo.addItem("AIFF 24-bit", 4);
-        m_formatCombo.setSelectedId(1, juce::dontSendNotification);
-        addAndMakeVisible(m_formatCombo);
-
-        m_applyRangeToggle.setButtonText("Apply selected range (per-slot loop points for multi)");
-        m_applyRangeToggle.setToggleState(initial_apply_range, juce::dontSendNotification);
-        m_applyRangeToggle.onClick = [this]() { refreshRangeAndState(); };
-        addAndMakeVisible(m_applyRangeToggle);
-
-        auto setup_range_slider = [this](juce::Label& lbl, juce::Slider& sl) {
-            lbl.setColour(juce::Label::textColourId, UIConstants::Colors::text_muted);
-            lbl.setFont(juce::FontOptions(UIConstants::Typography::font_small));
-            addAndMakeVisible(lbl);
-            sl.setSliderStyle(juce::Slider::LinearHorizontal);
-            sl.setTextBoxStyle(juce::Slider::TextBoxRight, false, 58, 22);
-            sl.setTextValueSuffix(" s");
-            addAndMakeVisible(sl);
-        };
-        setup_range_slider(m_startLabel, m_startSlider);
-        setup_range_slider(m_endLabel, m_endSlider);
-
-        m_startSlider.onValueChange = [this]() {
-            if (m_startSlider.getValue() >= m_endSlider.getValue() - 0.01) {
-                m_endSlider.setValue(m_startSlider.getValue() + 0.01, juce::dontSendNotification);
-            }
-        };
-        m_endSlider.onValueChange = [this]() {
-            if (m_endSlider.getValue() <= m_startSlider.getValue() + 0.01) {
-                m_startSlider.setValue(m_endSlider.getValue() - 0.01, juce::dontSendNotification);
-            }
-        };
-
-        m_exportBtn.setColour(juce::TextButton::buttonColourId, UIConstants::Colors::violet);
-        m_exportBtn.onClick = [this]() {
-            std::vector<int> selected = selectedSlots();
-            if (selected.empty()) {
-                return;
-            }
-            const bool apply = m_applyRangeToggle.getToggleState();
-            float s_norm = 0.0f;
-            float e_norm = 1.0f;
-            if (selected.size() == 1 && apply) {
-                const auto snap = m_engine.get_slot_snapshot(selected[0]);
-                const float dur = snap ? std::max(0.01f, snap->duration_sec) : 1.0f;
-                s_norm = static_cast<float>(m_startSlider.getValue()) / dur;
-                e_norm = static_cast<float>(m_endSlider.getValue()) / dur;
-            }
-            const int fmt_id = m_formatCombo.getSelectedId();
-            if (auto* dw = findParentComponentOfClass<juce::DialogWindow>()) {
-                dw->exitModalState(0);
-                dw->setVisible(false);
-            }
-            if (m_onExport) {
-                m_onExport(std::move(selected), apply, s_norm, e_norm, fmt_id);
-            }
-        };
-        addAndMakeVisible(m_exportBtn);
-
-        m_cancelBtn.onClick = [this]() {
-            if (auto* dw = findParentComponentOfClass<juce::DialogWindow>()) {
-                dw->exitModalState(0);
-                dw->setVisible(false);
-            }
-        };
-        addAndMakeVisible(m_cancelBtn);
-
-        refreshRangeAndState();
-        const int rows = (m_slotCount + 1) / 2;
-        setSize(490, 250 + rows * 24);
-    }
-
-    auto paint(juce::Graphics& g) -> void override {
-        g.fillAll(UIConstants::Colors::surface_panel);
-    }
-
-    auto resized() -> void override {
-        auto area = getLocalBounds().reduced(16);
-
-        auto top_row = area.removeFromTop(26);
-        m_slotsHeaderLabel.setBounds(top_row.removeFromLeft(140));
-        m_selectNoneBtn.setBounds(top_row.removeFromRight(90));
-        top_row.removeFromRight(6);
-        m_selectAllBtn.setBounds(top_row.removeFromRight(90));
-
-        area.removeFromTop(6);
-        const int rows = (m_slotCount + 1) / 2;
-        auto grid_area = area.removeFromTop(rows * 24);
-        const int col_w = grid_area.getWidth() / 2;
-        for (int i = 0; i < m_slotCount; ++i) {
-            const int r = i / 2;
-            const int c = i % 2;
-            m_slotToggles[static_cast<size_t>(i)].setBounds(
-                grid_area.getX() + c * col_w, grid_area.getY() + r * 24, col_w - 6, 22);
-        }
-
-        area.removeFromTop(10);
-        auto row2 = area.removeFromTop(28);
-        m_formatLabel.setBounds(row2.removeFromLeft(80));
-        m_formatCombo.setBounds(row2);
-
-        area.removeFromTop(10);
-        m_applyRangeToggle.setBounds(area.removeFromTop(26));
-
-        area.removeFromTop(6);
-        auto row3 = area.removeFromTop(26);
-        m_startLabel.setBounds(row3.removeFromLeft(80));
-        m_startSlider.setBounds(row3);
-
-        area.removeFromTop(6);
-        auto row4 = area.removeFromTop(26);
-        m_endLabel.setBounds(row4.removeFromLeft(80));
-        m_endSlider.setBounds(row4);
-
-        auto bottom = area.removeFromBottom(32);
-        m_exportBtn.setBounds(bottom.removeFromRight(140));
-        bottom.removeFromRight(8);
-        m_cancelBtn.setBounds(bottom.removeFromRight(90));
-    }
-
-private:
-    [[nodiscard]] auto selectedSlots() const -> std::vector<int> {
-        std::vector<int> out;
-        for (int i = 0; i < m_slotCount; ++i) {
-            if (m_slotToggles[static_cast<size_t>(i)].getToggleState() &&
-                m_slotToggles[static_cast<size_t>(i)].isEnabled()) {
-                out.push_back(i);
-            }
-        }
-        return out;
-    }
-
-    auto setAllPopulated(bool checked) -> void {
-        for (int i = 0; i < m_slotCount; ++i) {
-            auto& tb = m_slotToggles[static_cast<size_t>(i)];
-            if (tb.isEnabled()) {
-                tb.setToggleState(checked, juce::dontSendNotification);
-            }
-        }
-        refreshRangeAndState();
-    }
-
-    auto refreshRangeAndState() -> void {
-        const auto sel = selectedSlots();
-        m_exportBtn.setEnabled(!sel.empty());
-        m_exportBtn.setButtonText(sel.size() > 1 ? ("EXPORT (" + juce::String(sel.size()) + ")...")
-                                                 : "EXPORT...");
-
-        const bool single_custom = (sel.size() == 1 && m_applyRangeToggle.getToggleState());
-        m_startSlider.setEnabled(single_custom);
-        m_endSlider.setEnabled(single_custom);
-
-        if (sel.size() == 1) {
-            const int s_idx = sel[0];
-            const auto snap = m_engine.get_slot_snapshot(s_idx);
-            const double dur = (snap && snap->num_samples > 0)
-                                   ? std::max(0.05, static_cast<double>(snap->duration_sec))
-                                   : 1.0;
-            m_startSlider.setRange(0.0, std::max(0.01, dur - 0.01), 0.01);
-            m_endSlider.setRange(0.01, dur, 0.01);
-            m_startSlider.setValue(m_engine.get_loop_start(s_idx) * dur,
-                                   juce::dontSendNotification);
-            m_endSlider.setValue(m_engine.get_loop_end(s_idx) * dur, juce::dontSendNotification);
-        }
-    }
-
-    const netbender::sampler::SamplerEngine& m_engine;
-    int m_slotCount{4};
-    std::function<void(std::vector<int>, bool, float, float, int)> m_onExport;
-
-    juce::Label m_slotsHeaderLabel{"", "SLOTS TO EXPORT"};
-    juce::TextButton m_selectAllBtn{"ALL"};
-    juce::TextButton m_selectNoneBtn{"NONE"};
-    std::array<juce::ToggleButton, netbender::sampler::SamplerEngine::k_max_slots> m_slotToggles;
-    juce::Label m_formatLabel{"", "FORMAT"};
-    juce::ComboBox m_formatCombo;
-    juce::ToggleButton m_applyRangeToggle;
-    juce::Label m_startLabel{"", "START"};
-    juce::Slider m_startSlider;
-    juce::Label m_endLabel{"", "END"};
-    juce::Slider m_endSlider;
-    juce::TextButton m_exportBtn{"EXPORT..."};
-    juce::TextButton m_cancelBtn{"CANCEL"};
-};
-
 }  // namespace
 
-// =============================================================================
-// WaveformView
-// =============================================================================
-
-auto SamplerMainComponent::WaveformView::setSlotIndex(int idx) -> void {
-    m_slotIndex = idx;
-    repaint();
-}
-
-auto SamplerMainComponent::WaveformView::setCompactMode(bool compact) -> void {
-    m_compactMode = compact;
-    repaint();
-}
-
-auto SamplerMainComponent::WaveformView::setSelectedForGen(bool selected) -> void {
-    if (m_selectedForGen != selected) {
-        m_selectedForGen = selected;
-        repaint();
-    }
-}
-
-auto SamplerMainComponent::WaveformView::setGenerating(bool generating) -> void {
-    if (m_generating != generating) {
-        m_generating = generating;
-        repaint();
-    }
-}
-
-auto SamplerMainComponent::WaveformView::setFocused(bool focused) -> void {
-    if (m_focused != focused) {
-        m_focused = focused;
-        repaint();
-    }
-}
-
-auto SamplerMainComponent::WaveformView::setDisplayMode(DisplayMode mode) -> void {
-    if (m_displayMode != mode) {
-        m_displayMode = mode;
-        repaint();
-    }
-}
-
-auto SamplerMainComponent::WaveformView::regenBadgeBounds() const -> juce::Rectangle<float> {
-    return {static_cast<float>(getWidth()) - 76.0f, 8.0f, 68.0f, 22.0f};
-}
-
-auto SamplerMainComponent::WaveformView::playBadgeBounds() const -> juce::Rectangle<float> {
-    return {static_cast<float>(getWidth()) - 76.0f, static_cast<float>(getHeight()) - 30.0f, 68.0f,
-            22.0f};
-}
-
-auto SamplerMainComponent::WaveformView::specBadgeBounds() const -> juce::Rectangle<float> {
-    if (m_compactMode) {
-        return {8.0f, static_cast<float>(getHeight()) - 30.0f, 54.0f, 22.0f};
-    }
-    return {static_cast<float>(getWidth()) - 72.0f, 8.0f, 64.0f, 22.0f};
-}
-
-auto SamplerMainComponent::WaveformView::rebuildSpecImage() -> void {
-    if (!m_slot || m_slot->spectrogram.empty()) {
-        m_specImage = {};
-        return;
-    }
-    constexpr int cols = netbender::sampler::SampleSlot::k_spec_cols;
-    constexpr int bins = netbender::sampler::SampleSlot::k_spec_bins;
-    if (static_cast<int>(m_slot->spectrogram.size()) < cols * bins) {
-        m_specImage = {};
-        return;
-    }
-
-    if (!m_specImage.isValid() || m_specImage.getWidth() != cols ||
-        m_specImage.getHeight() != bins) {
-        m_specImage = juce::Image(juce::Image::ARGB, cols, bins, false);
-    }
-
-    juce::Image::BitmapData bmp(m_specImage, juce::Image::BitmapData::writeOnly);
-    for (int c = 0; c < cols; ++c) {
-        const float norm_x = (static_cast<float>(c) + 0.5f) / static_cast<float>(cols);
-        const bool inside = (norm_x >= m_loop_start && norm_x <= m_loop_end);
-        for (int b = 0; b < bins; ++b) {
-            const float val = m_slot->spectrogram[static_cast<size_t>(c * bins + b)];
-            const int row = (bins - 1) - b;
-            bmp.setPixelColour(c, row, spectrum_colour(val, inside));
-        }
-    }
-}
-
-auto SamplerMainComponent::WaveformView::setSlot(
-    std::shared_ptr<const netbender::sampler::SampleSlot> slot) -> void {
-    m_slot = std::move(slot);
-    rebuildSpecImage();
-    repaint();
-}
-
-auto SamplerMainComponent::WaveformView::setPlayhead(float norm, bool playing) -> void {
-    if (std::abs(norm - m_playhead) > 1e-4f || playing != m_playing) {
-        m_playhead = norm;
-        m_playing = playing;
-        repaint();
-    }
-}
-
-auto SamplerMainComponent::WaveformView::setLoopRegion(float start_norm, float end_norm) -> void {
-    m_loop_start = std::clamp(start_norm, 0.0f, 0.99f);
-    m_loop_end = std::clamp(end_norm, m_loop_start + 0.01f, 1.0f);
-    rebuildSpecImage();
-    repaint();
-}
-
-auto SamplerMainComponent::WaveformView::paint(juce::Graphics& g) -> void {
-    const auto bounds = getLocalBounds().toFloat();
-    g.setColour(UIConstants::Canvas::inner_canvas);
-    g.fillRect(bounds);
-
-    // Subtle grid lines
-    g.setColour(UIConstants::Canvas::grid_minor);
-    const float mid_y = bounds.getCentreY();
-    g.drawHorizontalLine(static_cast<int>(mid_y), bounds.getX() + 4.0f, bounds.getRight() - 4.0f);
-    const int v_divs = m_compactMode ? 4 : 8;
-    for (int i = 1; i < v_divs; ++i) {
-        const float x = bounds.getX() +
-                        (bounds.getWidth() * static_cast<float>(i)) / static_cast<float>(v_divs);
-        g.drawVerticalLine(static_cast<int>(x), bounds.getY() + 4.0f, bounds.getBottom() - 4.0f);
-    }
-
-    // Active loop region shading
-    const float lx0 = bounds.getX() + m_loop_start * bounds.getWidth();
-    const float lx1 = bounds.getX() + m_loop_end * bounds.getWidth();
-    g.setColour(UIConstants::Colors::violet.withAlpha(0.14f));
-    g.fillRect(lx0, bounds.getY() + 2.0f, std::max(2.0f, lx1 - lx0), bounds.getHeight() - 4.0f);
-
-    if (m_slot && m_displayMode == DisplayMode::Spectrum && m_specImage.isValid()) {
-        g.setOpacity(1.0f);
-        g.setImageResamplingQuality(juce::Graphics::mediumResamplingQuality);
-        g.drawImage(m_specImage, bounds.reduced(1.0f), juce::RectanglePlacement::stretchToFit);
-    } else if (m_slot && !m_slot->waveform_peaks.empty()) {
-        const int bins = static_cast<int>(m_slot->waveform_peaks.size());
-        const float bin_w = bounds.getWidth() / static_cast<float>(bins);
-        const float half_h = (bounds.getHeight() - (m_compactMode ? 28.0f : 16.0f)) * 0.5f;
-
-        for (int i = 0; i < bins; ++i) {
-            const float norm_x = static_cast<float>(i) / static_cast<float>(bins);
-            const bool inside = (norm_x >= m_loop_start && norm_x <= m_loop_end);
-            g.setColour(inside ? UIConstants::Colors::lilac
-                               : UIConstants::Colors::lavender.withAlpha(0.28f));
-            const float amp = std::max(0.015f, m_slot->waveform_peaks[static_cast<size_t>(i)]);
-            const float bar_h = amp * half_h * 2.0f;
-            const float x = bounds.getX() + static_cast<float>(i) * bin_w;
-            g.fillRect(x, mid_y - bar_h * 0.5f, std::max(1.0f, bin_w - 0.5f), bar_h);
-        }
-    } else {
-        g.setColour(UIConstants::Colors::text_muted);
-        g.setFont(juce::FontOptions(m_compactMode ? UIConstants::Typography::font_body
-                                                  : UIConstants::Typography::font_heading));
-        const juce::String empty_msg =
-            m_generating
-                ? ("Generating Slot " + juce::String(m_slotIndex + 1) + "...")
-                : (m_compactMode ? ("Slot " + juce::String(m_slotIndex + 1) + " empty")
-                                 : "Load an SA3 .nbsampler.json bundle and press GENERATE");
-        g.drawText(empty_msg, getLocalBounds(), juce::Justification::centred);
-    }
-
-    // Loop Start / End handles (full view)
-    if (!m_compactMode) {
-        g.setColour(UIConstants::Colors::magenta);
-        g.drawVerticalLine(static_cast<int>(lx0), bounds.getY(), bounds.getBottom());
-        g.fillRect(lx0 - 3.0f, bounds.getY(), 7.0f, 12.0f);
-
-        g.setColour(UIConstants::Colors::lavender);
-        g.drawVerticalLine(static_cast<int>(lx1), bounds.getY(), bounds.getBottom());
-        g.fillRect(lx1 - 4.0f, bounds.getY(), 7.0f, 12.0f);
-    }
-
-    // Playhead
-    if (m_playing && m_slot) {
-        const float px = bounds.getX() + m_playhead * bounds.getWidth();
-        g.setColour(UIConstants::Colors::amber_light);
-        g.drawLine(px, bounds.getY(), px, bounds.getBottom(), 2.0f);
-    }
-
-    // Spectrum / Waveform toggle badge (shown when slot has audio)
-    if (m_slot && m_slot->num_samples > 0) {
-        const auto spec_r = specBadgeBounds();
-        const bool is_spec = (m_displayMode == DisplayMode::Spectrum);
-        g.setColour(is_spec ? UIConstants::Colors::violet
-                            : UIConstants::Colors::surface_card.withAlpha(0.90f));
-        g.fillRect(spec_r);
-        g.setColour(UIConstants::Colors::border_medium);
-        g.drawRect(spec_r, 1.0f);
-        g.setColour(UIConstants::Colors::text_white);
-        g.setFont(juce::FontOptions(UIConstants::Typography::font_small));
-        g.drawText(is_spec ? "WAVE" : "SPEC", spec_r.toNearestInt(), juce::Justification::centred);
-    }
-
-    // Compact tile overlays (Slot badge, Regen pill, Play/Stop pill)
-    if (m_compactMode) {
-        juce::String badge = "SLOT " + juce::String(m_slotIndex + 1);
-        if (m_slot && m_slot->num_samples > 0) {
-            badge += "  #" + juce::String(m_slot->seed) + "  " +
-                     juce::String(m_slot->duration_sec, 1) + "s";
-        }
-        const juce::Rectangle<float> badge_r{8.0f, 8.0f, 175.0f, 22.0f};
-        g.setColour(UIConstants::Colors::surface_card.withAlpha(0.90f));
-        g.fillRect(badge_r);
-        g.setColour(UIConstants::Colors::border_subtle);
-        g.drawRect(badge_r, 1.0f);
-        g.setColour(UIConstants::Colors::text_white);
-        g.setFont(juce::FontOptions(UIConstants::Typography::font_small));
-        g.drawText(badge, 14, 8, 165, 22, juce::Justification::centredLeft);
-
-        const auto regen_r = regenBadgeBounds();
-        g.setColour(m_selectedForGen ? UIConstants::Colors::violet
-                                     : UIConstants::Colors::surface_card);
-        g.fillRect(regen_r);
-        g.setColour(UIConstants::Colors::border_medium);
-        g.drawRect(regen_r, 1.0f);
-        g.setColour(m_selectedForGen ? UIConstants::Colors::text_white
-                                     : UIConstants::Colors::text_muted);
-        g.drawText(m_selectedForGen ? "[x] GEN" : "[ ] GEN", regen_r.toNearestInt(),
-                   juce::Justification::centred);
-
-        if (m_slot && m_slot->num_samples > 0) {
-            const auto play_r = playBadgeBounds();
-            g.setColour(m_playing ? UIConstants::Colors::ruby : UIConstants::Colors::forest_green);
-            g.fillRect(play_r);
-            g.setColour(UIConstants::Colors::border_medium);
-            g.drawRect(play_r, 1.0f);
-            g.setColour(UIConstants::Colors::text_white);
-            g.drawText(m_playing ? "STOP" : "PLAY", play_r.toNearestInt(),
-                       juce::Justification::centred);
-        }
-    }
-
-    juce::Colour border_col = UIConstants::Canvas::border;
-    float border_w = 1.0f;
-    if (m_generating) {
-        border_col = UIConstants::Colors::amber_light;
-        border_w = 2.0f;
-    } else if (m_playing) {
-        border_col = UIConstants::Colors::lilac;
-        border_w = 2.0f;
-    } else if (m_compactMode && m_focused) {
-        border_col = UIConstants::Colors::violet;
-        border_w = 1.5f;
-    }
-    g.setColour(border_col);
-    g.drawRect(bounds.reduced(0.5f), border_w);
-}
-
-auto SamplerMainComponent::WaveformView::mouseDown(const juce::MouseEvent& e) -> void {
-    if (e.mods.isPopupMenu()) {
-        if (onRightClick) {
-            onRightClick(m_slotIndex);
-        }
-        return;
-    }
-
-    const auto pt = e.position;
-    if (m_slot && m_slot->num_samples > 0 && specBadgeBounds().contains(pt)) {
-        m_displayMode = (m_displayMode == DisplayMode::Waveform) ? DisplayMode::Spectrum
-                                                                 : DisplayMode::Waveform;
-        if (onDisplayModeChanged) {
-            onDisplayModeChanged(m_slotIndex, m_displayMode);
-        }
-        repaint();
-        return;
-    }
-
-    if (m_compactMode) {
-        if (regenBadgeBounds().contains(pt)) {
-            if (onToggleRegen) {
-                onToggleRegen(m_slotIndex);
-            }
-            return;
-        }
-        if (m_slot && m_slot->num_samples > 0 && playBadgeBounds().contains(pt)) {
-            if (onTogglePlay) {
-                onTogglePlay(m_slotIndex);
-            }
-            return;
-        }
-        if (onFocusRequested) {
-            onFocusRequested(m_slotIndex);
-        }
-        return;
-    }
-
-    const float w = std::max(1.0f, static_cast<float>(getWidth()));
-    const float x = static_cast<float>(e.x);
-    const float sx = m_loop_start * w;
-    const float ex = m_loop_end * w;
-
-    if (std::abs(x - sx) <= 12.0f && std::abs(x - sx) <= std::abs(x - ex)) {
-        m_drag = DragTarget::StartHandle;
-    } else if (std::abs(x - ex) <= 12.0f) {
-        m_drag = DragTarget::EndHandle;
-    } else {
-        m_drag = DragTarget::None;
-    }
-}
-
-auto SamplerMainComponent::WaveformView::mouseDrag(const juce::MouseEvent& e) -> void {
-    if (m_compactMode || m_drag == DragTarget::None) {
-        return;
-    }
-    const float norm = std::clamp(static_cast<float>(e.x) / std::max(1, getWidth()), 0.0f, 1.0f);
-    if (m_drag == DragTarget::StartHandle) {
-        m_loop_start = std::min(norm, m_loop_end - 0.02f);
-    } else if (m_drag == DragTarget::EndHandle) {
-        m_loop_end = std::max(norm, m_loop_start + 0.02f);
-    }
-    if (onLoopChanged) {
-        onLoopChanged(m_loop_start, m_loop_end);
-    }
-    repaint();
-}
-
-auto SamplerMainComponent::WaveformView::mouseUp(const juce::MouseEvent&) -> void {
-    m_drag = DragTarget::None;
-}
-
-// =============================================================================
-// SamplerLookAndFeel
-// =============================================================================
-
-auto SamplerMainComponent::SamplerLookAndFeel::drawProgressBar(juce::Graphics& g,
-                                                               juce::ProgressBar&, int width,
-                                                               int height, double progress,
-                                                               const juce::String& textToShow)
-    -> void {
-    const auto bounds =
-        juce::Rectangle<float>(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height));
-    g.setColour(UIConstants::Colors::surface_card);
-    g.fillRect(bounds);
-
-    if (progress > 0.0) {
-        const float fill_w = static_cast<float>(std::clamp(progress, 0.0, 1.0)) * bounds.getWidth();
-        g.setColour(UIConstants::Colors::violet);
-        g.fillRect(bounds.getX(), bounds.getY(), fill_w, bounds.getHeight());
-    }
-
-    g.setColour(UIConstants::Colors::border_medium);
-    g.drawRect(bounds, 1.0f);
-
-    if (textToShow.isNotEmpty()) {
-        g.setColour(UIConstants::Colors::text_light);
-        g.setFont(juce::FontOptions(UIConstants::Typography::font_small));
-        g.drawText(textToShow, 0, 0, width, height, juce::Justification::centred, false);
-    }
-}
-
-// =============================================================================
-// SamplerMainComponent
-// =============================================================================
-
 SamplerMainComponent::SamplerMainComponent(const juce::String& initial_bundle_path) {
-    m_lookAndFeel.setColour(juce::ProgressBar::backgroundColourId,
-                            UIConstants::Colors::surface_card);
-    m_lookAndFeel.setColour(juce::ProgressBar::foregroundColourId, UIConstants::Colors::violet);
-    m_lookAndFeel.setColour(juce::TextEditor::backgroundColourId,
-                            UIConstants::Colors::surface_card);
-    m_lookAndFeel.setColour(juce::TextEditor::outlineColourId, UIConstants::Colors::border_medium);
-    m_lookAndFeel.setColour(juce::TextEditor::focusedOutlineColourId, UIConstants::Colors::violet);
-    m_lookAndFeel.setColour(juce::TextEditor::textColourId, UIConstants::Colors::text_white);
-    m_lookAndFeel.setColour(juce::TextEditor::highlightColourId, UIConstants::Colors::deep_violet);
-    m_lookAndFeel.setColour(juce::Slider::backgroundColourId, UIConstants::Colors::surface_card);
-    m_lookAndFeel.setColour(juce::Slider::trackColourId, UIConstants::Colors::violet);
-    m_lookAndFeel.setColour(juce::Slider::thumbColourId, UIConstants::Colors::lilac);
-    m_lookAndFeel.setColour(juce::Slider::textBoxTextColourId, UIConstants::Colors::text_secondary);
-    m_lookAndFeel.setColour(juce::Slider::textBoxBackgroundColourId,
-                            UIConstants::Colors::surface_card);
-    m_lookAndFeel.setColour(juce::Slider::textBoxOutlineColourId,
-                            UIConstants::Colors::border_subtle);
     juce::LookAndFeel::setDefaultLookAndFeel(&m_lookAndFeel);
     setLookAndFeel(&m_lookAndFeel);
     setWantsKeyboardFocus(true);
@@ -805,9 +80,6 @@ SamplerMainComponent::SamplerMainComponent(const juce::String& initial_bundle_pa
     m_promptEditor.setText("Amen break 174 BPM", false);
     m_promptEditor.setTextToShowWhenEmpty("Enter Stable Audio 3 prompt...",
                                           UIConstants::Colors::text_dimmed);
-    m_promptEditor.setColour(juce::TextEditor::backgroundColourId,
-                             UIConstants::Colors::surface_card);
-    m_promptEditor.setColour(juce::TextEditor::outlineColourId, UIConstants::Colors::border_medium);
     m_promptEditor.onReturnKey = [this]() { triggerGeneration(); };
     addAndMakeVisible(m_promptEditor);
 
@@ -858,7 +130,7 @@ SamplerMainComponent::SamplerMainComponent(const juce::String& initial_bundle_pa
     addChildComponent(m_focusInfoLabel);
 
     // Grid Waveforms & Focus Waveform
-    m_slotDisplayModes.fill(DisplayMode::Waveform);
+    m_slotDisplayModes.fill(SamplerWaveformView::DisplayMode::Waveform);
     for (int i = 0; i < netbender::sampler::SamplerEngine::k_max_slots; ++i) {
         auto& gv = m_gridViews[static_cast<size_t>(i)];
         gv.setSlotIndex(i);
@@ -878,7 +150,7 @@ SamplerMainComponent::SamplerMainComponent(const juce::String& initial_bundle_pa
             const bool next = !m_slotSelectButtons[static_cast<size_t>(slot_idx)].getToggleState();
             syncSlotSelectionUi(slot_idx, next);
         };
-        gv.onDisplayModeChanged = [this](int slot_idx, DisplayMode mode) {
+        gv.onDisplayModeChanged = [this](int slot_idx, SamplerWaveformView::DisplayMode mode) {
             m_slotDisplayModes[static_cast<size_t>(slot_idx)] = mode;
             if (slot_idx == m_engine.get_active_slot()) {
                 m_focusView.setDisplayMode(mode);
@@ -896,7 +168,7 @@ SamplerMainComponent::SamplerMainComponent(const juce::String& initial_bundle_pa
         m_gridViews[static_cast<size_t>(active)].setLoopRegion(s, e);
         updateFocusInfoLabel();
     };
-    m_focusView.onDisplayModeChanged = [this](int slot_idx, DisplayMode mode) {
+    m_focusView.onDisplayModeChanged = [this](int slot_idx, SamplerWaveformView::DisplayMode mode) {
         m_slotDisplayModes[static_cast<size_t>(slot_idx)] = mode;
         m_gridViews[static_cast<size_t>(slot_idx)].setDisplayMode(mode);
     };
@@ -1237,7 +509,7 @@ auto SamplerMainComponent::showWaveformContextMenu(int slot_idx) -> void {
     if (m_viewMode == ViewMode::Grid) {
         menu.addItem(5, "Focus Slot " + juce::String(slot_idx + 1));
     } else {
-        menu.addItem(6, "Back to 2x2 Grid");
+        menu.addItem(6, "Back to Grid");
     }
 
     juce::Component::SafePointer<SamplerMainComponent> safe_this(this);
@@ -1246,9 +518,10 @@ auto SamplerMainComponent::showWaveformContextMenu(int slot_idx) -> void {
             return;
         }
         if (result == 1) {
-            safe_this->exportSlotToFile(slot_idx, true, s, e, ExportFormat::Wav24);
+            safe_this->exportSlotsToFiles({slot_idx}, true, s, e, SamplerExportFormat::Wav24);
         } else if (result == 2) {
-            safe_this->exportSlotToFile(slot_idx, false, 0.0f, 1.0f, ExportFormat::Wav24);
+            safe_this->exportSlotsToFiles({slot_idx}, false, 0.0f, 1.0f,
+                                          SamplerExportFormat::Wav24);
         } else if (result == 3) {
             safe_this->openExportModal(slot_idx, false, true);
         } else if (result == 4) {
@@ -1271,10 +544,9 @@ auto SamplerMainComponent::openExportModal(int default_slot_idx, bool select_all
     auto content = std::make_unique<ExportModalContent>(
         m_engine, default_slot_idx, select_all_populated, default_apply_range,
         [safe_this](std::vector<int> slots, bool apply_range, float s_norm, float e_norm,
-                    int fmt_id) {
+                    SamplerExportFormat fmt) {
             if (safe_this != nullptr) {
-                safe_this->exportSlotsToFiles(std::move(slots), apply_range, s_norm, e_norm,
-                                              static_cast<ExportFormat>(fmt_id));
+                safe_this->exportSlotsToFiles(std::move(slots), apply_range, s_norm, e_norm, fmt);
             }
         });
 
@@ -1288,14 +560,9 @@ auto SamplerMainComponent::openExportModal(int default_slot_idx, bool select_all
     opts.launchAsync();
 }
 
-auto SamplerMainComponent::exportSlotToFile(int slot_idx, bool apply_range, float start_norm,
-                                            float end_norm, ExportFormat format) -> void {
-    exportSlotsToFiles({slot_idx}, apply_range, start_norm, end_norm, format);
-}
-
 auto SamplerMainComponent::exportSlotsToFiles(std::vector<int> slot_indices, bool apply_range,
                                               float single_start_norm, float single_end_norm,
-                                              ExportFormat format) -> void {
+                                              SamplerExportFormat format) -> void {
     if (slot_indices.empty()) {
         return;
     }
@@ -1305,8 +572,7 @@ auto SamplerMainComponent::exportSlotsToFiles(std::vector<int> slot_indices, boo
         initial_dir = juce::File::getCurrentWorkingDirectory();
     }
 
-    const int fmt_id = static_cast<int>(format);
-    const bool is_aiff = (format == ExportFormat::Aiff24);
+    const bool is_aiff = (format == SamplerExportFormat::Aiff24);
     const juce::String ext = is_aiff ? ".aiff" : ".wav";
     const juce::String pattern = is_aiff ? "*.aiff;*.aif" : "*.wav";
 
@@ -1321,7 +587,7 @@ auto SamplerMainComponent::exportSlotsToFiles(std::vector<int> slot_indices, boo
             return;
         }
         const juce::String default_name =
-            sanitize_filename(snap->prompt) + "_slot" + juce::String(slot_idx + 1) + ext;
+            sanitize_export_filename(snap->prompt) + "_slot" + juce::String(slot_idx + 1) + ext;
 
         m_exportChooser = std::make_unique<juce::FileChooser>(
             "Export Audio Sample", initial_dir.getChildFile(default_name), pattern);
@@ -1329,7 +595,7 @@ auto SamplerMainComponent::exportSlotsToFiles(std::vector<int> slot_indices, boo
                                juce::FileBrowserComponent::canSelectFiles |
                                juce::FileBrowserComponent::warnAboutOverwriting;
         m_exportChooser->launchAsync(flags, [safe_this, snap, apply_range, single_start_norm,
-                                             single_end_norm, fmt_id](const juce::FileChooser& fc) {
+                                             single_end_norm, format](const juce::FileChooser& fc) {
             if (safe_this == nullptr) {
                 return;
             }
@@ -1339,7 +605,7 @@ auto SamplerMainComponent::exportSlotsToFiles(std::vector<int> slot_indices, boo
             }
             juce::String err;
             const bool ok = write_slot_audio_to_file(*snap, dest, apply_range, single_start_norm,
-                                                     single_end_norm, fmt_id, err);
+                                                     single_end_norm, format, err);
             safe_this->m_statusLabel.setText(
                 ok ? ("Exported " + dest.getFileName()) : ("Export failed: " + err),
                 juce::dontSendNotification);
@@ -1351,41 +617,41 @@ auto SamplerMainComponent::exportSlotsToFiles(std::vector<int> slot_indices, boo
         "Select Folder to Export " + juce::String(slot_indices.size()) + " Samples", initial_dir);
     constexpr auto dir_flags =
         juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories;
-    m_exportChooser->launchAsync(
-        dir_flags, [safe_this, slot_indices = std::move(slot_indices), apply_range, fmt_id,
-                    ext](const juce::FileChooser& fc) {
-            if (safe_this == nullptr) {
-                return;
+    m_exportChooser->launchAsync(dir_flags, [safe_this, slot_indices = std::move(slot_indices),
+                                             apply_range, format,
+                                             ext](const juce::FileChooser& fc) {
+        if (safe_this == nullptr) {
+            return;
+        }
+        const juce::File dir = fc.getResult();
+        if (!dir.isDirectory()) {
+            return;
+        }
+        int exported = 0;
+        juce::String last_err;
+        for (int slot_idx : slot_indices) {
+            const auto snap = safe_this->m_engine.get_slot_snapshot(slot_idx);
+            if (!snap || snap->num_samples <= 0) {
+                continue;
             }
-            const juce::File dir = fc.getResult();
-            if (!dir.isDirectory()) {
-                return;
+            const float s_norm = safe_this->m_engine.get_loop_start(slot_idx);
+            const float e_norm = safe_this->m_engine.get_loop_end(slot_idx);
+            const juce::String fname =
+                sanitize_export_filename(snap->prompt) + "_slot" + juce::String(slot_idx + 1) + ext;
+            if (write_slot_audio_to_file(*snap, dir.getChildFile(fname), apply_range, s_norm,
+                                         e_norm, format, last_err)) {
+                ++exported;
             }
-            int exported = 0;
-            juce::String last_err;
-            for (int slot_idx : slot_indices) {
-                const auto snap = safe_this->m_engine.get_slot_snapshot(slot_idx);
-                if (!snap || snap->num_samples <= 0) {
-                    continue;
-                }
-                const float s_norm = safe_this->m_engine.get_loop_start(slot_idx);
-                const float e_norm = safe_this->m_engine.get_loop_end(slot_idx);
-                const juce::String fname =
-                    sanitize_filename(snap->prompt) + "_slot" + juce::String(slot_idx + 1) + ext;
-                if (write_slot_audio_to_file(*snap, dir.getChildFile(fname), apply_range, s_norm,
-                                             e_norm, fmt_id, last_err)) {
-                    ++exported;
-                }
-            }
-            if (exported > 0) {
-                safe_this->m_statusLabel.setText(
-                    "Exported " + juce::String(exported) + " slot(s) to " + dir.getFileName(),
-                    juce::dontSendNotification);
-            } else {
-                safe_this->m_statusLabel.setText("Export failed: " + last_err,
-                                                 juce::dontSendNotification);
-            }
-        });
+        }
+        if (exported > 0) {
+            safe_this->m_statusLabel.setText(
+                "Exported " + juce::String(exported) + " slot(s) to " + dir.getFileName(),
+                juce::dontSendNotification);
+        } else {
+            safe_this->m_statusLabel.setText("Export failed: " + last_err,
+                                             juce::dontSendNotification);
+        }
+    });
 }
 
 auto SamplerMainComponent::timerCallback() -> void {

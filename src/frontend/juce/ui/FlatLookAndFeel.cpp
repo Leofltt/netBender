@@ -28,6 +28,22 @@ FlatLookAndFeel::FlatLookAndFeel() {
 
     setColour(juce::GroupComponent::outlineColourId, divider_line);
     setColour(juce::GroupComponent::textColourId, lilac);
+
+    setColour(juce::ProgressBar::backgroundColourId, surface_card);
+    setColour(juce::ProgressBar::foregroundColourId, violet);
+
+    setColour(juce::TextEditor::backgroundColourId, surface_card);
+    setColour(juce::TextEditor::outlineColourId, border_medium);
+    setColour(juce::TextEditor::focusedOutlineColourId, violet);
+    setColour(juce::TextEditor::textColourId, text_white);
+    setColour(juce::TextEditor::highlightColourId, deep_violet);
+
+    setColour(juce::Slider::backgroundColourId, surface_card);
+    setColour(juce::Slider::trackColourId, violet);
+    setColour(juce::Slider::thumbColourId, lilac);
+    setColour(juce::Slider::textBoxTextColourId, text_secondary);
+    setColour(juce::Slider::textBoxBackgroundColourId, surface_card);
+    setColour(juce::Slider::textBoxOutlineColourId, border_subtle);
 }
 
 auto FlatLookAndFeel::drawButtonBackground(juce::Graphics& g, juce::Button& button,
@@ -313,5 +329,30 @@ auto FlatLookAndFeel::drawGroupComponentOutline(juce::Graphics& g, int width, in
         g.drawText(text, juce::roundToInt(x + textX + textEdgeGap), 0,
                    juce::roundToInt(textW - textEdgeGap * 2.0f), juce::roundToInt(textH),
                    juce::Justification::centred, true);
+    }
+}
+
+auto FlatLookAndFeel::drawProgressBar(juce::Graphics& g, juce::ProgressBar& bar, int width,
+                                      int height, double progress, const juce::String& textToShow)
+    -> void {
+    const auto bounds =
+        juce::Rectangle<float>(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height));
+    g.setColour(bar.findColour(juce::ProgressBar::backgroundColourId));
+    g.fillRect(bounds);
+
+    if (progress > 0.0) {
+        const float fill_w =
+            static_cast<float>(juce::jlimit(0.0, 1.0, progress)) * bounds.getWidth();
+        g.setColour(bar.findColour(juce::ProgressBar::foregroundColourId));
+        g.fillRect(bounds.getX(), bounds.getY(), fill_w, bounds.getHeight());
+    }
+
+    g.setColour(UIConstants::Colors::border_medium);
+    g.drawRect(bounds, 1.0f);
+
+    if (textToShow.isNotEmpty()) {
+        g.setColour(UIConstants::Colors::text_light);
+        g.setFont(juce::FontOptions(UIConstants::Typography::font_small));
+        g.drawText(textToShow, 0, 0, width, height, juce::Justification::centred, false);
     }
 }

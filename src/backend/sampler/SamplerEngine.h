@@ -29,7 +29,6 @@ namespace netbender::sampler {
 class SamplerEngine {
 public:
     static constexpr int k_max_slots = 12;
-    static constexpr int k_num_slots = k_max_slots;
 
     SamplerEngine();
     explicit SamplerEngine(std::unique_ptr<ISamplerBackend> backend);
@@ -148,13 +147,6 @@ public:
 
 private:
     auto worker_loop() -> void;
-    static auto compute_waveform_peaks(const std::vector<std::vector<float>>& audio,
-                                       int num_samples) -> std::vector<float>;
-    static auto compute_spectrogram(const std::vector<std::vector<float>>& audio, int num_samples,
-                                    int sample_rate) -> std::vector<float>;
-    static auto detect_nonsilent_region(const std::vector<std::vector<float>>& audio,
-                                        int num_samples, int sample_rate,
-                                        float threshold_db = -84.0f) -> std::pair<float, float>;
     static auto sample_linear(const std::vector<float>& ch, double pos) noexcept -> float;
 
     std::unique_ptr<ISamplerBackend> m_backend;
@@ -182,18 +174,18 @@ private:
     std::atomic<int> m_batch_total{0};
     std::atomic<double> m_last_gen_ms{0.0};
     std::atomic<uint64_t> m_slot_generation_id{0};
-    std::array<std::atomic<uint64_t>, k_num_slots> m_slot_generation_ids{};
+    std::array<std::atomic<uint64_t>, k_max_slots> m_slot_generation_ids{};
 
     mutable std::mutex m_snapshot_mutex;
-    std::array<std::shared_ptr<SampleSlot>, k_num_slots> m_slots;
+    std::array<std::shared_ptr<SampleSlot>, k_max_slots> m_slots;
     RtGate m_slot_gate;
 
     // Playback parameters
     std::atomic<int> m_active_slot_index{0};
     std::atomic<int> m_playing_slot_index{0};
     std::atomic<SamplerPlaybackMode> m_playback_mode{SamplerPlaybackMode::OneShot};
-    std::array<std::atomic<float>, k_num_slots> m_loop_starts{};
-    std::array<std::atomic<float>, k_num_slots> m_loop_ends{};
+    std::array<std::atomic<float>, k_max_slots> m_loop_starts{};
+    std::array<std::atomic<float>, k_max_slots> m_loop_ends{};
     std::atomic<float> m_speed{1.0f};
     std::atomic<float> m_gain{1.0f};
     std::atomic<double> m_host_sample_rate{44100.0};

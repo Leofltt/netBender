@@ -242,6 +242,10 @@ juce_generate_juce_header(netbender_sampler)
 
 target_sources(netbender_sampler PRIVATE
     sampler/SamplerApp.cpp
+    sampler/WaveformView.cpp
+    sampler/WaveformView.h
+    sampler/ExportModal.cpp
+    sampler/ExportModal.h
     sampler/SamplerMainComponent.cpp
     sampler/SamplerMainComponent.h
     ui/FlatLookAndFeel.cpp

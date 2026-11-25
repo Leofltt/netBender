@@ -2,7 +2,9 @@
 
 #include <JuceHeader.h>
 #include "../ui/FlatLookAndFeel.h"
+#include "ExportModal.h"
 #include "SamplerEngine.h"
+#include "WaveformView.h"
 
 #include <array>
 #include <atomic>
@@ -33,56 +35,6 @@ public:
 
 private:
     enum class ViewMode { Grid, Focus };
-    enum class DisplayMode { Waveform, Spectrum };
-    enum class ExportFormat { Wav24 = 1, Wav16 = 2, WavFloat32 = 3, Aiff24 = 4 };
-
-    class WaveformView final : public juce::Component {
-    public:
-        std::function<void(float, float)> onLoopChanged;
-        std::function<void(int)> onFocusRequested;
-        std::function<void(int)> onTogglePlay;
-        std::function<void(int)> onToggleRegen;
-        std::function<void(int, DisplayMode)> onDisplayModeChanged;
-        std::function<void(int)> onRightClick;
-
-        auto setSlotIndex(int idx) -> void;
-        auto setCompactMode(bool compact) -> void;
-        auto setSelectedForGen(bool selected) -> void;
-        auto setGenerating(bool generating) -> void;
-        auto setFocused(bool focused) -> void;
-        auto setDisplayMode(DisplayMode mode) -> void;
-        [[nodiscard]] auto getDisplayMode() const noexcept -> DisplayMode { return m_displayMode; }
-
-        auto setSlot(std::shared_ptr<const netbender::sampler::SampleSlot> slot) -> void;
-        auto setPlayhead(float norm, bool playing) -> void;
-        auto setLoopRegion(float start_norm, float end_norm) -> void;
-
-        auto paint(juce::Graphics& g) -> void override;
-        auto mouseDown(const juce::MouseEvent& e) -> void override;
-        auto mouseDrag(const juce::MouseEvent& e) -> void override;
-        auto mouseUp(const juce::MouseEvent& e) -> void override;
-
-    private:
-        [[nodiscard]] auto regenBadgeBounds() const -> juce::Rectangle<float>;
-        [[nodiscard]] auto playBadgeBounds() const -> juce::Rectangle<float>;
-        [[nodiscard]] auto specBadgeBounds() const -> juce::Rectangle<float>;
-        auto rebuildSpecImage() -> void;
-
-        enum class DragTarget { None, StartHandle, EndHandle };
-        int m_slotIndex{0};
-        bool m_compactMode{false};
-        bool m_selectedForGen{true};
-        bool m_generating{false};
-        bool m_focused{false};
-        DisplayMode m_displayMode{DisplayMode::Waveform};
-        std::shared_ptr<const netbender::sampler::SampleSlot> m_slot;
-        juce::Image m_specImage;
-        float m_playhead{0.0f};
-        bool m_playing{false};
-        float m_loop_start{0.0f};
-        float m_loop_end{1.0f};
-        DragTarget m_drag{DragTarget::None};
-    };
 
     // MidiInputCallback
     auto handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message)
@@ -105,19 +57,11 @@ private:
     auto showWaveformContextMenu(int slot_idx) -> void;
     auto openExportModal(int default_slot_idx, bool select_all_populated, bool default_apply_range)
         -> void;
-    auto exportSlotToFile(int slot_idx, bool apply_range, float start_norm, float end_norm,
-                          ExportFormat format) -> void;
     auto exportSlotsToFiles(std::vector<int> slot_indices, bool apply_range,
-                            float single_start_norm, float single_end_norm, ExportFormat format)
-        -> void;
+                            float single_start_norm, float single_end_norm,
+                            SamplerExportFormat format) -> void;
 
-    class SamplerLookAndFeel final : public FlatLookAndFeel {
-    public:
-        auto drawProgressBar(juce::Graphics& g, juce::ProgressBar& bar, int width, int height,
-                             double progress, const juce::String& textToShow) -> void override;
-    };
-
-    SamplerLookAndFeel m_lookAndFeel;
+    FlatLookAndFeel m_lookAndFeel;
     netbender::sampler::SamplerEngine m_engine;
     std::unique_ptr<juce::FileChooser> m_fileChooser;
     std::unique_ptr<juce::FileChooser> m_exportChooser;
@@ -131,7 +75,8 @@ private:
     juce::String m_loadErrorText;
 
     std::array<uint64_t, netbender::sampler::SamplerEngine::k_max_slots> m_lastSeenSlotIds{};
-    std::array<DisplayMode, netbender::sampler::SamplerEngine::k_max_slots> m_slotDisplayModes{};
+    std::array<SamplerWaveformView::DisplayMode, netbender::sampler::SamplerEngine::k_max_slots>
+        m_slotDisplayModes{};
     double m_progressValue{0.0};
     ViewMode m_viewMode{ViewMode::Grid};
 
@@ -157,8 +102,8 @@ private:
     juce::Label m_focusInfoLabel;
 
     // Waveforms (Grid + Focus)
-    std::array<WaveformView, netbender::sampler::SamplerEngine::k_max_slots> m_gridViews;
-    WaveformView m_focusView;
+    std::array<SamplerWaveformView, netbender::sampler::SamplerEngine::k_max_slots> m_gridViews;
+    SamplerWaveformView m_focusView;
 
     // Transport & generation controls
     juce::TextButton m_triggerButton{"TRIGGER"};
