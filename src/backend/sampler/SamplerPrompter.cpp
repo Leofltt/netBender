@@ -113,7 +113,8 @@ auto SamplerPrompter::generate(const GenerationRequest& req, GeneratedSample& ou
     }
 
     std::vector<float> time_embed;
-    if (!m_backend.encode_duration(duration_sec, time_embed)) {
+    const float cond_duration_sec = std::min(max_dur, duration_sec + 2.0f);
+    if (!m_backend.encode_duration(cond_duration_sec, time_embed)) {
         m_last_error = "encode_duration failed: " + m_backend.get_last_error();
         emit(GenerationProgress::Stage::Error, 0, steps, m_last_error);
         return false;

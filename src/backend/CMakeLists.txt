@@ -64,6 +64,7 @@ add_library(netbender_backend STATIC
   sampler/TextTokenizer.cpp
   sampler/DiffusionSchedule.cpp
   sampler/SamplerPrompter.cpp
+  sampler/SamplerEngine.cpp
   $<TARGET_OBJECTS:executorch_backend_obj>
 )
 target_include_directories(netbender_backend

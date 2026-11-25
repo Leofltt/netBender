@@ -154,4 +154,30 @@ struct GeneratedSample {
 
 using ProgressCallback = std::function<void(const GenerationProgress&)>;
 
+/** Real-time playback trigger behavior for `SamplerEngine`. */
+enum class SamplerPlaybackMode {
+    OneShot,
+    Loop,
+    Gate,
+};
+
+/** Immutable generated audio + latent snapshot swapped atomically into `SamplerEngine`. */
+struct SampleSlot {
+    static constexpr int k_num_waveform_bins = 512;
+    static constexpr int k_spec_cols = 128;
+    static constexpr int k_spec_bins = 48;
+
+    std::vector<std::vector<float>> audio;  // [channels][num_samples]
+    std::vector<float> latents;             // [latent_dim * latent_frames]
+    std::vector<float> waveform_peaks;      // [k_num_waveform_bins] in [0..1]
+    std::vector<float> spectrogram;         // [k_spec_cols * k_spec_bins] in [0..1]
+    int sample_rate{44100};
+    int num_samples{0};
+    int latent_dim{0};
+    int latent_frames{0};
+    float duration_sec{0.0f};
+    std::string prompt;
+    uint64_t seed{0};
+};
+
 }  // namespace netbender::sampler

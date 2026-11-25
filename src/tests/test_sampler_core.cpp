@@ -1,15 +1,18 @@
 #include "MockSamplerBackend.h"
 #include "../backend/sampler/DiffusionSchedule.h"
 #include "../backend/sampler/SamplerBundleLoader.h"
+#include "../backend/sampler/SamplerEngine.h"
 #include "../backend/sampler/SamplerPrompter.h"
 #include "../backend/sampler/TextTokenizer.h"
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <numeric>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -412,6 +415,161 @@ auto test_sampler_prompter_end_to_end() -> void {
     CHECK(cancel_backend.decode_calls == 0);
 }
 
+auto test_sampler_engine_async_and_playback() -> void {
+    const std::string tok_json = R"({
+        "version": "1.0",
+        "added_tokens": [{"id": 0, "content": "<pad>", "special": true}, {"id": 1, "content": "</s>", "special": true}],
+        "pre_tokenizer": {"type": "Metaspace", "replacement": "▁", "add_prefix_space": true},
+        "model": {
+            "type": "Unigram",
+            "unk_id": 2,
+            "vocab": [["<pad>", 0.0], ["</s>", 0.0], ["<unk>", 0.0], ["▁warm", -1.0], ["▁synth", -1.0]]
+        }
+    })";
+
+    auto mock = std::make_unique<netbender::sampler::test::MockSamplerBackend>();
+    mock->init_synthetic("executorch", "coreml", 16, 44100, 4096, 8, 16);
+
+    SamplerEngine engine(std::move(mock));
+    CHECK(engine.load_tokenizer_from_json(tok_json, 16, 0, 1, true));
+    CHECK(engine.is_loaded());
+    engine.prepare(44100.0, 512);
+
+    GenerationRequest req;
+    req.prompt = "warm synth";
+    req.duration_sec = 0.2f;  // 8820 samples
+    req.steps = 4;
+    req.seed = 42ULL;
+    engine.request_generate(req);
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (engine.get_stage() != GenerationProgress::Stage::Done &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    CHECK(engine.get_stage() == GenerationProgress::Stage::Done);
+    CHECK(engine.get_slot_generation_id() == 1);
+
+    auto slot = engine.get_slot_snapshot();
+    CHECK(slot != nullptr);
+    CHECK(slot->num_samples == 8820);
+    CHECK(slot->waveform_peaks.size() == SampleSlot::k_num_waveform_bins);
+
+    // 1. OneShot playback produces finite audio and stops at end
+    engine.set_playback_mode(SamplerPlaybackMode::OneShot);
+    engine.trigger_rt(60, 1.0f);
+    std::vector<float> ch0(512, 0.0f), ch1(512, 0.0f);
+    float* ptrs[2]{ch0.data(), ch1.data()};
+    engine.process_rt(ptrs, 2, 512);
+    CHECK(engine.is_playing());
+    float energy = 0.0f;
+    for (int i = 0; i < 512; ++i) {
+        CHECK(std::isfinite(ch0[static_cast<size_t>(i)]));
+        energy += std::abs(ch0[static_cast<size_t>(i)]);
+    }
+    CHECK(energy > 1e-3f);
+
+    // Advance past 8820 samples (~18 blocks)
+    for (int b = 0; b < 20; ++b) {
+        engine.process_rt(ptrs, 2, 512);
+    }
+    CHECK(!engine.is_playing());
+
+    // 2. Loop mode stays playing across multiple buffer lengths
+    engine.set_playback_mode(SamplerPlaybackMode::Loop);
+    engine.set_loop_region(0.1f, 0.5f);
+    engine.trigger_rt(60, 1.0f);
+    for (int b = 0; b < 25; ++b) {
+        engine.process_rt(ptrs, 2, 512);
+        for (float v : ch0) {
+            CHECK(std::isfinite(v));
+        }
+    }
+    CHECK(engine.is_playing());
+
+    // 3. MIDI pitch (+12 semitones = 2x speed)
+    engine.set_playback_mode(SamplerPlaybackMode::OneShot);
+    engine.set_loop_region(0.0f, 1.0f);
+    engine.trigger_rt(72, 1.0f);
+    engine.process_rt(ptrs, 2, 512);
+    const float pos_oct = engine.get_playhead_norm();
+    engine.trigger_rt(60, 1.0f);
+    engine.process_rt(ptrs, 2, 512);
+    const float pos_base = engine.get_playhead_norm();
+    CHECK(pos_oct > pos_base * 1.8f);
+
+    // 4. Gate mode releases cleanly to silence
+    engine.set_playback_mode(SamplerPlaybackMode::Gate);
+    engine.trigger_rt(60, 1.0f);
+    engine.process_rt(ptrs, 2, 512);
+    CHECK(engine.is_playing());
+    engine.release_rt(60);
+    for (int b = 0; b < 4; ++b) {
+        engine.process_rt(ptrs, 2, 512);
+    }
+    CHECK(!engine.is_playing());
+
+    // 5. Selective multi-slot batch generation (slots 0 and 2) & independent loop/playback
+    GenerationRequest batch_req;
+    batch_req.prompt = "warm synth";
+    batch_req.duration_sec = 0.2f;
+    batch_req.steps = 4;
+    batch_req.seed = 100ULL;
+    engine.request_generate_slots(batch_req, 0b0101);  // slots 0 & 2
+
+    const auto batch_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while ((engine.get_slot_generation_id(2) < 1 ||
+            engine.get_stage() != GenerationProgress::Stage::Done) &&
+           std::chrono::steady_clock::now() < batch_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    CHECK(engine.get_stage() == GenerationProgress::Stage::Done);
+    CHECK(engine.get_slot_snapshot(0) != nullptr);
+    CHECK(engine.get_slot_snapshot(1) == nullptr);
+    CHECK(engine.get_slot_snapshot(2) != nullptr);
+    CHECK(engine.get_slot_snapshot(3) == nullptr);
+    CHECK(engine.get_slot_snapshot(0)->seed == 100ULL);
+    CHECK(engine.get_slot_snapshot(2)->seed == 102ULL);
+
+    engine.set_loop_region(0, 0.05f, 0.25f);
+    engine.set_loop_region(2, 0.40f, 0.80f);
+    CHECK(std::abs(engine.get_loop_start(0) - 0.05f) < 1e-5f);
+    CHECK(std::abs(engine.get_loop_start(2) - 0.40f) < 1e-5f);
+
+    engine.set_playback_mode(SamplerPlaybackMode::OneShot);
+    engine.trigger_slot_rt(2, 60, 1.0f);
+    engine.process_rt(ptrs, 2, 512);
+    CHECK(engine.is_playing());
+    CHECK(engine.get_playing_slot() == 2);
+    CHECK(engine.is_slot_playing(2));
+    CHECK(!engine.is_slot_playing(0));
+
+    engine.stop_slot_rt(2);
+    engine.process_rt(ptrs, 2, 512);
+    CHECK(!engine.is_playing());
+
+    // 6. Dynamic slot count (8 slots) & spectrogram generation on slot 5
+    engine.set_slot_count(8);
+    CHECK(engine.get_slot_count() == 8);
+    GenerationRequest slot5_req;
+    slot5_req.prompt = "warm synth";
+    slot5_req.duration_sec = 0.2f;
+    slot5_req.steps = 4;
+    slot5_req.seed = 200ULL;
+    engine.request_generate_slots(slot5_req, 1u << 5);
+    const auto s5_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while ((engine.get_slot_generation_id(5) < 1 ||
+            engine.get_stage() != GenerationProgress::Stage::Done) &&
+           std::chrono::steady_clock::now() < s5_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    CHECK(engine.get_stage() == GenerationProgress::Stage::Done);
+    auto slot5 = engine.get_slot_snapshot(5);
+    CHECK(slot5 != nullptr);
+    CHECK(slot5->spectrogram.size() ==
+          static_cast<size_t>(SampleSlot::k_spec_cols * SampleSlot::k_spec_bins));
+}
+
 }  // namespace
 
 int main() {
@@ -420,6 +578,7 @@ int main() {
     test_diffusion_schedule_and_apg();
     test_bundle_loader_validation();
     test_sampler_prompter_end_to_end();
+    test_sampler_engine_async_and_playback();
     std::cout << "test_sampler_core: all checks passed\n";
     return 0;
 }
