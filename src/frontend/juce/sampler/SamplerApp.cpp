@@ -7,12 +7,12 @@ public:
     auto getApplicationVersion() -> const juce::String override { return "0.1.0"; }
     auto moreThanOneInstanceAllowed() -> bool override { return true; }
 
-    auto initialise(const juce::String& commandLine) -> void override {
-        juce::String initial_bundle = commandLine.trim().unquoted();
-        m_mainWindow = std::make_unique<MainWindow>(getApplicationName(), initial_bundle);
+    auto initialise(const juce::String& command_line) -> void override {
+        juce::String initial_bundle = command_line.trim().unquoted();
+        m_main_window = std::make_unique<MainWindow>(getApplicationName(), initial_bundle);
     }
 
-    auto shutdown() -> void override { m_mainWindow.reset(); }
+    auto shutdown() -> void override { m_main_window.reset(); }
 
     auto systemRequestedQuit() -> void override { quit(); }
 
@@ -33,7 +33,7 @@ private:
         }
     };
 
-    std::unique_ptr<MainWindow> m_mainWindow;
+    std::unique_ptr<MainWindow> m_main_window;
 };
 
 START_JUCE_APPLICATION(NetBenderSamplerApplication)

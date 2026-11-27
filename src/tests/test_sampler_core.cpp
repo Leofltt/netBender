@@ -1,4 +1,5 @@
 #include "MockSamplerBackend.h"
+#include "../backend/bending/PromptBendingEngine.h"
 #include "../backend/sampler/DiffusionSchedule.h"
 #include "../backend/sampler/SamplerBundleLoader.h"
 #include "../backend/sampler/SamplerEngine.h"
@@ -570,6 +571,70 @@ auto test_sampler_engine_async_and_playback() -> void {
           static_cast<size_t>(SampleSlot::k_spec_cols * SampleSlot::k_spec_bins));
 }
 
+auto test_prompt_bending_engine() -> void {
+    using netbender::bending::PromptBendingEngine;
+    using netbender::bending::Xoshiro128Plus;
+
+    PromptEmbedding a;
+    a.seq_len = 4;
+    a.cond_dim = 4;
+    a.data = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f,
+              0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 3.0f};
+
+    PromptEmbedding b;
+    b.seq_len = 4;
+    b.cond_dim = 4;
+    b.data = {0.0f, 1.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f,
+              0.0f, 0.0f, 0.0f, 1.0f, 3.0f, 0.0f, 0.0f, 0.0f};
+
+    // 1. SLERP midpoint preserves unit norm on token 0
+    const auto slerp_mid = PromptBendingEngine::blend_pair(a, b, 0.5f, PromptMorphLaw::Slerp);
+    CHECK(slerp_mid.seq_len == 4 && slerp_mid.cond_dim == 4);
+    const float n0 =
+        std::sqrt(slerp_mid.data[0] * slerp_mid.data[0] + slerp_mid.data[1] * slerp_mid.data[1]);
+    CHECK(std::abs(n0 - 1.0f) < 1e-4f);
+
+    // 2. TokenSplice & FreqSplit produce valid finite blends
+    const auto spliced = PromptBendingEngine::blend_pair(a, b, 0.5f, PromptMorphLaw::TokenSplice);
+    CHECK(spliced.data[0] == b.data[0]);  // token 0 (phase 0 < 0.5) from b
+    CHECK(spliced.data[8] == a.data[8]);  // token 2 (phase 0.5 >= 0.5) from a
+
+    const auto fsplit = PromptBendingEngine::blend_pair(a, b, 0.5f, PromptMorphLaw::FreqSplit);
+    CHECK(fsplit.data[0] == b.data[0]);  // dim 0 < 2 from b
+    CHECK(fsplit.data[7] == a.data[7]);  // dim 3 >= 2 from a
+
+    // 3. Embedding DSP (drift + quantize + wavefold)
+    PromptBendingConfig cfg;
+    cfg.enabled = true;
+    cfg.emb_drift = 0.25f;
+    cfg.emb_quantize_levels = 8;
+    cfg.emb_wavefold = 0.5f;
+    Xoshiro128Plus rng(77ULL);
+    PromptEmbedding dsp_emb = slerp_mid;
+    PromptBendingEngine::apply_embedding_dsp(dsp_emb, cfg, rng);
+    for (float v : dsp_emb.data) {
+        CHECK(std::isfinite(v));
+    }
+
+    // 4. Schedule warp preserves endpoints
+    std::vector<float> sigmas{1.0f, 0.75f, 0.5f, 0.25f, 0.0f};
+    PromptBendingEngine::warp_schedule(sigmas, 2.0f);
+    CHECK(sigmas.front() == 1.0f && sigmas.back() == 0.0f);
+    CHECK(std::abs(sigmas[2] - 0.25f) < 1e-5f);
+
+    // 5. Masked 1-4 prompt navigation (only A & D active, or only D active)
+    std::array<PromptEmbedding, 4> sparse_slots{};
+    sparse_slots[0] = a;
+    sparse_slots[3] = b;
+    const auto ad_mid = PromptBendingEngine::blend_embeddings_masked(
+        sparse_slots, {true, false, false, true}, 0.5f, 0.5f, PromptMorphLaw::Linear);
+    CHECK(std::abs(ad_mid.data[0] - 0.5f) < 1e-5f && std::abs(ad_mid.data[1] - 0.5f) < 1e-5f);
+
+    const auto d_only = PromptBendingEngine::blend_embeddings_masked(
+        sparse_slots, {false, false, false, true}, 0.0f, 0.0f, PromptMorphLaw::Slerp);
+    CHECK(d_only.data[1] == b.data[1]);
+}
+
 }  // namespace
 
 int main() {
@@ -579,6 +644,7 @@ int main() {
     test_bundle_loader_validation();
     test_sampler_prompter_end_to_end();
     test_sampler_engine_async_and_playback();
+    test_prompt_bending_engine();
     std::cout << "test_sampler_core: all checks passed\n";
     return 0;
 }

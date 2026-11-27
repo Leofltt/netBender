@@ -356,3 +356,36 @@ auto FlatLookAndFeel::drawProgressBar(juce::Graphics& g, juce::ProgressBar& bar,
         g.drawText(textToShow, 0, 0, width, height, juce::Justification::centred, false);
     }
 }
+
+auto FlatLookAndFeel::drawLinearSlider(juce::Graphics& g, int x, int y, int width, int height,
+                                       float sliderPos, float minSliderPos, float maxSliderPos,
+                                       juce::Slider::SliderStyle style, juce::Slider& slider)
+    -> void {
+    if (style != juce::Slider::LinearHorizontal && style != juce::Slider::LinearBar) {
+        juce::LookAndFeel_V4::drawLinearSlider(g, x, y, width, height, sliderPos, minSliderPos,
+                                               maxSliderPos, style, slider);
+        return;
+    }
+
+    const float bar_h = std::max(10.0f, std::min(static_cast<float>(height), 18.0f));
+    const float bar_y = static_cast<float>(y) + (static_cast<float>(height) - bar_h) * 0.5f;
+    const juce::Rectangle<float> bounds(static_cast<float>(x), bar_y, static_cast<float>(width),
+                                        bar_h);
+
+    g.setColour(UIConstants::Colors::surface_card);
+    g.fillRect(bounds);
+
+    const float clamped_pos = std::clamp(sliderPos, bounds.getX(), bounds.getRight());
+    const float fill_w = std::max(0.0f, clamped_pos - bounds.getX());
+    if (fill_w > 0.0f) {
+        g.setColour(UIConstants::Colors::violet);
+        g.fillRect(bounds.getX(), bounds.getY(), fill_w, bounds.getHeight());
+    }
+
+    g.setColour(UIConstants::Colors::lilac);
+    g.fillRect(std::clamp(clamped_pos - 1.0f, bounds.getX(), bounds.getRight() - 2.0f),
+               bounds.getY(), 2.0f, bounds.getHeight());
+
+    g.setColour(UIConstants::Colors::border_medium);
+    g.drawRect(bounds, 1.0f);
+}

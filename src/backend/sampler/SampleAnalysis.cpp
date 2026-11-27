@@ -39,15 +39,14 @@ auto compute_spectrogram(const std::vector<std::vector<float>>& audio, int num_s
         return spec;
     }
 
-    constexpr int kFftSize = 256;
-    constexpr int kHalfFft = kFftSize / 2;
-    constexpr float kTwoPi = 6.28318530717958647692f;
+    constexpr int k_fft_size = 256;
+    constexpr int k_half_fft = k_fft_size / 2;
+    constexpr float k_two_pi = 6.28318530717958647692f;
 
-    std::array<float, kFftSize> hann{};
-    for (int i = 0; i < kFftSize; ++i) {
-        hann[static_cast<size_t>(i)] =
-            0.5f *
-            (1.0f - std::cos(kTwoPi * static_cast<float>(i) / static_cast<float>(kFftSize - 1)));
+    std::array<float, k_fft_size> hann{};
+    for (int i = 0; i < k_fft_size; ++i) {
+        hann[static_cast<size_t>(i)] = 0.5f * (1.0f - std::cos(k_two_pi * static_cast<float>(i) /
+                                                               static_cast<float>(k_fft_size - 1)));
     }
 
     const int n_ch = static_cast<int>(audio.size());
@@ -57,18 +56,18 @@ auto compute_spectrogram(const std::vector<std::vector<float>>& audio, int num_s
     const float min_freq = 40.0f;
     const float freq_ratio = nyquist / min_freq;
 
-    std::array<float, kFftSize> re{};
-    std::array<float, kFftSize> im{};
-    std::array<float, kHalfFft> mag{};
+    std::array<float, k_fft_size> re{};
+    std::array<float, k_fft_size> im{};
+    std::array<float, k_half_fft> mag{};
     float max_peak = 1e-5f;
 
     for (int c = 0; c < cols; ++c) {
         const int center =
             static_cast<int>(((static_cast<double>(c) + 0.5) * static_cast<double>(num_samples)) /
                              static_cast<double>(cols));
-        const int s0 = center - kHalfFft;
+        const int s0 = center - k_half_fft;
 
-        for (int i = 0; i < kFftSize; ++i) {
+        for (int i = 0; i < k_fft_size; ++i) {
             const int idx = s0 + i;
             float mono = 0.0f;
             if (idx >= 0 && idx < num_samples) {
@@ -83,8 +82,8 @@ auto compute_spectrogram(const std::vector<std::vector<float>>& audio, int num_s
             im[static_cast<size_t>(i)] = 0.0f;
         }
 
-        for (int i = 1, j = 0; i < kFftSize; ++i) {
-            int bit = kFftSize >> 1;
+        for (int i = 1, j = 0; i < k_fft_size; ++i) {
+            int bit = k_fft_size >> 1;
             for (; (j & bit) != 0; bit >>= 1) {
                 j ^= bit;
             }
@@ -95,11 +94,11 @@ auto compute_spectrogram(const std::vector<std::vector<float>>& audio, int num_s
             }
         }
 
-        for (int len = 2; len <= kFftSize; len <<= 1) {
-            const float ang = -kTwoPi / static_cast<float>(len);
+        for (int len = 2; len <= k_fft_size; len <<= 1) {
+            const float ang = -k_two_pi / static_cast<float>(len);
             const float wlen_re = std::cos(ang);
             const float wlen_im = std::sin(ang);
-            for (int i = 0; i < kFftSize; i += len) {
+            for (int i = 0; i < k_fft_size; i += len) {
                 float w_re = 1.0f;
                 float w_im = 0.0f;
                 const int half = len >> 1;
@@ -119,11 +118,11 @@ auto compute_spectrogram(const std::vector<std::vector<float>>& audio, int num_s
             }
         }
 
-        for (int k = 1; k < kHalfFft; ++k) {
+        for (int k = 1; k < k_half_fft; ++k) {
             const float r = re[static_cast<size_t>(k)];
             const float m = im[static_cast<size_t>(k)];
             mag[static_cast<size_t>(k)] =
-                std::sqrt(r * r + m * m) / (static_cast<float>(kFftSize) * 0.5f);
+                std::sqrt(r * r + m * m) / (static_cast<float>(k_fft_size) * 0.5f);
         }
 
         for (int b = 0; b < bins; ++b) {
@@ -132,9 +131,9 @@ auto compute_spectrogram(const std::vector<std::vector<float>>& audio, int num_s
             const float f1 = min_freq * std::pow(freq_ratio, static_cast<float>(b + 1) /
                                                                  static_cast<float>(bins));
             const int k0 =
-                std::clamp(static_cast<int>(std::floor(f0 * kFftSize / sr)), 1, kHalfFft - 1);
+                std::clamp(static_cast<int>(std::floor(f0 * k_fft_size / sr)), 1, k_half_fft - 1);
             const int k1 =
-                std::clamp(static_cast<int>(std::ceil(f1 * kFftSize / sr)), k0, kHalfFft - 1);
+                std::clamp(static_cast<int>(std::ceil(f1 * k_fft_size / sr)), k0, k_half_fft - 1);
             float peak = 0.0f;
             for (int k = k0; k <= k1; ++k) {
                 peak = std::max(peak, mag[static_cast<size_t>(k)]);

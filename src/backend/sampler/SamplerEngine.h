@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ISamplerBackend.h"
+#include "SamplerPrompter.h"
 #include "SamplerTypes.h"
 #include "TextTokenizer.h"
 #include "../dsp/RtGate.h"
@@ -15,7 +16,6 @@
 #include <mutex>
 #include <string>
 #include <thread>
-#include <utility>
 #include <vector>
 
 namespace netbender::sampler {
@@ -50,6 +50,8 @@ public:
     // Async generation control
     auto request_generate(const GenerationRequest& req) -> void;
     auto request_generate_slots(const GenerationRequest& base_req, uint32_t slot_mask) -> void;
+    auto request_generate_slots(const std::array<GenerationRequest, k_max_slots>& slot_reqs,
+                                uint32_t slot_mask) -> void;
     auto cancel_generation() -> void;
 
     // Active slot bank size (4, 8, or 12)
@@ -160,10 +162,12 @@ private:
     std::condition_variable m_worker_cv;
     bool m_stop_worker{false};
     bool m_has_pending_request{false};
-    GenerationRequest m_pending_request;
+    std::array<GenerationRequest, k_max_slots> m_pending_requests{};
     uint32_t m_pending_slot_mask{0x0Fu};
     std::atomic<bool> m_cancel_requested{false};
+    std::atomic<bool> m_clear_cache_pending{false};
     std::atomic<int> m_slot_count{4};
+    PromptEmbeddingCache m_prompt_cache;
 
     // Progress & slot state
     std::atomic<GenerationProgress::Stage> m_stage{GenerationProgress::Stage::Idle};

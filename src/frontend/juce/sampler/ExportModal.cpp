@@ -112,20 +112,20 @@ ExportModalContent::ExportModalContent(
     std::function<void(std::vector<int>, bool, float, float, SamplerExportFormat)>
         on_export_requested)
     : m_engine(engine),
-      m_slotCount(engine.get_slot_count()),
-      m_onExport(std::move(on_export_requested)) {
-    m_slotsHeaderLabel.setColour(juce::Label::textColourId, UIConstants::Colors::text_muted);
-    m_slotsHeaderLabel.setFont(juce::FontOptions(UIConstants::Typography::font_small));
-    addAndMakeVisible(m_slotsHeaderLabel);
+      m_slot_count(engine.get_slot_count()),
+      m_on_export(std::move(on_export_requested)) {
+    m_slots_header_label.setColour(juce::Label::textColourId, UIConstants::Colors::text_muted);
+    m_slots_header_label.setFont(juce::FontOptions(UIConstants::Typography::font_small));
+    addAndMakeVisible(m_slots_header_label);
 
-    m_selectAllBtn.onClick = [this]() { setAllPopulated(true); };
-    addAndMakeVisible(m_selectAllBtn);
+    m_select_all_btn.onClick = [this]() { set_all_populated(true); };
+    addAndMakeVisible(m_select_all_btn);
 
-    m_selectNoneBtn.onClick = [this]() { setAllPopulated(false); };
-    addAndMakeVisible(m_selectNoneBtn);
+    m_select_none_btn.onClick = [this]() { set_all_populated(false); };
+    addAndMakeVisible(m_select_none_btn);
 
-    for (int i = 0; i < m_slotCount; ++i) {
-        auto& tb = m_slotToggles[static_cast<size_t>(i)];
+    for (int i = 0; i < m_slot_count; ++i) {
+        auto& tb = m_slot_toggles[static_cast<size_t>(i)];
         const auto snap = m_engine.get_slot_snapshot(i);
         const bool has_audio = (snap && snap->num_samples > 0);
         juce::String text = "Slot " + juce::String(i + 1);
@@ -139,25 +139,25 @@ ExportModalContent::ExportModalContent(
         tb.setEnabled(has_audio);
         const bool checked = has_audio && (select_all_populated || i == initial_slot);
         tb.setToggleState(checked, juce::dontSendNotification);
-        tb.onClick = [this]() { refreshRangeAndState(); };
+        tb.onClick = [this]() { refresh_range_and_state(); };
         addAndMakeVisible(tb);
     }
 
-    m_formatLabel.setColour(juce::Label::textColourId, UIConstants::Colors::text_muted);
-    m_formatLabel.setFont(juce::FontOptions(UIConstants::Typography::font_small));
-    addAndMakeVisible(m_formatLabel);
+    m_format_label.setColour(juce::Label::textColourId, UIConstants::Colors::text_muted);
+    m_format_label.setFont(juce::FontOptions(UIConstants::Typography::font_small));
+    addAndMakeVisible(m_format_label);
 
-    m_formatCombo.addItem("WAV 24-bit PCM", 1);
-    m_formatCombo.addItem("WAV 16-bit PCM", 2);
-    m_formatCombo.addItem("WAV 32-bit Float", 3);
-    m_formatCombo.addItem("AIFF 24-bit", 4);
-    m_formatCombo.setSelectedId(1, juce::dontSendNotification);
-    addAndMakeVisible(m_formatCombo);
+    m_format_combo.addItem("WAV 24-bit PCM", 1);
+    m_format_combo.addItem("WAV 16-bit PCM", 2);
+    m_format_combo.addItem("WAV 32-bit Float", 3);
+    m_format_combo.addItem("AIFF 24-bit", 4);
+    m_format_combo.setSelectedId(1, juce::dontSendNotification);
+    addAndMakeVisible(m_format_combo);
 
-    m_applyRangeToggle.setButtonText("Apply selected range (per-slot loop points for multi)");
-    m_applyRangeToggle.setToggleState(initial_apply_range, juce::dontSendNotification);
-    m_applyRangeToggle.onClick = [this]() { refreshRangeAndState(); };
-    addAndMakeVisible(m_applyRangeToggle);
+    m_apply_range_toggle.setButtonText("Apply selected range (per-slot loop points for multi)");
+    m_apply_range_toggle.setToggleState(initial_apply_range, juce::dontSendNotification);
+    m_apply_range_toggle.onClick = [this]() { refresh_range_and_state(); };
+    addAndMakeVisible(m_apply_range_toggle);
 
     auto setup_range_slider = [this](juce::Label& lbl, juce::Slider& sl) {
         lbl.setColour(juce::Label::textColourId, UIConstants::Colors::text_muted);
@@ -168,56 +168,56 @@ ExportModalContent::ExportModalContent(
         sl.setTextValueSuffix(" s");
         addAndMakeVisible(sl);
     };
-    setup_range_slider(m_startLabel, m_startSlider);
-    setup_range_slider(m_endLabel, m_endSlider);
+    setup_range_slider(m_start_label, m_start_slider);
+    setup_range_slider(m_end_label, m_end_slider);
 
-    m_startSlider.onValueChange = [this]() {
-        if (m_startSlider.getValue() >= m_endSlider.getValue() - 0.01) {
-            m_endSlider.setValue(m_startSlider.getValue() + 0.01, juce::dontSendNotification);
+    m_start_slider.onValueChange = [this]() {
+        if (m_start_slider.getValue() >= m_end_slider.getValue() - 0.01) {
+            m_end_slider.setValue(m_start_slider.getValue() + 0.01, juce::dontSendNotification);
         }
     };
-    m_endSlider.onValueChange = [this]() {
-        if (m_endSlider.getValue() <= m_startSlider.getValue() + 0.01) {
-            m_startSlider.setValue(m_endSlider.getValue() - 0.01, juce::dontSendNotification);
+    m_end_slider.onValueChange = [this]() {
+        if (m_end_slider.getValue() <= m_start_slider.getValue() + 0.01) {
+            m_start_slider.setValue(m_end_slider.getValue() - 0.01, juce::dontSendNotification);
         }
     };
 
-    m_exportBtn.setColour(juce::TextButton::buttonColourId, UIConstants::Colors::violet);
-    m_exportBtn.onClick = [this]() {
-        std::vector<int> selected = selectedSlots();
+    m_export_btn.setColour(juce::TextButton::buttonColourId, UIConstants::Colors::violet);
+    m_export_btn.onClick = [this]() {
+        std::vector<int> selected = selected_slots();
         if (selected.empty()) {
             return;
         }
-        const bool apply = m_applyRangeToggle.getToggleState();
+        const bool apply = m_apply_range_toggle.getToggleState();
         float s_norm = 0.0f;
         float e_norm = 1.0f;
         if (selected.size() == 1 && apply) {
             const auto snap = m_engine.get_slot_snapshot(selected[0]);
             const float dur = snap ? std::max(0.01f, snap->duration_sec) : 1.0f;
-            s_norm = static_cast<float>(m_startSlider.getValue()) / dur;
-            e_norm = static_cast<float>(m_endSlider.getValue()) / dur;
+            s_norm = static_cast<float>(m_start_slider.getValue()) / dur;
+            e_norm = static_cast<float>(m_end_slider.getValue()) / dur;
         }
-        const auto fmt = static_cast<SamplerExportFormat>(m_formatCombo.getSelectedId());
+        const auto fmt = static_cast<SamplerExportFormat>(m_format_combo.getSelectedId());
         if (auto* dw = findParentComponentOfClass<juce::DialogWindow>()) {
             dw->exitModalState(0);
             dw->setVisible(false);
         }
-        if (m_onExport) {
-            m_onExport(std::move(selected), apply, s_norm, e_norm, fmt);
+        if (m_on_export) {
+            m_on_export(std::move(selected), apply, s_norm, e_norm, fmt);
         }
     };
-    addAndMakeVisible(m_exportBtn);
+    addAndMakeVisible(m_export_btn);
 
-    m_cancelBtn.onClick = [this]() {
+    m_cancel_btn.onClick = [this]() {
         if (auto* dw = findParentComponentOfClass<juce::DialogWindow>()) {
             dw->exitModalState(0);
             dw->setVisible(false);
         }
     };
-    addAndMakeVisible(m_cancelBtn);
+    addAndMakeVisible(m_cancel_btn);
 
-    refreshRangeAndState();
-    const int rows = (m_slotCount + 1) / 2;
+    refresh_range_and_state();
+    const int rows = (m_slot_count + 1) / 2;
     setSize(490, 250 + rows * 24);
 }
 
@@ -229,76 +229,76 @@ auto ExportModalContent::resized() -> void {
     auto area = getLocalBounds().reduced(16);
 
     auto top_row = area.removeFromTop(26);
-    m_slotsHeaderLabel.setBounds(top_row.removeFromLeft(140));
-    m_selectNoneBtn.setBounds(top_row.removeFromRight(90));
+    m_slots_header_label.setBounds(top_row.removeFromLeft(140));
+    m_select_none_btn.setBounds(top_row.removeFromRight(90));
     top_row.removeFromRight(6);
-    m_selectAllBtn.setBounds(top_row.removeFromRight(90));
+    m_select_all_btn.setBounds(top_row.removeFromRight(90));
 
     area.removeFromTop(6);
-    const int rows = (m_slotCount + 1) / 2;
+    const int rows = (m_slot_count + 1) / 2;
     auto grid_area = area.removeFromTop(rows * 24);
     const int col_w = grid_area.getWidth() / 2;
-    for (int i = 0; i < m_slotCount; ++i) {
+    for (int i = 0; i < m_slot_count; ++i) {
         const int r = i / 2;
         const int c = i % 2;
-        m_slotToggles[static_cast<size_t>(i)].setBounds(grid_area.getX() + c * col_w,
-                                                        grid_area.getY() + r * 24, col_w - 6, 22);
+        m_slot_toggles[static_cast<size_t>(i)].setBounds(grid_area.getX() + c * col_w,
+                                                         grid_area.getY() + r * 24, col_w - 6, 22);
     }
 
     area.removeFromTop(10);
     auto row2 = area.removeFromTop(28);
-    m_formatLabel.setBounds(row2.removeFromLeft(80));
-    m_formatCombo.setBounds(row2);
+    m_format_label.setBounds(row2.removeFromLeft(80));
+    m_format_combo.setBounds(row2);
 
     area.removeFromTop(10);
-    m_applyRangeToggle.setBounds(area.removeFromTop(26));
+    m_apply_range_toggle.setBounds(area.removeFromTop(26));
 
     area.removeFromTop(6);
     auto row3 = area.removeFromTop(26);
-    m_startLabel.setBounds(row3.removeFromLeft(80));
-    m_startSlider.setBounds(row3);
+    m_start_label.setBounds(row3.removeFromLeft(80));
+    m_start_slider.setBounds(row3);
 
     area.removeFromTop(6);
     auto row4 = area.removeFromTop(26);
-    m_endLabel.setBounds(row4.removeFromLeft(80));
-    m_endSlider.setBounds(row4);
+    m_end_label.setBounds(row4.removeFromLeft(80));
+    m_end_slider.setBounds(row4);
 
     auto bottom = area.removeFromBottom(32);
-    m_exportBtn.setBounds(bottom.removeFromRight(140));
+    m_export_btn.setBounds(bottom.removeFromRight(140));
     bottom.removeFromRight(8);
-    m_cancelBtn.setBounds(bottom.removeFromRight(90));
+    m_cancel_btn.setBounds(bottom.removeFromRight(90));
 }
 
-auto ExportModalContent::selectedSlots() const -> std::vector<int> {
+auto ExportModalContent::selected_slots() const -> std::vector<int> {
     std::vector<int> out;
-    for (int i = 0; i < m_slotCount; ++i) {
-        if (m_slotToggles[static_cast<size_t>(i)].getToggleState() &&
-            m_slotToggles[static_cast<size_t>(i)].isEnabled()) {
+    for (int i = 0; i < m_slot_count; ++i) {
+        if (m_slot_toggles[static_cast<size_t>(i)].getToggleState() &&
+            m_slot_toggles[static_cast<size_t>(i)].isEnabled()) {
             out.push_back(i);
         }
     }
     return out;
 }
 
-auto ExportModalContent::setAllPopulated(bool checked) -> void {
-    for (int i = 0; i < m_slotCount; ++i) {
-        auto& tb = m_slotToggles[static_cast<size_t>(i)];
+auto ExportModalContent::set_all_populated(bool checked) -> void {
+    for (int i = 0; i < m_slot_count; ++i) {
+        auto& tb = m_slot_toggles[static_cast<size_t>(i)];
         if (tb.isEnabled()) {
             tb.setToggleState(checked, juce::dontSendNotification);
         }
     }
-    refreshRangeAndState();
+    refresh_range_and_state();
 }
 
-auto ExportModalContent::refreshRangeAndState() -> void {
-    const auto sel = selectedSlots();
-    m_exportBtn.setEnabled(!sel.empty());
-    m_exportBtn.setButtonText(sel.size() > 1 ? ("EXPORT (" + juce::String(sel.size()) + ")...")
-                                             : "EXPORT...");
+auto ExportModalContent::refresh_range_and_state() -> void {
+    const auto sel = selected_slots();
+    m_export_btn.setEnabled(!sel.empty());
+    m_export_btn.setButtonText(sel.size() > 1 ? ("EXPORT (" + juce::String(sel.size()) + ")...")
+                                              : "EXPORT...");
 
-    const bool single_custom = (sel.size() == 1 && m_applyRangeToggle.getToggleState());
-    m_startSlider.setEnabled(single_custom);
-    m_endSlider.setEnabled(single_custom);
+    const bool single_custom = (sel.size() == 1 && m_apply_range_toggle.getToggleState());
+    m_start_slider.setEnabled(single_custom);
+    m_end_slider.setEnabled(single_custom);
 
     if (sel.size() == 1) {
         const int s_idx = sel[0];
@@ -306,9 +306,9 @@ auto ExportModalContent::refreshRangeAndState() -> void {
         const double dur = (snap && snap->num_samples > 0)
                                ? std::max(0.05, static_cast<double>(snap->duration_sec))
                                : 1.0;
-        m_startSlider.setRange(0.0, std::max(0.01, dur - 0.01), 0.01);
-        m_endSlider.setRange(0.01, dur, 0.01);
-        m_startSlider.setValue(m_engine.get_loop_start(s_idx) * dur, juce::dontSendNotification);
-        m_endSlider.setValue(m_engine.get_loop_end(s_idx) * dur, juce::dontSendNotification);
+        m_start_slider.setRange(0.0, std::max(0.01, dur - 0.01), 0.01);
+        m_end_slider.setRange(0.01, dur, 0.01);
+        m_start_slider.setValue(m_engine.get_loop_start(s_idx) * dur, juce::dontSendNotification);
+        m_end_slider.setValue(m_engine.get_loop_end(s_idx) * dur, juce::dontSendNotification);
     }
 }

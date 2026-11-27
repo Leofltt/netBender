@@ -54,6 +54,7 @@ auto SamplerEngine::load_bundle(const std::string& manifest_path, bool use_gpu) 
             return false;
         }
     }
+    m_clear_cache_pending.store(true, std::memory_order_release);
     m_stage.store(GenerationProgress::Stage::Idle, std::memory_order_release);
     return true;
 }
@@ -107,6 +108,16 @@ auto SamplerEngine::set_slot_count(int count) noexcept -> void {
 
 auto SamplerEngine::request_generate_slots(const GenerationRequest& base_req, uint32_t slot_mask)
     -> void {
+    std::array<GenerationRequest, k_max_slots> slot_reqs{};
+    for (int i = 0; i < k_max_slots; ++i) {
+        slot_reqs[static_cast<size_t>(i)] = base_req;
+        slot_reqs[static_cast<size_t>(i)].seed = base_req.seed + static_cast<uint64_t>(i);
+    }
+    request_generate_slots(slot_reqs, slot_mask);
+}
+
+auto SamplerEngine::request_generate_slots(
+    const std::array<GenerationRequest, k_max_slots>& slot_reqs, uint32_t slot_mask) -> void {
     const int count = get_slot_count();
     const uint32_t valid_mask = (count >= 32) ? 0xFFFFFFFFu : ((1u << count) - 1u);
     const uint32_t masked = slot_mask & valid_mask;
@@ -116,7 +127,7 @@ auto SamplerEngine::request_generate_slots(const GenerationRequest& base_req, ui
     m_cancel_requested.store(true, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(m_worker_mutex);
-        m_pending_request = base_req;
+        m_pending_requests = slot_reqs;
         m_pending_slot_mask = masked;
         m_has_pending_request = true;
         m_stage.store(GenerationProgress::Stage::Tokenizing, std::memory_order_release);
@@ -181,7 +192,11 @@ auto SamplerEngine::get_loop_end(int slot_idx) const noexcept -> float {
 }
 
 auto SamplerEngine::set_speed(float speed) noexcept -> void {
-    m_speed.store(std::clamp(speed, 0.25f, 4.0f), std::memory_order_release);
+    float clamped = std::clamp(speed, -2.0f, 2.0f);
+    if (std::abs(clamped) < 0.05f) {
+        clamped = (clamped < 0.0f) ? -0.05f : 0.05f;
+    }
+    m_speed.store(clamped, std::memory_order_release);
 }
 
 auto SamplerEngine::set_gain(float gain) noexcept -> void {
@@ -234,7 +249,7 @@ auto SamplerEngine::sample_linear(const std::vector<float>& ch, double pos) noex
 
 auto SamplerEngine::worker_loop() -> void {
     while (true) {
-        GenerationRequest base_req;
+        std::array<GenerationRequest, k_max_slots> slot_reqs{};
         uint32_t slot_mask = 0;
         {
             std::unique_lock<std::mutex> lock(m_worker_mutex);
@@ -242,7 +257,7 @@ auto SamplerEngine::worker_loop() -> void {
             if (m_stop_worker) {
                 break;
             }
-            base_req = m_pending_request;
+            slot_reqs = m_pending_requests;
             slot_mask = m_pending_slot_mask;
             m_has_pending_request = false;
             m_cancel_requested.store(false, std::memory_order_release);
@@ -268,8 +283,11 @@ auto SamplerEngine::worker_loop() -> void {
         }
 
         const int default_steps = std::max(1, m_backend->get_metadata().default_steps);
-        const int req_steps = base_req.steps > 0 ? base_req.steps : default_steps;
         m_batch_total.store(static_cast<int>(selected_slots.size()), std::memory_order_release);
+
+        if (m_clear_cache_pending.exchange(false, std::memory_order_acquire)) {
+            m_prompt_cache.clear();
+        }
 
         SamplerPrompter prompter(*m_backend, m_tokenizer);
         double total_elapsed_ms = 0.0;
@@ -277,22 +295,23 @@ auto SamplerEngine::worker_loop() -> void {
 
         for (size_t k = 0; k < selected_slots.size(); ++k) {
             const int slot_idx = selected_slots[k];
+            const GenerationRequest& slot_req = slot_reqs[static_cast<size_t>(slot_idx)];
+            const int req_steps = slot_req.steps > 0 ? slot_req.steps : default_steps;
             m_batch_current_slot.store(slot_idx, std::memory_order_release);
             m_batch_index.store(static_cast<int>(k + 1), std::memory_order_release);
             m_total_steps.store(req_steps, std::memory_order_release);
             m_current_step.store(0, std::memory_order_release);
             m_stage.store(GenerationProgress::Stage::Tokenizing, std::memory_order_release);
 
-            GenerationRequest slot_req = base_req;
-            slot_req.seed = base_req.seed + static_cast<uint64_t>(slot_idx);
-
             GeneratedSample generated;
             const bool ok = prompter.generate(
-                slot_req, generated, &m_cancel_requested, [this](const GenerationProgress& p) {
+                slot_req, generated, &m_cancel_requested,
+                [this](const GenerationProgress& p) {
                     m_current_step.store(p.current_step, std::memory_order_release);
                     m_total_steps.store(p.total_steps, std::memory_order_release);
                     m_stage.store(p.stage, std::memory_order_release);
-                });
+                },
+                &m_prompt_cache);
 
             if (!ok) {
                 const bool cancelled = m_cancel_requested.load(std::memory_order_acquire);
@@ -426,8 +445,16 @@ auto SamplerEngine::process_rt(float* const* out_channels, int num_channels,
         std::clamp(static_cast<int>(loop_end_norm * n_total), loop_start + 1, n_total);
     const int loop_len = std::max(1, loop_end - loop_start);
 
+    const double host_sr = std::max(1.0, m_host_sample_rate.load(std::memory_order_relaxed));
+    const double slot_sr = static_cast<double>(std::max(1, slot->sample_rate));
+    double speed = static_cast<double>(m_speed.load(std::memory_order_relaxed));
+    if (std::abs(speed) < 0.05) {
+        speed = (speed < 0.0) ? -0.05 : 0.05;
+    }
+    const bool reverse = (speed < 0.0);
+
     if (need_reset_playhead) {
-        m_playhead = static_cast<double>(loop_start);
+        m_playhead = reverse ? static_cast<double>(loop_end - 1) : static_cast<double>(loop_start);
         m_grain_pos[0] = m_playhead;
         m_grain_pos[1] = m_playhead;
         m_grain_phase = 0.0;
@@ -438,13 +465,11 @@ auto SamplerEngine::process_rt(float* const* out_channels, int num_channels,
         return;
     }
 
-    const double host_sr = std::max(1.0, m_host_sample_rate.load(std::memory_order_relaxed));
-    const double slot_sr = static_cast<double>(std::max(1, slot->sample_rate));
-    const double speed = static_cast<double>(m_speed.load(std::memory_order_relaxed));
     const double pitch_ratio = std::exp2(static_cast<double>(m_active_note - 60) / 12.0);
     const double pitch_step = (slot_sr / host_sr) * pitch_ratio;
+    const double grain_step = reverse ? -pitch_step : pitch_step;
     const double time_step = pitch_step * speed;
-    const bool use_time_stretch = (std::abs(speed - 1.0) >= 1e-3);
+    const bool use_time_stretch = (std::abs(std::abs(speed) - 1.0) >= 1e-3);
     const float gain = m_gain.load(std::memory_order_relaxed) * m_voice_vel;
 
     const bool loop_active =
@@ -453,8 +478,8 @@ auto SamplerEngine::process_rt(float* const* out_channels, int num_channels,
     const float release_step = 1.0f / 512.0f;
     const int slot_ch = static_cast<int>(slot->audio.size());
 
-    constexpr double kGrainSize = 2048.0;
-    constexpr float kTwoPi = 6.28318530717958647692f;
+    constexpr double k_grain_size = 2048.0;
+    constexpr float k_two_pi = 6.28318530717958647692f;
     auto wrap_pos_fn = [&](double p) -> double {
         if (loop_active) {
             double rel =
@@ -494,16 +519,29 @@ auto SamplerEngine::process_rt(float* const* out_channels, int num_channels,
         const float env_gain = gain * m_env;
         if (!use_time_stretch) {
             const double xfade_start = static_cast<double>(loop_end - xfade_len);
-            const bool in_xfade = loop_active && xfade_len > 0 && m_playhead >= xfade_start;
+            const double xfade_rev_end = static_cast<double>(loop_start + xfade_len);
+            const bool in_xfade =
+                loop_active && xfade_len > 0 &&
+                (reverse ? (m_playhead <= xfade_rev_end) : (m_playhead >= xfade_start));
             float w_curr = 1.0f;
             float w_wrap = 0.0f;
             double wrap_pos = static_cast<double>(loop_start);
             if (in_xfade) {
-                const float alpha = static_cast<float>((m_playhead - xfade_start) / xfade_len);
-                const float angle = std::clamp(alpha, 0.0f, 1.0f) * 1.5707963f;
-                w_curr = std::cos(angle);
-                w_wrap = std::sin(angle);
-                wrap_pos = static_cast<double>(loop_start) + (m_playhead - xfade_start);
+                if (reverse) {
+                    const float alpha =
+                        static_cast<float>((xfade_rev_end - m_playhead) / xfade_len);
+                    const float angle = std::clamp(alpha, 0.0f, 1.0f) * 1.5707963f;
+                    w_curr = std::cos(angle);
+                    w_wrap = std::sin(angle);
+                    wrap_pos =
+                        static_cast<double>(loop_end - xfade_len) + (m_playhead - loop_start);
+                } else {
+                    const float alpha = static_cast<float>((m_playhead - xfade_start) / xfade_len);
+                    const float angle = std::clamp(alpha, 0.0f, 1.0f) * 1.5707963f;
+                    w_curr = std::cos(angle);
+                    w_wrap = std::sin(angle);
+                    wrap_pos = static_cast<double>(loop_start) + (m_playhead - xfade_start);
+                }
             }
 
             for (int c = 0; c < num_channels; ++c) {
@@ -518,7 +556,7 @@ auto SamplerEngine::process_rt(float* const* out_channels, int num_channels,
                 out_channels[c][s] = val * env_gain;
             }
         } else {
-            const float w0 = 0.5f * (1.0f - std::cos(kTwoPi * static_cast<float>(m_grain_phase)));
+            const float w0 = 0.5f * (1.0f - std::cos(k_two_pi * static_cast<float>(m_grain_phase)));
             const float w1 = 1.0f - w0;
             const double gp0 = wrap_pos_fn(m_grain_pos[0]);
             const double gp1 = wrap_pos_fn(m_grain_pos[1]);
@@ -532,25 +570,25 @@ auto SamplerEngine::process_rt(float* const* out_channels, int num_channels,
                 out_channels[c][s] = val * env_gain;
             }
 
-            m_grain_pos[0] = wrap_pos_fn(m_grain_pos[0] + pitch_step);
-            m_grain_pos[1] = wrap_pos_fn(m_grain_pos[1] + pitch_step);
+            m_grain_pos[0] = wrap_pos_fn(m_grain_pos[0] + grain_step);
+            m_grain_pos[1] = wrap_pos_fn(m_grain_pos[1] + grain_step);
         }
 
         m_playhead += time_step;
-        if (m_playhead >= static_cast<double>(loop_end)) {
+        if (m_playhead >= static_cast<double>(loop_end) ||
+            m_playhead < static_cast<double>(loop_start)) {
             if (loop_active) {
-                m_playhead = static_cast<double>(loop_start) +
-                             std::fmod(m_playhead - static_cast<double>(loop_start),
-                                       static_cast<double>(loop_len));
+                m_playhead = wrap_pos_fn(m_playhead);
             } else {
                 m_playing.store(false, std::memory_order_relaxed);
-                m_playhead = static_cast<double>(loop_start);
+                m_playhead =
+                    reverse ? static_cast<double>(loop_end - 1) : static_cast<double>(loop_start);
             }
         }
 
         if (use_time_stretch) {
             const double prev_phase = m_grain_phase;
-            m_grain_phase += 1.0 / kGrainSize;
+            m_grain_phase += 1.0 / k_grain_size;
             if (prev_phase < 0.5 && m_grain_phase >= 0.5) {
                 m_grain_pos[1] = m_playhead;
             }

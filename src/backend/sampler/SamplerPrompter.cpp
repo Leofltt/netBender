@@ -1,7 +1,9 @@
 #include "SamplerPrompter.h"
 #include "DiffusionSchedule.h"
+#include "../bending/PromptBendingEngine.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -60,8 +62,8 @@ SamplerPrompter::SamplerPrompter(ISamplerBackend& backend, const TextTokenizer& 
     : m_backend(backend), m_tokenizer(tokenizer) {}
 
 auto SamplerPrompter::generate(const GenerationRequest& req, GeneratedSample& out,
-                               const std::atomic<bool>* cancel_flag, ProgressCallback progress_cb)
-    -> bool {
+                               const std::atomic<bool>* cancel_flag, ProgressCallback progress_cb,
+                               PromptEmbeddingCache* prompt_cache) -> bool {
     m_last_error.clear();
     out = GeneratedSample{};
     const auto t_start = std::chrono::steady_clock::now();
@@ -97,23 +99,85 @@ auto SamplerPrompter::generate(const GenerationRequest& req, GeneratedSample& ou
         return false;
     }
 
-    // 1. Tokenize positive (and optional negative) prompt
+    // 1. Check cancellation & CFG setup
     emit(GenerationProgress::Stage::Tokenizing, 0, steps, "Tokenizing prompt");
-    const TokenizedPrompt pos_tokens = m_tokenizer.encode(req.prompt);
     const bool cfg_active =
         (std::abs(cfg_scale - 1.0f) > 1e-5f) && !meta.cross_attn_cond_ids.empty();
 
-    // 2. Encode prompt and duration conditioning
+    // 2. Encode prompt (or A/B/C/D morph slots) with optional cache and duration conditioning
     emit(GenerationProgress::Stage::EncodingPrompt, 0, steps, "Encoding conditioning");
+    const auto& pb = req.prompt_bend;
+    netbender::bending::Xoshiro128Plus rng(req.seed);
+
+    auto encode_cached = [&](const std::string& text, PromptEmbedding& out_emb) -> bool {
+        if (prompt_cache != nullptr) {
+            const auto it = prompt_cache->find(text);
+            if (it != prompt_cache->end()) {
+                out_emb = it->second;
+                return true;
+            }
+        }
+        const TokenizedPrompt toks = m_tokenizer.encode(text);
+        if (!m_backend.encode_prompt(toks, out_emb)) {
+            return false;
+        }
+        if (prompt_cache != nullptr) {
+            if (prompt_cache->size() >= 16) {
+                prompt_cache->clear();
+            }
+            (*prompt_cache)[text] = out_emb;
+        }
+        return true;
+    };
+
     PromptEmbedding pos_embed;
-    if (!m_backend.encode_prompt(pos_tokens, pos_embed)) {
-        m_last_error = "encode_prompt failed: " + m_backend.get_last_error();
-        emit(GenerationProgress::Stage::Error, 0, steps, m_last_error);
-        return false;
+    std::array<PromptEmbedding, 4> bend_slots;
+    std::array<bool, 4> active_slots{false, false, false, false};
+    int second_active_slot = 0;
+    if (pb.enabled) {
+        int active_count = 0;
+        for (int s = 0; s < 4; ++s) {
+            const std::string& p_txt = pb.prompts[static_cast<size_t>(s)];
+            if (!p_txt.empty()) {
+                active_slots[static_cast<size_t>(s)] = true;
+                if (!encode_cached(p_txt, bend_slots[static_cast<size_t>(s)])) {
+                    m_last_error = "encode_prompt failed: " + m_backend.get_last_error();
+                    emit(GenerationProgress::Stage::Error, 0, steps, m_last_error);
+                    return false;
+                }
+                if (active_count == 1) {
+                    second_active_slot = s;
+                } else if (active_count == 0) {
+                    second_active_slot = s;
+                }
+                ++active_count;
+            }
+        }
+        if (active_count == 0) {
+            active_slots[0] = true;
+            if (!encode_cached(req.prompt, bend_slots[0])) {
+                m_last_error = "encode_prompt(A) failed: " + m_backend.get_last_error();
+                emit(GenerationProgress::Stage::Error, 0, steps, m_last_error);
+                return false;
+            }
+        }
+        pos_embed = netbender::bending::PromptBendingEngine::blend_embeddings_masked(
+            bend_slots, active_slots, pb.morph_x, pb.morph_y, pb.morph_law);
+        if (!pb.drift_per_step) {
+            netbender::bending::PromptBendingEngine::apply_embedding_dsp(pos_embed, pb, rng);
+        }
+    } else {
+        if (!encode_cached(req.prompt, pos_embed)) {
+            m_last_error = "encode_prompt failed: " + m_backend.get_last_error();
+            emit(GenerationProgress::Stage::Error, 0, steps, m_last_error);
+            return false;
+        }
     }
 
     std::vector<float> time_embed;
-    const float cond_duration_sec = std::min(max_dur, duration_sec + 2.0f);
+    const float cond_duration_sec = (pb.enabled && pb.duration_lie_sec > 0.0f)
+                                        ? std::clamp(pb.duration_lie_sec, 0.5f, max_dur)
+                                        : std::min(max_dur, duration_sec + 2.0f);
     if (!m_backend.encode_duration(cond_duration_sec, time_embed)) {
         m_last_error = "encode_duration failed: " + m_backend.get_last_error();
         emit(GenerationProgress::Stage::Error, 0, steps, m_last_error);
@@ -182,11 +246,27 @@ auto SamplerPrompter::generate(const GenerationRequest& req, GeneratedSample& ou
     const size_t latent_elems =
         static_cast<size_t>(latent_dim) * static_cast<size_t>(latent_frames);
     std::vector<float> x(latent_elems, 0.0f);
-    netbender::bending::Xoshiro128Plus rng(req.seed);
     fill_standard_normal(x.data(), latent_elems, rng);
+    if (pb.enabled && pb.latent_jitter > 1e-4f) {
+        const float a = std::clamp(pb.latent_jitter, 0.0f, 1.0f);
+        const float keep = std::sqrt(std::max(0.0f, 1.0f - a * a));
+        netbender::bending::Xoshiro128Plus jitter_rng(req.seed ^ 0x9E3779B97F4A7C15ULL);
+        std::vector<float> jitter(latent_elems, 0.0f);
+        fill_standard_normal(jitter.data(), latent_elems, jitter_rng);
+        for (size_t i = 0; i < latent_elems; ++i) {
+            x[i] = keep * x[i] + a * jitter[i];
+        }
+    }
 
-    const std::vector<float> sigmas =
+    std::vector<float> sigmas =
         build_schedule(steps, meta.dist_shift, effective_frames, 1.0f, true);
+    if (pb.enabled) {
+        netbender::bending::PromptBendingEngine::warp_schedule(sigmas, pb.schedule_warp);
+    }
+
+    const bool dynamic_step_cond = pb.enabled && (pb.drift_per_step || pb.step_morph_ab > 1e-4f);
+    std::vector<float> step_cross_attn = cross_attn_cond;
+    const float noise_scale = pb.enabled ? pb.pingpong_noise_scale : 1.0f;
 
     std::vector<float> v_cond(latent_elems, 0.0f);
     std::vector<float> v_uncond;
@@ -211,7 +291,29 @@ auto SamplerPrompter::generate(const GenerationRequest& req, GeneratedSample& ou
         emit(GenerationProgress::Stage::Diffusing, i + 1, steps,
              "Step " + std::to_string(i + 1) + "/" + std::to_string(steps));
 
-        if (!m_backend.run_dit_step(x.data(), latent_frames, t_curr, cross_attn_cond.data(),
+        const float* active_cross_attn = cross_attn_cond.data();
+        if (dynamic_step_cond) {
+            PromptEmbedding step_emb = pos_embed;
+            if (pb.step_morph_ab > 1e-4f) {
+                const float frac =
+                    (steps > 1) ? static_cast<float>(i) / static_cast<float>(steps - 1) : 1.0f;
+                const float t_ab = std::clamp(frac * pb.step_morph_ab, 0.0f, 1.0f);
+                const auto& target_emb = active_slots[1]
+                                             ? bend_slots[1]
+                                             : bend_slots[static_cast<size_t>(second_active_slot)];
+                step_emb = netbender::bending::PromptBendingEngine::blend_pair(
+                    pos_embed, target_emb, t_ab, pb.morph_law);
+            }
+            if (pb.drift_per_step) {
+                netbender::bending::PromptBendingEngine::apply_embedding_dsp(step_emb, pb, rng);
+            }
+            int step_seq_len = 0;
+            step_cross_attn = assemble_cross_attn(meta.cross_attn_cond_ids, step_emb, time_embed,
+                                                  cond_dim, step_seq_len);
+            active_cross_attn = step_cross_attn.data();
+        }
+
+        if (!m_backend.run_dit_step(x.data(), latent_frames, t_curr, active_cross_attn,
                                     cond_seq_len, global_cond.data(), global_dim,
                                     input_concat.data(), padding_mask.data(), v_cond.data())) {
             m_last_error = "run_dit_step failed at step " + std::to_string(i) + ": " +
@@ -239,7 +341,7 @@ auto SamplerPrompter::generate(const GenerationRequest& req, GeneratedSample& ou
 
         switch (sampler) {
             case SamplerAlgorithm::PingPong:
-                step_pingpong(x.data(), step_v, latent_elems, t_curr, t_next, rng);
+                step_pingpong(x.data(), step_v, latent_elems, t_curr, t_next, rng, noise_scale);
                 break;
             case SamplerAlgorithm::Euler:
                 step_euler(x.data(), step_v, latent_elems, t_curr, t_next);

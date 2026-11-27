@@ -41,7 +41,7 @@ auto blend_cfg_apg(const float* x, const float* v_cond, const float* v_uncond, i
                    float cfg_norm_threshold, const uint8_t* padding_mask, float* v_out) -> void;
 
 auto step_pingpong(float* x, const float* v_pred, size_t count, float t_curr, float t_next,
-                   netbender::bending::Xoshiro128Plus& rng) -> void;
+                   netbender::bending::Xoshiro128Plus& rng, float noise_scale = 1.0f) -> void;
 
 auto step_euler(float* x, const float* v_pred, size_t count, float t_curr, float t_next) -> void;
 

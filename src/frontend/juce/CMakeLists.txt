@@ -246,6 +246,8 @@ target_sources(netbender_sampler PRIVATE
     sampler/WaveformView.h
     sampler/ExportModal.cpp
     sampler/ExportModal.h
+    sampler/PromptBendPanel.cpp
+    sampler/PromptBendPanel.h
     sampler/SamplerMainComponent.cpp
     sampler/SamplerMainComponent.h
     ui/FlatLookAndFeel.cpp

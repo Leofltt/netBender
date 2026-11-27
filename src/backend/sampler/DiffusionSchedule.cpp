@@ -282,19 +282,26 @@ auto blend_cfg_apg(const float* x, const float* v_cond, const float* v_uncond, i
 }
 
 auto step_pingpong(float* x, const float* v_pred, size_t count, float t_curr, float t_next,
-                   netbender::bending::Xoshiro128Plus& rng) -> void {
+                   netbender::bending::Xoshiro128Plus& rng, float noise_scale) -> void {
     if (x == nullptr || v_pred == nullptr || count == 0) {
         return;
     }
 
     const float one_minus_next = 1.0f - t_next;
+    const float n_scale = std::max(0.0f, noise_scale);
     std::vector<float> eps;
-    if (t_next != 0.0f) {
+    if (t_next != 0.0f && n_scale > 0.0f) {
         eps.resize(count);
         fill_standard_normal(eps.data(), count, rng);
+        const float scaled_next = t_next * n_scale;
         for (size_t i = 0; i < count; ++i) {
             const float denoised = x[i] - t_curr * v_pred[i];
-            x[i] = one_minus_next * denoised + t_next * eps[i];
+            x[i] = one_minus_next * denoised + scaled_next * eps[i];
+        }
+    } else if (t_next != 0.0f) {
+        for (size_t i = 0; i < count; ++i) {
+            const float denoised = x[i] - t_curr * v_pred[i];
+            x[i] = one_minus_next * denoised;
         }
     } else {
         for (size_t i = 0; i < count; ++i) {

@@ -255,9 +255,6 @@ export_bendable_pte(
 
 ### 4. Exporting Stable Audio 3 Sampler Bundles (`.nbsampler.json`, WIP)
 
-> [!NOTE]
-> **Current Status**: **Phase 0** (CoreML `.pte` + XNNPACK + ONNX export) and **Phase 1** (headless C++20 ExecuTorch prompter: `TextTokenizer`, `DiffusionSchedule`, `SamplerBundleLoader`, `ExecuTorchSamplerBackend`, and `SamplerPrompter`) are complete and verified end-to-end on real `small-music` and `small-sfx` CoreML `.pte` bundles (`test_sampler_core` + `test_sampler_e2e`). **Phase 2** (JUCE Sampler UI + wait-free playback) and **Phase 3** (Dual-Axis Prompt Bending) are next — see [docs/SA3_SAMPLER_PLAN.md](docs/SA3_SAMPLER_PLAN.md).
-
 1. **Download SA3 checkpoints & shared T5Gemma tokenizer locally** (requires HuggingFace access to Stability AI's repos):
    ```bash
    .venv/bin/python3 scripts/download_sa3_models.py
@@ -289,6 +286,12 @@ This produces a self-contained `.nbsampler.json` bundle (`text_encoder`, `number
    ./build/tests/test_sampler_e2e \
        models/sa3_small_music/sa3_small_music.nbsampler.json \
        --prompt "Amen break 174 BPM" --duration 6.0 --out out/sa3_music_test.wav
+   ```
+
+4. **Build & launch the `NetBenderSampler` standalone app** (4/8/12-slot grid, vim `h/j/k/l` + `Space` + `g` navigation, spectrogram/waveform toggle, loop handles, bidirectional `-2x..+2x` pitch-preserving speed, 2D 1–4 prompt morphing & trajectory bending, MIDI, and multi-slot WAV/AIFF export):
+   ```bash
+   cmake --build build --target sampler_standalone -j
+   ./build/frontend/juce/netbender_sampler_artefacts/Release/Standalone/NetBenderSampler.app/Contents/MacOS/NetBenderSampler
    ```
 
 ---
@@ -430,7 +433,7 @@ NetBender includes a fast, self-contained CTest unit test suite that runs in sec
 | `test_resampling_spsc` | `NetBender::dsp` | `ResamplingRingBuffer` & `ResamplingRingBufferBank` (`Bypass`, `OnPush`, `OnPull`), round-trip SNR ($> 55\text{ dB}$), chunked pulls exceeding scratch size, 4-ch quadrature phase lock, `double*` host I/O, and 2-thread SPSC stress. |
 | `test_streaming_engine` | `NetBender::backend` | End-to-end `StreamingEngine` verification: sync & async streaming (resampling ON/OFF), dry/wet latency compensation cancellation ($> 46\text{ dB}$ null), `double*` batched `RawMethod`, generative `"prior"` & `"decode gen"`, concurrent live reconfiguration, and `SafetySentry` recovery. |
 | `test_bending` | `NetBender::backend` | `Xoshiro128Plus` PRNG determinism, `BendingManager` layer classification/drift/bridging/triggers, `LatentTerrainEngine` (`FourierOrbit`, `LatentSlew`, `Quantize`), `NetBenderSession` streaming & JSON state round-trip, and `NETBENDER_NONBLOCKING` RTSan safety. |
-| `test_sampler_core` | `NetBender::backend` | Pure-C++20 `TextTokenizer` (Unigram Viterbi + Metaspace + BPE), `DiffusionSchedule` (`LogSNRShift`/`Flux`/`Full`, APG/CFG, `PingPong`/`Euler`/`DpmPP`), `SamplerBundleLoader`, and `SamplerPrompter` end-to-end/CFG/cancellation. |
+| `test_sampler_core` | `NetBender::backend` | Pure-C++20 `TextTokenizer` (Unigram Viterbi + Metaspace + BPE), `DiffusionSchedule` (`LogSNRShift`/`Flux`/`Full`, APG/CFG, `PingPong`/`Euler`/`DpmPP`), `SamplerBundleLoader`, `SamplerPrompter`, and `SamplerEngine` multi-slot async generation, playback, and spectrogram checks. |
 | `test_resampler_parity` | `NetBender::dsp` + `juce::juce_audio_basics` | Direct bit-exact sample-by-sample parity of `Resampler` against `juce::CatmullRomInterpolator` ($\le 10^{-6}$) and `juce::LinearInterpolator` ($\le 2 \times 10^{-6}$), random block-boundary seam continuity, round-trip impulse group delay, and $10^6$-sample phase accumulation. |
 | `test_rtsan` | `NetBender::dsp` + `NetBenderAudioProcessor` | Headless DSP primitive smoke checks and `NetBenderAudioProcessor::processBlock` bypass + JSON preset save/load round-trip (plus loaded-model streaming when a model path argument is passed). |
 | `test_csound_adapter` *(via `csound_tests`)* | `CsoundSessionAdapter` + `NetBender::backend` | Model path resolution, `-b`/`-B`/`ksmps` sizing, resampling & `0dbfs`, `encode`/`decode`/`gen`, multi-layer RT bends/bridges/resets, triggers, latent terrain, triple-buffered raw weights, JSON preset save/load, and backend attributes. |

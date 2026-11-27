@@ -31,25 +31,25 @@ public:
     auto resized() -> void override;
 
 private:
-    [[nodiscard]] auto selectedSlots() const -> std::vector<int>;
-    auto setAllPopulated(bool checked) -> void;
-    auto refreshRangeAndState() -> void;
+    [[nodiscard]] auto selected_slots() const -> std::vector<int>;
+    auto set_all_populated(bool checked) -> void;
+    auto refresh_range_and_state() -> void;
 
     const netbender::sampler::SamplerEngine& m_engine;
-    int m_slotCount{4};
-    std::function<void(std::vector<int>, bool, float, float, SamplerExportFormat)> m_onExport;
+    int m_slot_count{4};
+    std::function<void(std::vector<int>, bool, float, float, SamplerExportFormat)> m_on_export;
 
-    juce::Label m_slotsHeaderLabel{"", "SLOTS TO EXPORT"};
-    juce::TextButton m_selectAllBtn{"ALL"};
-    juce::TextButton m_selectNoneBtn{"NONE"};
-    std::array<juce::ToggleButton, netbender::sampler::SamplerEngine::k_max_slots> m_slotToggles;
-    juce::Label m_formatLabel{"", "FORMAT"};
-    juce::ComboBox m_formatCombo;
-    juce::ToggleButton m_applyRangeToggle;
-    juce::Label m_startLabel{"", "START"};
-    juce::Slider m_startSlider;
-    juce::Label m_endLabel{"", "END"};
-    juce::Slider m_endSlider;
-    juce::TextButton m_exportBtn{"EXPORT..."};
-    juce::TextButton m_cancelBtn{"CANCEL"};
+    juce::Label m_slots_header_label{"", "SLOTS TO EXPORT"};
+    juce::TextButton m_select_all_btn{"ALL"};
+    juce::TextButton m_select_none_btn{"NONE"};
+    std::array<juce::ToggleButton, netbender::sampler::SamplerEngine::k_max_slots> m_slot_toggles;
+    juce::Label m_format_label{"", "FORMAT"};
+    juce::ComboBox m_format_combo;
+    juce::ToggleButton m_apply_range_toggle;
+    juce::Label m_start_label{"", "START"};
+    juce::Slider m_start_slider;
+    juce::Label m_end_label{"", "END"};
+    juce::Slider m_end_slider;
+    juce::TextButton m_export_btn{"EXPORT..."};
+    juce::TextButton m_cancel_btn{"CANCEL"};
 };

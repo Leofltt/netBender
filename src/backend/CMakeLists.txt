@@ -60,6 +60,7 @@ add_library(netbender_backend STATIC
   engine/NetBenderSession.cpp
   bending/BendingManager.cpp
   bending/LatentTerrainEngine.cpp
+  bending/PromptBendingEngine.cpp
   sampler/SamplerBundleLoader.cpp
   sampler/TextTokenizer.cpp
   sampler/DiffusionSchedule.cpp

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -106,6 +107,33 @@ struct PromptEmbedding {
     int cond_dim{0};
 };
 
+/** 2D semantic morph interpolation laws for `PromptBendingEngine`. */
+enum class PromptMorphLaw {
+    Slerp,
+    Linear,
+    TokenSplice,
+    FreqSplit,
+};
+
+/** Parameters for embedding-space & diffusion trajectory bending (`Phase 3 — Axis A`). */
+struct PromptBendingConfig {
+    bool enabled{false};
+    std::array<std::string, 4> prompts{};  // [A, B, C, D]; empty B/C/D fall back to A
+    float morph_x{0.0f};                   // [0..1] A->B / C->D
+    float morph_y{0.0f};                   // [0..1] AB->CD
+    PromptMorphLaw morph_law{PromptMorphLaw::Slerp};
+    float emb_drift{0.0f};
+    bool drift_per_step{false};
+    float latent_jitter{0.0f};   // [0..1] variance-preserving initial latent noise blend
+    float token_dropout{0.0f};   // [0..0.85] random token masking probability
+    int emb_quantize_levels{0};  // 0 = off, 2..64
+    float emb_wavefold{0.0f};
+    float duration_lie_sec{0.0f};  // <= 0 = off
+    float step_morph_ab{0.0f};     // [0..1] early-step A -> late-step B sweep
+    float schedule_warp{1.0f};
+    float pingpong_noise_scale{1.0f};
+};
+
 /** User parameters for a single text-to-audio generation pass. */
 struct GenerationRequest {
     std::string prompt;
@@ -119,6 +147,7 @@ struct GenerationRequest {
     bool use_default_sampler{true};
     uint64_t seed{42};
     bool decode_audio{true};
+    PromptBendingConfig prompt_bend;
 };
 
 /** Fine-grained generation stage and step progress emitted during sampling. */
