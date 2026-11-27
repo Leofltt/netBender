@@ -269,6 +269,7 @@ target_compile_definitions(netbender_sampler PRIVATE
     NOMINMAX=1
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
+    $<$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>:NETBENDER_DEV_PROMPTS=1>
 )
 set_target_properties(netbender_sampler PROPERTIES
     CXX_STANDARD 20

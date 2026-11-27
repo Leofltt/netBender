@@ -15,6 +15,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <filesystem>
 
 namespace {
 
@@ -311,7 +312,8 @@ auto test_bundle_loader_validation() -> void {
     CHECK(meta.delegate == "coreml");
     CHECK(meta.compiled_latent_frames == 128);
     CHECK(meta.default_sampler == SamplerAlgorithm::PingPong);
-    CHECK(meta.ae_decode_model == "/tmp/bundle/ae_decode.pte");
+    CHECK(std::filesystem::path(meta.ae_decode_model).generic_string() ==
+          "/tmp/bundle/ae_decode.pte");
 
     // Reject wrong format
     const std::string bad_format = R"({"format":"wrong","version":1,"runtime":"executorch"})";

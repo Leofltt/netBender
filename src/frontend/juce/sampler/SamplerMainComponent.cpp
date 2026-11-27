@@ -213,6 +213,7 @@ SamplerMainComponent::SamplerMainComponent(const juce::String& initial_bundle_pa
     };
     addAndMakeVisible(m_bend_panel);
 
+#if defined(DEBUG) || defined(_DEBUG) || defined(NETBENDER_DEV_PROMPTS)
     juce::File dev_prompts =
         juce::File::getCurrentWorkingDirectory().getChildFile("dev_prompts.txt");
     if (!dev_prompts.existsAsFile()) {
@@ -245,6 +246,7 @@ SamplerMainComponent::SamplerMainComponent(const juce::String& initial_bundle_pa
             m_prompt_editors[static_cast<size_t>(i)].setText(prompts[i], false);
         }
     }
+#endif
 
     for (auto& st : m_slot_bend_states) {
         st.config.enabled = true;
@@ -528,10 +530,12 @@ auto SamplerMainComponent::trigger_generation(uint32_t override_slot_mask) -> vo
             const bool is_empty = (!snap || snap->num_samples <= 0);
             st = is_empty ? active_state : m_slot_bend_states[static_cast<size_t>(i)];
             if (is_empty) {
+                const int col = i % cols;
+                const int row = i / cols;
                 const float gx =
-                    (cols > 1) ? static_cast<float>(i % cols) / static_cast<float>(cols - 1) : 0.0f;
+                    (cols > 1) ? static_cast<float>(col) / static_cast<float>(cols - 1) : 0.0f;
                 const float gy =
-                    (rows > 1) ? static_cast<float>(i / cols) / static_cast<float>(rows - 1) : 0.0f;
+                    (rows > 1) ? static_cast<float>(row) / static_cast<float>(rows - 1) : 0.0f;
                 st.config.morph_x = gx;
                 st.config.morph_y = gy;
             }
