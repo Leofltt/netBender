@@ -109,6 +109,25 @@ def main():
     migrate_pte_parser.add_argument("--channels", type=int, default=None, help="Override channel count")
     migrate_pte_parser.add_argument("--filter", nargs="+", default=None, help="Optional layer filter substrings")
 
+    # Stable Audio 3 Sampler Bundle
+    sa3_parser = subparsers.add_parser("sa3_sampler", help="Export Stable Audio 3 multi-component Sampler bundle (.nbsampler.json)")
+    sa3_parser.add_argument("--variant", type=str, default=None, help="SA3 variant (e.g. small-music, small-sfx, small-music-base, medium)")
+    sa3_parser.add_argument("-i", "--checkpoint", type=str, default=None, help="Path to local SA3 .safetensors checkpoint")
+    sa3_parser.add_argument("--config", type=str, default=None, help="Path to local SA3 model_config.json")
+    sa3_parser.add_argument("--tokenizer", type=str, default=None, help="Path to local tokenizer.json")
+    sa3_parser.add_argument("--t5-path", type=str, default=None, help="Optional local T5Gemma folder (avoids HF download)")
+    sa3_parser.add_argument("-o", "--output", type=str, default="models/sa3_sampler", help="Output bundle directory")
+    sa3_parser.add_argument("--stem", type=str, default=None, help="Bundle filename stem")
+    sa3_parser.add_argument("--format", type=str, choices=["pte", "onnx", "both"], default="pte", help="Export format (default: pte)")
+    sa3_parser.add_argument("--delegate", type=str, choices=["coreml", "xnnpack", "portable"], default="coreml", help="ExecuTorch delegate (default: coreml)")
+    sa3_parser.add_argument("--precision", type=str, choices=["float16", "float32"], default="float16", help="CoreML compute precision (default: float16)")
+    sa3_parser.add_argument("--latent-frames", type=int, default=128, help="Compiled latent frame bucket for .pte export (default: 128)")
+    sa3_parser.add_argument("--bend-mode", type=str, choices=["delegate", "full", "none"], default="none", help="Weight promotion mode: none (prompt-only, fastest), delegate (Phase 3 bending), full (default: none)")
+    sa3_parser.add_argument("--no-conditioning-heads", action="store_true", help="Do not promote conditioning projection heads in delegate mode")
+    sa3_parser.add_argument("--filter", nargs="+", default=None, help="Optional layer filter substrings")
+    sa3_parser.add_argument("--max-duration", type=float, default=30.0, help="Max generation duration in seconds (default: 30.0)")
+    sa3_parser.add_argument("--verify", action="store_true", help="Run numerical parity and bending verification after export")
+
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
@@ -195,6 +214,26 @@ def main():
             channels=args.channels,
             layer_filter=args.filter,
             verbose=True,
+        )
+    elif args.command == "sa3_sampler":
+        from python_tools.exporters.sa3_sampler_exporter import export_sa3_sampler
+        export_sa3_sampler(
+            variant=args.variant,
+            checkpoint_path=args.checkpoint,
+            config_path=args.config,
+            tokenizer_json_path=args.tokenizer,
+            t5_model_path=args.t5_path,
+            output_dir=args.output,
+            stem=args.stem,
+            format=args.format,
+            delegate=args.delegate,
+            compute_precision=args.precision,
+            bend_mode=args.bend_mode,
+            promote_conditioning_heads=not args.no_conditioning_heads,
+            layer_filter=args.filter,
+            max_duration_sec=args.max_duration,
+            dummy_latent_frames=args.latent_frames,
+            verify=args.verify,
         )
 
 

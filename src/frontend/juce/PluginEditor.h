@@ -7,7 +7,6 @@
 #include "ui/SidePanelComponent.h"
 #include "ui/WeightBendingComponent.h"
 #include "ui/LatentTerrainComponent.h"
-#include <vector>
 
 class NetBenderAudioProcessorEditor : public juce::AudioProcessorEditor,
                                       public juce::ComboBox::Listener,

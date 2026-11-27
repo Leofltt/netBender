@@ -5,7 +5,6 @@
 #include <array>
 #include <atomic>
 #include <cmath>
-#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <thread>

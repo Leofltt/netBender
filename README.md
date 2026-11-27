@@ -112,6 +112,13 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
+If you are exporting **Stable Audio 3 Sampler** bundles (`sa3_sampler`), install `stable-audio-3` with `--no-deps` so its pinned `torch==2.7.1` requirement does not downgrade the `torch>=2.11.0,<=2.12.1` version required by `executorch`:
+
+```bash
+uv pip install --no-deps "stable-audio-3 @ git+https://github.com/Stability-AI/stable-audio-3.git"
+# (or: .venv/bin/pip install --no-deps "stable-audio-3 @ git+https://github.com/Stability-AI/stable-audio-3.git")
+```
+
 ### 1. Exporting to ExecuTorch (`.pte`) & Migrating `.ts` Models
 
 ExecuTorch exports support three bend promotion modes (`--bend-mode`) and four hardware delegates (`--delegate {coreml,mps,xnnpack,portable}`):
@@ -245,6 +252,47 @@ export_bendable_pte(
     extra_metadata={"sr": 48000, "in_dim": 1, "out_dim": 1, "higher_ratio": 2048},
 )
 ```
+
+### 4. Exporting Stable Audio 3 Sampler Bundles (`.nbsampler.json`, WIP)
+
+1. **Download SA3 checkpoints & shared T5Gemma tokenizer locally** (requires HuggingFace access to Stability AI's repos):
+   ```bash
+   .venv/bin/python3 scripts/download_sa3_models.py
+   ```
+2. **Export CoreML ExecuTorch `.pte` bundles** (`small-music` and `small-sfx`, prompt-only `--bend-mode none`, `float16` precision, 128 latent frames):
+   ```bash
+   .venv/bin/python3 python_tools/export_cli.py sa3_sampler \
+       --variant small-music \
+       -i models/checkpoints/sa3_small_music/model.safetensors \
+       --config models/checkpoints/sa3_small_music/model_config.json \
+       --tokenizer models/checkpoints/t5gemma-b-b-ul2/tokenizer.json \
+       --format pte --delegate coreml --precision float16 --bend-mode none \
+       --latent-frames 128 -o models/sa3_small_music
+
+   .venv/bin/python3 python_tools/export_cli.py sa3_sampler \
+       --variant small-sfx \
+       -i models/checkpoints/sa3_small_sfx/model.safetensors \
+       --config models/checkpoints/sa3_small_sfx/model_config.json \
+       --tokenizer models/checkpoints/t5gemma-b-b-ul2/tokenizer.json \
+       --format pte --delegate coreml --precision float16 --bend-mode none \
+       --latent-frames 128 -o models/sa3_small_sfx
+   ```
+
+This produces a self-contained `.nbsampler.json` bundle (`text_encoder`, `number_cond`, `dit`, `same_s` + `_encode`/`_decode`, and `tokenizer.json`).
+
+3. **Run headless C++20 prompt-to-WAV synthesis** via `test_sampler_e2e`:
+   ```bash
+   cmake --build build --target test_sampler_e2e -j
+   ./build/tests/test_sampler_e2e \
+       models/sa3_small_music/sa3_small_music.nbsampler.json \
+       --prompt "Amen break 174 BPM" --duration 6.0 --out out/sa3_music_test.wav
+   ```
+
+4. **Build & launch the `NetBenderSampler` standalone app** (4/8/12-slot grid, vim `h/j/k/l` + `Space` + `g` navigation, spectrogram/waveform toggle, loop handles, bidirectional `-2x..+2x` pitch-preserving speed, 2D 1–4 prompt morphing & trajectory bending, MIDI, and multi-slot WAV/AIFF export):
+   ```bash
+   cmake --build build --target sampler_standalone -j
+   ./build/frontend/juce/netbender_sampler_artefacts/Release/Standalone/NetBenderSampler.app/Contents/MacOS/NetBenderSampler
+   ```
 
 ---
 
@@ -385,6 +433,7 @@ NetBender includes a fast, self-contained CTest unit test suite that runs in sec
 | `test_resampling_spsc` | `NetBender::dsp` | `ResamplingRingBuffer` & `ResamplingRingBufferBank` (`Bypass`, `OnPush`, `OnPull`), round-trip SNR ($> 55\text{ dB}$), chunked pulls exceeding scratch size, 4-ch quadrature phase lock, `double*` host I/O, and 2-thread SPSC stress. |
 | `test_streaming_engine` | `NetBender::backend` | End-to-end `StreamingEngine` verification: sync & async streaming (resampling ON/OFF), dry/wet latency compensation cancellation ($> 46\text{ dB}$ null), `double*` batched `RawMethod`, generative `"prior"` & `"decode gen"`, concurrent live reconfiguration, and `SafetySentry` recovery. |
 | `test_bending` | `NetBender::backend` | `Xoshiro128Plus` PRNG determinism, `BendingManager` layer classification/drift/bridging/triggers, `LatentTerrainEngine` (`FourierOrbit`, `LatentSlew`, `Quantize`), `NetBenderSession` streaming & JSON state round-trip, and `NETBENDER_NONBLOCKING` RTSan safety. |
+| `test_sampler_core` | `NetBender::backend` | Pure-C++20 `TextTokenizer` (Unigram Viterbi + Metaspace + BPE), `DiffusionSchedule` (`LogSNRShift`/`Flux`/`Full`, APG/CFG, `PingPong`/`Euler`/`DpmPP`), `SamplerBundleLoader`, `SamplerPrompter`, and `SamplerEngine` multi-slot async generation, playback, and spectrogram checks. |
 | `test_resampler_parity` | `NetBender::dsp` + `juce::juce_audio_basics` | Direct bit-exact sample-by-sample parity of `Resampler` against `juce::CatmullRomInterpolator` ($\le 10^{-6}$) and `juce::LinearInterpolator` ($\le 2 \times 10^{-6}$), random block-boundary seam continuity, round-trip impulse group delay, and $10^6$-sample phase accumulation. |
 | `test_rtsan` | `NetBender::dsp` + `NetBenderAudioProcessor` | Headless DSP primitive smoke checks and `NetBenderAudioProcessor::processBlock` bypass + JSON preset save/load round-trip (plus loaded-model streaming when a model path argument is passed). |
 | `test_csound_adapter` *(via `csound_tests`)* | `CsoundSessionAdapter` + `NetBender::backend` | Model path resolution, `-b`/`-B`/`ksmps` sizing, resampling & `0dbfs`, `encode`/`decode`/`gen`, multi-layer RT bends/bridges/resets, triggers, latent terrain, triple-buffered raw weights, JSON preset save/load, and backend attributes. |

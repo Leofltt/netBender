@@ -12,19 +12,17 @@ Produces three synchronized artifacts:
 3. `<model>.json`: Model & method metadata + promoted parameter ordering
 """
 
-import argparse
 import json
 import os
 import struct
-import sys
-from typing import Any, Dict, List, Optional, Tuple
-
 import types
+from typing import Any
+
 import numpy as np
-import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
+import torch
+from torch import nn
 
 DELEGATE_SAFE_KEYWORDS = (
     "norm",
@@ -48,7 +46,7 @@ def is_bendable_parameter(
     name: str,
     param: torch.Tensor,
     bend_mode: str = "delegate",
-    layer_filter: Optional[List[str]] = None,
+    layer_filter: list[str] | None = None,
     min_elements: int = 1,
 ) -> bool:
     """
@@ -104,7 +102,7 @@ class FunctionalPromotedWrapper(nn.Module):
     def __init__(
         self,
         base_module: nn.Module,
-        promoted_names: List[str],
+        promoted_names: list[str],
         method_name: str = "forward",
     ):
         super().__init__()
@@ -140,7 +138,7 @@ class FunctionalPromotedWrapper(nn.Module):
                 def _conv_t1d_fwd(self_mod, inp, output_size=None):
                     out_pad = self_mod._output_padding(
                         inp, output_size, self_mod.stride, self_mod.padding,
-                        self_mod.kernel_size, self_mod.num_spatial_dims, self_mod.dilation
+                        self_mod.kernel_size, 1, self_mod.dilation
                     )
                     out = F.conv_transpose1d(
                         inp, self_mod.weight, None, self_mod.stride,
@@ -152,7 +150,7 @@ class FunctionalPromotedWrapper(nn.Module):
                 sub.forward = types.MethodType(_conv_t1d_fwd, sub)
 
     def forward(self, x: torch.Tensor, *promoted_tensors: torch.Tensor) -> torch.Tensor:
-        param_override: Dict[str, torch.Tensor] = {}
+        param_override: dict[str, torch.Tensor] = {}
         for name, tensor in zip(self.promoted_names, promoted_tensors):
             param_override[name] = tensor
 
@@ -168,14 +166,43 @@ class FunctionalPromotedWrapper(nn.Module):
                 self.base_module.forward = orig_forward
 
 
+class MultiInputFunctionalPromotedWrapper(nn.Module):
+    """
+    Wraps a multi-input `nn.Module` so that selected parameters become explicit trailing
+    positional arguments `forward(*model_inputs, *promoted_params)` routed via
+    `torch.func.functional_call`.
+    """
+
+    def __init__(
+        self,
+        base_module: nn.Module,
+        promoted_names: list[str],
+        num_model_inputs: int,
+    ):
+        super().__init__()
+        self.base_module = base_module
+        self.promoted_names = list(promoted_names)
+        self.num_model_inputs = int(num_model_inputs)
+        FunctionalPromotedWrapper._decouple_conv_biases(self.base_module)
+
+    def forward(self, *args: torch.Tensor) -> torch.Tensor:
+        model_inputs = args[: self.num_model_inputs]
+        promoted_tensors = args[self.num_model_inputs :]
+        param_override: dict[str, torch.Tensor] = {}
+        for name, tensor in zip(self.promoted_names, promoted_tensors):
+            param_override[name] = tensor
+        return torch.func.functional_call(self.base_module, param_override, model_inputs)
+
+
 def select_promoted_parameters(
     module: nn.Module,
     bend_mode: str = "delegate",
-    layer_filter: Optional[List[str]] = None,
-) -> Tuple[List[str], List[torch.Tensor]]:
+    layer_filter: list[str] | None = None,
+    max_promoted_layers: int | None = None,
+) -> tuple[list[str], list[torch.Tensor]]:
     """Returns `(promoted_names, promoted_tensors)` in deterministic model order."""
-    promoted_names: List[str] = []
-    promoted_tensors: List[torch.Tensor] = []
+    promoted_names: list[str] = []
+    promoted_tensors: list[torch.Tensor] = []
 
     for name, param in module.named_parameters():
         if is_bendable_parameter(name, param, bend_mode=bend_mode, layer_filter=layer_filter):
@@ -189,14 +216,36 @@ def select_promoted_parameters(
                 promoted_names.append(name)
                 promoted_tensors.append(param.detach().clone().float().contiguous())
 
+    if max_promoted_layers is not None and len(promoted_names) > max_promoted_layers:
+        priority_kw = ("to_scale_shift_gate", "proj_out", "norm", "scale", "alpha", "beta", "gamma")
+        pri_idx = [i for i, n in enumerate(promoted_names) if any(k in n.lower() for k in priority_kw)]
+        rest_idx = [i for i in range(len(promoted_names)) if i not in set(pri_idx)]
+
+        def _even_sample(indices: list[int], k: int) -> list[int]:
+            if k <= 0:
+                return []
+            if len(indices) <= k:
+                return indices
+            step = len(indices) / float(k)
+            return [indices[int(j * step)] for j in range(k)]
+
+        if len(pri_idx) >= max_promoted_layers:
+            chosen = sorted(_even_sample(pri_idx, max_promoted_layers))
+        else:
+            rem = max_promoted_layers - len(pri_idx)
+            chosen = sorted(pri_idx + _even_sample(rest_idx, rem))
+
+        promoted_names = [promoted_names[i] for i in chosen]
+        promoted_tensors = [promoted_tensors[i] for i in chosen]
+
     return promoted_names, promoted_tensors
 
 
 def write_nbnd_sidecar(
     sidecar_bin_path: str,
-    promoted_names: List[str],
-    promoted_tensors: List[torch.Tensor],
-    metadata: Optional[Dict[str, Any]] = None,
+    promoted_names: list[str],
+    promoted_tensors: list[torch.Tensor],
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     """Writes the NetBender unified `NBND` v2 binary sidecar (JSON metadata + weights)."""
     os.makedirs(os.path.dirname(os.path.abspath(sidecar_bin_path)), exist_ok=True)
@@ -217,21 +266,40 @@ def write_nbnd_sidecar(
             f.write(struct.pack("<I", len(name_bytes)))
             f.write(name_bytes)
             f.write(struct.pack("<I", len(arr.shape)))
-            for dim in arr.shape:
-                f.write(struct.pack("<q", int(dim)))
+            f.writelines(struct.pack("<q", int(dim)) for dim in arr.shape)
             f.write(struct.pack("<Q", int(arr.size)))
             f.write(arr.tobytes())
 
 
-def get_partitioner_for_delegate(delegate: str):
+def _patch_coremltools_for_torch_compat() -> None:
+    """Work around coremltools/torch-2.x incompatibility (KeyError: torch.bfloat16).
+
+    coremltools' `TORCH_DTYPE_TO_NUM` map cannot parse EXIR nodes that carry
+    `dtype=torch.bfloat16`. NetBender exports are float32, so map bfloat16 to
+    float32's numeric. No-ops if coremltools is missing.
+    """
+    try:
+        import torch
+
+        from coremltools.converters.mil.frontend.torch.utils import TORCH_DTYPE_TO_NUM
+    except ImportError:
+        return
+    if torch.bfloat16 not in TORCH_DTYPE_TO_NUM:
+        TORCH_DTYPE_TO_NUM[torch.bfloat16] = TORCH_DTYPE_TO_NUM[torch.float32]
+
+
+def get_partitioner_for_delegate(delegate: str, compute_precision: str = "float32"):
     """Returns the appropriate ExecuTorch partitioner list for the requested hardware delegate."""
+    _patch_coremltools_for_torch_compat()
     delegate = delegate.lower().strip()
     if delegate == "portable":
         return []
 
     if delegate == "xnnpack":
         try:
-            from executorch.backends.xnnpack.partition.xnnpack_partitioner import XnnpackPartitioner
+            from executorch.backends.xnnpack.partition.xnnpack_partitioner import (
+                XnnpackPartitioner,
+            )
             return [XnnpackPartitioner()]
         except ImportError as e:
             raise ImportError(
@@ -242,7 +310,7 @@ def get_partitioner_for_delegate(delegate: str):
         try:
             from executorch.backends.apple.coreml.partition import CoreMLPartitioner
             from executorch.exir.backend.compile_spec_schema import CompileSpec
-            compile_specs = [CompileSpec("model_compute_precision", "float32".encode("utf-8"))]
+            compile_specs = [CompileSpec("model_compute_precision", compute_precision.encode("utf-8"))]
             return [CoreMLPartitioner(compile_specs=compile_specs)]
         except ImportError as e:
             raise ImportError(
@@ -267,13 +335,14 @@ def export_bendable_pte(
     output_pte_path: str,
     delegate: str = "coreml",
     bend_mode: str = "delegate",
-    layer_filter: Optional[List[str]] = None,
+    layer_filter: list[str] | None = None,
     method_name: str = "forward",
-    companion_modules: Optional[Dict[str, Tuple[nn.Module, torch.Tensor]]] = None,
-    extra_metadata: Optional[Dict[str, Any]] = None,
+    companion_modules: dict[str, tuple[nn.Module, torch.Tensor]] | None = None,
+    extra_metadata: dict[str, Any] | None = None,
     write_sidecar: bool = True,
+    compute_precision: str = "float32",
     verbose: bool = True,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Exports a PyTorch `nn.Module` (and optional companion methods like `encode` and `decode`)
     to an ExecuTorch `.pte` file with input-promoted bendable parameters, alongside
@@ -287,7 +356,7 @@ def export_bendable_pte(
             "Install with: pip install executorch"
         )
 
-    module = module.eval().cpu()
+    module = module.eval().cpu().float()
     sample_audio_input = sample_audio_input.detach().cpu().float().contiguous()
 
     promoted_names, promoted_tensors = select_promoted_parameters(
@@ -315,13 +384,13 @@ def export_bendable_pte(
 
     safe_to_orig = getattr(module, "safe_to_orig", {})
     display_names = [safe_to_orig.get(n, n) for n in promoted_names]
-    master_display_names: List[str] = list(display_names)
-    master_promoted_tensors: List[torch.Tensor] = list(promoted_tensors)
-    master_name_to_tensor: Dict[str, torch.Tensor] = {
+    master_display_names: list[str] = list(display_names)
+    master_promoted_tensors: list[torch.Tensor] = list(promoted_tensors)
+    master_name_to_tensor: dict[str, torch.Tensor] = {
         dn: pt for dn, pt in zip(display_names, promoted_tensors)
     }
-    method_param_inputs: Dict[str, List[str]] = {method_name: list(display_names)}
-    programs_dict: Dict[str, Any] = {method_name: exported_program}
+    method_param_inputs: dict[str, list[str]] = {method_name: list(display_names)}
+    programs_dict: dict[str, Any] = {method_name: exported_program}
 
     if companion_modules:
         for comp_name, (comp_mod, comp_sample_in) in companion_modules.items():
@@ -332,7 +401,7 @@ def export_bendable_pte(
                     comp_mod, bend_mode=bend_mode, layer_filter=layer_filter
                 )
                 c_safe_to_orig = getattr(comp_mod, "safe_to_orig", {})
-                c_display_names: List[str] = []
+                c_display_names: list[str] = []
                 for cn, ct in zip(c_names, c_tensors):
                     dn = c_safe_to_orig.get(cn, cn)
                     if dn in master_name_to_tensor:
@@ -374,7 +443,7 @@ def export_bendable_pte(
     # to separate single-method `<base>_encode.pte` / `<base>_decode.pte` files, which
     # ExecuTorchBackend::load automatically discovers and binds.
     if delegate.lower().strip() == "coreml" and len(programs_dict) > 1:
-        fwd_partitioners = get_partitioner_for_delegate(delegate)
+        fwd_partitioners = get_partitioner_for_delegate(delegate, compute_precision=compute_precision)
         fwd_edge = (
             to_edge_transform_and_lower(exported_program, partitioner=fwd_partitioners)
             if fwd_partitioners
@@ -387,7 +456,7 @@ def export_bendable_pte(
             if comp_name == method_name:
                 continue
             comp_pte_path = f"{base_path}_{comp_name}.pte"
-            comp_partitioners = get_partitioner_for_delegate(delegate)
+            comp_partitioners = get_partitioner_for_delegate(delegate, compute_precision=compute_precision)
             comp_edge = (
                 to_edge_transform_and_lower(comp_ep, partitioner=comp_partitioners)
                 if comp_partitioners
@@ -398,7 +467,7 @@ def export_bendable_pte(
             if verbose:
                 print(f"[ExecuTorch] Saved companion '{comp_name}' .pte to: {comp_pte_path}")
     else:
-        partitioners = get_partitioner_for_delegate(delegate)
+        partitioners = get_partitioner_for_delegate(delegate, compute_precision=compute_precision)
         export_target = programs_dict if len(programs_dict) > 1 else exported_program
         if partitioners:
             edge_program = to_edge_transform_and_lower(export_target, partitioner=partitioners)
@@ -409,7 +478,7 @@ def export_bendable_pte(
         with open(output_pte_path, "wb") as f:
             et_program.write_to_file(f)
 
-    meta_dict: Dict[str, Any] = {
+    meta_dict: dict[str, Any] = {
         "netbender.bendable": "1" if len(master_display_names) > 0 else "0",
         "netbender.delegate": delegate,
         "netbender.bend_mode": bend_mode,
@@ -425,6 +494,102 @@ def export_bendable_pte(
     if write_sidecar:
         sidecar_bin_path = f"{base_path}.bin"
         write_nbnd_sidecar(sidecar_bin_path, master_display_names, master_promoted_tensors, metadata=meta_dict)
+        if verbose:
+            print(f"[ExecuTorch] Saved unified NBND v2 sidecar to: {sidecar_bin_path}")
+
+    if verbose:
+        print(f"[ExecuTorch] Saved .pte model to: {output_pte_path}")
+
+    return meta_dict
+
+
+def export_multi_input_bendable_pte(
+    module: nn.Module,
+    sample_inputs: tuple[torch.Tensor, ...],
+    output_pte_path: str,
+    delegate: str = "coreml",
+    bend_mode: str = "delegate",
+    layer_filter: list[str] | None = None,
+    max_promoted_layers: int | None = None,
+    extra_metadata: dict[str, Any] | None = None,
+    write_sidecar: bool = True,
+    compute_precision: str = "float32",
+    verbose: bool = True,
+) -> dict[str, Any]:
+    """
+    Exports a multi-input `nn.Module` (preserving per-input dtypes such as int64 token IDs
+    and float32 timesteps/latents) to an ExecuTorch `.pte` program with input-promoted
+    bendable parameters and an `NBND` v2 `.bin` sidecar.
+    """
+    try:
+        from executorch.exir import to_edge, to_edge_transform_and_lower
+    except ImportError:
+        raise ImportError(
+            "The 'executorch' Python package is required to export .pte models. "
+            "Install with: pip install executorch"
+        )
+
+    module = module.eval().cpu().float()
+    clean_inputs = tuple(t.detach().cpu().contiguous() for t in sample_inputs)
+    compiled_input_shapes = [list(t.shape) for t in clean_inputs]
+
+    promoted_names, promoted_tensors = select_promoted_parameters(
+        module,
+        bend_mode=bend_mode,
+        layer_filter=layer_filter,
+        max_promoted_layers=max_promoted_layers,
+    )
+
+    if verbose:
+        print(
+            f"[ExecuTorch] Preparing multi-input '{os.path.basename(output_pte_path)}' | "
+            f"delegate={delegate} | bend_mode={bend_mode} | promoted_layers={len(promoted_names)}"
+        )
+
+    if len(promoted_names) > 0:
+        wrapped = MultiInputFunctionalPromotedWrapper(
+            module, promoted_names, num_model_inputs=len(clean_inputs)
+        ).eval()
+        example_args = (*clean_inputs, *promoted_tensors)
+    else:
+        wrapped = module
+        example_args = clean_inputs
+
+    with torch.no_grad():
+        exported_program = torch.export.export(wrapped, example_args, strict=False)
+
+    partitioners = get_partitioner_for_delegate(delegate, compute_precision=compute_precision)
+    if partitioners:
+        edge_program = to_edge_transform_and_lower(exported_program, partitioner=partitioners)
+    else:
+        edge_program = to_edge(exported_program)
+
+    et_program = edge_program.to_executorch()
+    os.makedirs(os.path.dirname(os.path.abspath(output_pte_path)), exist_ok=True)
+    with open(output_pte_path, "wb") as f:
+        et_program.write_to_file(f)
+
+    safe_to_orig = getattr(module, "safe_to_orig", {})
+    display_names = [safe_to_orig.get(n, n) for n in promoted_names]
+
+    meta_dict: dict[str, Any] = {
+        "netbender.bendable": "1" if len(display_names) > 0 else "0",
+        "netbender.delegate": delegate,
+        "netbender.bend_mode": bend_mode,
+        "netbender.promoted_layers_count": len(display_names),
+        "num_model_inputs": len(clean_inputs),
+        "compiled_input_shapes": compiled_input_shapes,
+        "promoted_inputs": display_names,
+        "method_param_inputs": {"forward": display_names},
+        "methods": ["forward"],
+    }
+    if extra_metadata:
+        meta_dict.update(extra_metadata)
+
+    if write_sidecar:
+        base_path, _ = os.path.splitext(output_pte_path)
+        sidecar_bin_path = f"{base_path}.bin"
+        write_nbnd_sidecar(sidecar_bin_path, display_names, promoted_tensors, metadata=meta_dict)
         if verbose:
             print(f"[ExecuTorch] Saved unified NBND v2 sidecar to: {sidecar_bin_path}")
 

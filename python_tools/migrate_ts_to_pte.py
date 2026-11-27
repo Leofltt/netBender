@@ -20,12 +20,13 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import numpy as np
-import torch
-import torch.nn as nn
 import torch.nn.functional as F
+
+import torch
+from torch import nn
 
 project_root = str(Path(__file__).resolve().parents[1])
 if project_root not in sys.path:
@@ -44,15 +45,15 @@ class OnnxGraphEagerModule(nn.Module):
       `torch.export.export()` can trace the full computation graph cleanly.
     """
 
-    def __init__(self, onnx_model, sample_input: Optional[torch.Tensor] = None):
+    def __init__(self, onnx_model, sample_input: torch.Tensor | None = None):
         super().__init__()
         from onnx import numpy_helper
 
         self.graph = onnx_model.graph
-        self.orig_to_safe: Dict[str, str] = {}
-        self.safe_to_orig: Dict[str, str] = {}
-        self.constants: Dict[str, Any] = {}
-        self.const_buffers: Dict[str, str] = {}
+        self.orig_to_safe: dict[str, str] = {}
+        self.safe_to_orig: dict[str, str] = {}
+        self.constants: dict[str, Any] = {}
+        self.const_buffers: dict[str, str] = {}
 
         for init in self.graph.initializer:
             arr = numpy_helper.to_array(init).copy()
@@ -102,7 +103,7 @@ class OnnxGraphEagerModule(nn.Module):
             self.precompute_static_subgraphs(sample_input)
 
     @staticmethod
-    def _to_int_list(val: Any) -> List[int]:
+    def _to_int_list(val: Any) -> list[int]:
         if isinstance(val, np.ndarray):
             return [int(v) for v in val.reshape(-1).tolist()]
         if isinstance(val, (list, tuple)):
@@ -140,8 +141,8 @@ class OnnxGraphEagerModule(nn.Module):
         Where, Equal, and integer index arithmetic) into concrete NumPy constants or buffers for
         the target buffer size so `torch.export.export()` traces a clean, static-shape ATen graph.
         """
-        env: Dict[str, Any] = {}
-        is_dynamic: Dict[str, bool] = {}
+        env: dict[str, Any] = {}
+        is_dynamic: dict[str, bool] = {}
 
         if self.primary_inputs:
             env[self.primary_inputs[0]] = sample_input
@@ -194,10 +195,10 @@ class OnnxGraphEagerModule(nn.Module):
         return name.replace(".", "__dot__").replace("/", "__slash__").replace(":", "__colon__")
 
     @staticmethod
-    def _parse_attrs(node) -> Dict[str, Any]:
+    def _parse_attrs(node) -> dict[str, Any]:
         from onnx import numpy_helper
 
-        attrs: Dict[str, Any] = {}
+        attrs: dict[str, Any] = {}
         for a in node.attribute:
             if a.type == 1:  # FLOAT
                 attrs[a.name] = float(a.f)
@@ -215,7 +216,7 @@ class OnnxGraphEagerModule(nn.Module):
         return attrs
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        env: Dict[str, Any] = {}
+        env: dict[str, Any] = {}
         if self.primary_inputs:
             env[self.primary_inputs[0]] = x
         for orig_name, safe_name in self.orig_to_safe.items():
@@ -237,7 +238,7 @@ class OnnxGraphEagerModule(nn.Module):
 
         return env[self.primary_outputs[0]]
 
-    def _exec_node(self, op: str, args: List[Any], attrs: Dict[str, Any]) -> Any:
+    def _exec_node(self, op: str, args: list[Any], attrs: dict[str, Any]) -> Any:
         if op == "Identity":
             return self._ensure_tensor(args[0])
         if op == "Add":
@@ -531,12 +532,12 @@ class OnnxGraphEagerModule(nn.Module):
         raise NotImplementedError(f"Unsupported ONNX op '{op}' in OnnxGraphEagerModule")
 
 
-def extract_nn_tilde_metadata(ts_mod: torch.jit.ScriptModule, default_buffer_size: int = 2048) -> Dict[str, Any]:
+def extract_nn_tilde_metadata(ts_mod: torch.jit.ScriptModule, default_buffer_size: int = 2048) -> dict[str, Any]:
     """Extracts `nn~` / `netBender~` method & attribute metadata from a TorchScript module."""
-    methods: List[str] = ["forward", "encode", "decode"]
+    methods: list[str] = ["forward", "encode", "decode"]
     if hasattr(ts_mod, "_methods"):
         try:
-            for m in getattr(ts_mod, "_methods"):
+            for m in ts_mod._methods:
                 if m not in methods:
                     methods.append(m)
         except Exception:
@@ -571,7 +572,7 @@ def extract_nn_tilde_metadata(ts_mod: torch.jit.ScriptModule, default_buffer_siz
             pass
 
     higher_ratio = 1
-    method_props: Dict[str, Any] = {}
+    method_props: dict[str, Any] = {}
     for m in methods:
         params_attr = f"{m}_params"
         if hasattr(ts_mod, params_attr):
@@ -599,7 +600,7 @@ def extract_nn_tilde_metadata(ts_mod: torch.jit.ScriptModule, default_buffer_siz
 
     if hasattr(ts_mod, "higher_ratio"):
         try:
-            higher_ratio = max(higher_ratio, int(getattr(ts_mod, "higher_ratio")))
+            higher_ratio = max(higher_ratio, int(ts_mod.higher_ratio))
         except Exception:
             pass
 
@@ -616,7 +617,7 @@ def extract_nn_tilde_metadata(ts_mod: torch.jit.ScriptModule, default_buffer_siz
         }
 
     f_props = method_props["forward"]
-    meta: Dict[str, Any] = {
+    meta: dict[str, Any] = {
         "sr": sr,
         "buffer_size": max(default_buffer_size, higher_ratio),
         "higher_ratio": higher_ratio,
@@ -644,7 +645,7 @@ def extract_nn_tilde_metadata(ts_mod: torch.jit.ScriptModule, default_buffer_siz
     return meta
 
 
-def _build_eager_module_from_onnx(onnx_path: str, sample_input: Optional[torch.Tensor] = None) -> nn.Module:
+def _build_eager_module_from_onnx(onnx_path: str, sample_input: torch.Tensor | None = None) -> nn.Module:
     import onnx
 
     onnx_model = onnx.load(onnx_path)
@@ -727,7 +728,7 @@ class TorchScriptGraphEagerModule(nn.Module):
             except Exception:
                 pass
 
-    def _exec_block(self, block, env: Dict[str, Any]) -> List[Any]:
+    def _exec_block(self, block, env: dict[str, Any]) -> list[Any]:
         for node in block.nodes():
             kind = node.kind()
             in_vals = [env.get(i.debugName(), None) for i in node.inputs()]
@@ -814,7 +815,7 @@ class TorchScriptGraphEagerModule(nn.Module):
         return [env.get(o.debugName(), None) for o in block.outputs()]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        env: Dict[str, Any] = {}
+        env: dict[str, Any] = {}
         graph_inputs = list(self._ts_graph.inputs())
         env[graph_inputs[0].debugName()] = self
         if len(graph_inputs) > 1:
@@ -824,7 +825,7 @@ class TorchScriptGraphEagerModule(nn.Module):
         return outs[0]
 
     @staticmethod
-    def _exec_aten(op_name: str, args: List[Any]) -> Any:
+    def _exec_aten(op_name: str, args: list[Any]) -> Any:
         if op_name == "Int":
             return int(args[0])
         if op_name == "Float":
@@ -990,7 +991,7 @@ class TorchScriptGraphEagerModule(nn.Module):
     def _run_aten_lstm(
         inp: torch.Tensor,
         hx: tuple[torch.Tensor, torch.Tensor],
-        flat_weights: List[torch.Tensor],
+        flat_weights: list[torch.Tensor],
         has_biases: bool,
         num_layers: int,
         dropout: float,
@@ -1040,13 +1041,13 @@ class TorchScriptGraphEagerModule(nn.Module):
 
 def migrate_ts_to_pte(
     ts_model_path: str,
-    output_pte_path: Optional[str] = None,
+    output_pte_path: str | None = None,
     delegate: str = "coreml",
     bend_mode: str = "delegate",
-    buffer_size: Optional[int] = None,
-    channels: Optional[int] = None,
-    layer_filter: Optional[List[str]] = None,
-    eager_module: Optional[nn.Module] = None,
+    buffer_size: int | None = None,
+    channels: int | None = None,
+    layer_filter: list[str] | None = None,
+    eager_module: nn.Module | None = None,
     verbose: bool = True,
 ) -> str:
     """
@@ -1060,7 +1061,7 @@ def migrate_ts_to_pte(
         base, _ = os.path.splitext(ts_model_path)
         output_pte_path = f"{base}.pte"
 
-    companion_modules: Dict[str, tuple[nn.Module, torch.Tensor]] = {}
+    companion_modules: dict[str, tuple[nn.Module, torch.Tensor]] = {}
 
     ext = os.path.splitext(ts_model_path)[1].lower()
     if ext == ".onnx":
@@ -1219,7 +1220,9 @@ def migrate_ts_to_pte(
                             trace_samples=history_samples + seq_len,
                         )
                     else:
-                        from python_tools.stable_audio_ts_to_onnx import convert_stable_audio_ts_to_onnx
+                        from python_tools.stable_audio_ts_to_onnx import (
+                            convert_stable_audio_ts_to_onnx,
+                        )
 
                         convert_stable_audio_ts_to_onnx(
                             ts_model_path=ts_model_path,

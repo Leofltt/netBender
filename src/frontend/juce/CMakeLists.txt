@@ -230,3 +230,82 @@ juce_add_plugin(nn_bending_standalone
     COMPANY_NAME "leofltt"
 )
 configure_nn_bending_target(nn_bending_standalone)
+
+# -------------------------------------------------------------------
+# Dedicated SA3 Sampler Standalone App
+# -------------------------------------------------------------------
+juce_add_gui_app(netbender_sampler
+    PRODUCT_NAME "NetBenderSampler"
+    COMPANY_NAME "leofltt"
+)
+juce_generate_juce_header(netbender_sampler)
+
+target_sources(netbender_sampler PRIVATE
+    sampler/SamplerApp.cpp
+    sampler/WaveformView.cpp
+    sampler/WaveformView.h
+    sampler/ExportModal.cpp
+    sampler/ExportModal.h
+    sampler/PromptBendPanel.cpp
+    sampler/PromptBendPanel.h
+    sampler/SamplerMainComponent.cpp
+    sampler/SamplerMainComponent.h
+    ui/FlatLookAndFeel.cpp
+    ui/FlatLookAndFeel.h
+    ui/UIConstants.h
+)
+
+target_include_directories(netbender_sampler PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ui"
+    "${CMAKE_CURRENT_SOURCE_DIR}/sampler"
+    "${CMAKE_SOURCE_DIR}/backend"
+    "${CMAKE_SOURCE_DIR}/backend/sampler"
+    "${CMAKE_BINARY_DIR}/_deps"
+)
+
+target_compile_features(netbender_sampler PRIVATE cxx_std_20)
+target_compile_definitions(netbender_sampler PRIVATE
+    NOMINMAX=1
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    $<$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>:NETBENDER_DEV_PROMPTS=1>
+)
+set_target_properties(netbender_sampler PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+)
+
+target_link_libraries(netbender_sampler PRIVATE
+    netbender_rtsan
+    backend
+    "${TORCH_LIBRARIES}"
+    onnxruntime
+    nlohmann_json::nlohmann_json
+    juce::juce_audio_utils
+    juce::juce_audio_processors
+    juce::juce_audio_formats
+    juce::juce_audio_devices
+    juce::juce_audio_basics
+    juce::juce_graphics
+    juce::juce_gui_basics
+    juce::juce_gui_extra
+    juce::juce_data_structures
+    juce::juce_events
+    juce::juce_core
+)
+
+if (APPLE)
+    set_target_properties(netbender_sampler PROPERTIES
+        BUILD_WITH_INSTALL_RPATH TRUE
+        INSTALL_RPATH "${TORCH_INSTALL_PREFIX}/lib;${torch_dir}/libtorch/lib;${ort_extracted_dir}/lib;${CONDA_ENV_PATH}/lib;/Library/Application Support/NetBender/lib;@loader_path/;@loader_path/../Frameworks"
+    )
+    add_custom_command(
+        TARGET netbender_sampler POST_BUILD
+        COMMAND codesign --force --deep --sign "${SIGN_ID}" "$<TARGET_BUNDLE_DIR:netbender_sampler>"
+        COMMENT "Codesigning NetBenderSampler.app"
+        VERBATIM
+    )
+endif()
+
+add_custom_target(sampler_standalone DEPENDS netbender_sampler)

@@ -12,11 +12,10 @@ import argparse
 import json
 import os
 import sys
-from typing import List, Optional
 
 try:
     import onnx
-    from onnx import helper, numpy_helper, TensorProto
+    from onnx import TensorProto, helper, numpy_helper
 except ImportError:
     print("Error: 'onnx' Python package is required. Install with: pip install onnx", file=sys.stderr)
     sys.exit(1)
@@ -45,6 +44,7 @@ def is_bendable_tensor(
     tensor: TensorProto,
     min_elements: int = 1,
     bend_mode: str = "full",
+    extra_keywords: list[str] | None = None,
 ) -> bool:
     """
     Check if an initializer qualifies as a bendable neural network parameter.
@@ -72,14 +72,16 @@ def is_bendable_tensor(
         return False
 
     if bend_mode == "delegate":
-        non_singleton_dims = sum(1 for d in dims if d > 1)
-        if non_singleton_dims > 1:
-            return False
         lower_name = name.lower()
         if any(
             ex in lower_name
             for ex in ("onnx::concat", "onnx::slice", "onnx::constantofshape", "cache", ".pad")
         ):
+            return False
+        if extra_keywords and any(k.lower() in lower_name for k in extra_keywords):
+            return True
+        non_singleton_dims = sum(1 for d in dims if d > 1)
+        if non_singleton_dims > 1:
             return False
         if any(k in lower_name for k in DELEGATE_SAFE_KEYWORDS):
             return True
@@ -93,12 +95,13 @@ def is_bendable_tensor(
 def promote_initializers_to_inputs(
     input_path: str,
     output_path: str,
-    layer_filter: Optional[List[str]] = None,
+    layer_filter: list[str] | None = None,
     keep_initializers_as_defaults: bool = True,
     verbose: bool = True,
-    extra_metadata: Optional[dict] = None,
+    extra_metadata: dict | None = None,
     write_sidecar: bool = True,
     bend_mode: str = "full",
+    extra_keywords: list[str] | None = None,
 ) -> int:
     """
     Reads an ONNX model, finds specified or all eligible float initializers,
@@ -131,7 +134,9 @@ def promote_initializers_to_inputs(
                 continue
 
         # Verify candidate tensor type and dimensions
-        if not is_bendable_tensor(name, init, bend_mode=bend_mode):
+        if not is_bendable_tensor(
+            name, init, bend_mode=bend_mode, extra_keywords=extra_keywords
+        ):
             continue
 
         # Create corresponding ValueInfoProto for graph.input
@@ -182,15 +187,27 @@ def promote_initializers_to_inputs(
             if verbose:
                 print(f"  [+] Metadata property: {k} = {v}")
 
-    # Verify model validity
-    try:
-        onnx.checker.check_model(model)
-    except Exception as e:
-        print(f"Warning: ONNX model check raised an issue: {e}", file=sys.stderr)
-
-    # Save output
+    # Save output (use external data if protobuf exceeds ~1.8 GB)
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    onnx.save(model, output_path)
+    use_external_data = model.ByteSize() > 1_800_000_000
+    if use_external_data:
+        onnx.save_model(
+            model,
+            output_path,
+            save_as_external_data=True,
+            all_tensors_to_one_file=True,
+            location=f"{os.path.basename(output_path)}.data",
+        )
+        try:
+            onnx.checker.check_model(output_path)
+        except Exception as e:
+            print(f"Warning: ONNX model check raised an issue: {e}", file=sys.stderr)
+    else:
+        try:
+            onnx.checker.check_model(model)
+        except Exception as e:
+            print(f"Warning: ONNX model check raised an issue: {e}", file=sys.stderr)
+        onnx.save(model, output_path)
 
     # Export high-speed binary sidecar file (.bin) storing initial float weights
     # This enables NetBender C++ to instantly map original layer weights for bending
@@ -215,8 +232,7 @@ def promote_initializers_to_inputs(
                 f.write(struct.pack("<I", len(name_bytes)))
                 f.write(name_bytes)
                 f.write(struct.pack("<I", len(arr.shape)))
-                for dim in arr.shape:
-                    f.write(struct.pack("<q", dim))
+                f.writelines(struct.pack("<q", dim) for dim in arr.shape)
                 f.write(struct.pack("<Q", arr.size))
                 f.write(arr.tobytes())
 

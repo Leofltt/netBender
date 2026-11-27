@@ -7,11 +7,10 @@ Supports direct weight loading from safetensors checkpoints without requiring ex
 
 from __future__ import annotations
 
-import os
-from typing import Dict, Any, Optional
-import torch
-import torch.nn as nn
 import torch.nn.functional as F
+
+import torch
+from torch import nn
 
 # --- architecture constants (SAME-S) ---
 DIM = 768
@@ -66,7 +65,7 @@ class DifferentialAttention(nn.Module):
         self.to_out = nn.Linear(DIM, DIM, bias=False)
         self.q_norm = DyT(HEAD_DIM)
         self.k_norm = DyT(HEAD_DIM)
-        self.scale = HEAD_DIM ** -0.5
+        self.scale = HEAD_DIM**-0.5
         inv_freq = 1.0 / (
             ROPE_BASE ** (torch.arange(0, ROPE_DIMS, 2).float() / ROPE_DIMS)
         )
@@ -81,8 +80,8 @@ class DifferentialAttention(nn.Module):
         return cos, sin
 
     def _apply_rope(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):
-        rot = x[..., :self.rope_dims]
-        passthrough = x[..., self.rope_dims:]
+        rot = x[..., : self.rope_dims]
+        passthrough = x[..., self.rope_dims :]
         rot = rot * cos + _rotate_half(rot) * sin
         return torch.cat((rot, passthrough), dim=-1)
 
@@ -154,8 +153,12 @@ class _ChunkedTransformer(nn.Module):
         super().__init__()
         self.effective_chunk = EFFECTIVE_CHUNK
         self.shift = SHIFT
-        self.blocks_first = nn.ModuleList([TransformerBlock() for _ in range(NUM_BLOCKS // 2)])
-        self.blocks_second = nn.ModuleList([TransformerBlock() for _ in range(NUM_BLOCKS - NUM_BLOCKS // 2)])
+        self.blocks_first = nn.ModuleList(
+            [TransformerBlock() for _ in range(NUM_BLOCKS // 2)]
+        )
+        self.blocks_second = nn.ModuleList(
+            [TransformerBlock() for _ in range(NUM_BLOCKS - NUM_BLOCKS // 2)]
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b = x.shape[0]
@@ -173,7 +176,7 @@ class _ChunkedTransformer(nn.Module):
 
         # Second half: pad half a chunk on each side, re-chunk with offset boundaries.
         left = x[:, :shift, :]
-        right = x[:, internal_t - shift:, :]
+        right = x[:, internal_t - shift :, :]
         x = torch.cat((left, x, right), dim=1)
         t2 = internal_t + 2 * shift
         nc2 = t2 // eff
@@ -181,7 +184,7 @@ class _ChunkedTransformer(nn.Module):
         for blk in self.blocks_second:
             x = blk(x)
         x = x.reshape(b, t2, d)
-        x = x[:, shift:t2 - shift, :]
+        x = x[:, shift : t2 - shift, :]
         return x
 
 
@@ -212,7 +215,9 @@ class SAMESCore(nn.Module):
         self.dec_project_in = nn.Linear(LATENT_DIM, DIM, bias=True)
         self.dec_new_tokens = nn.Parameter(torch.zeros(1, 1, DIM))
         self.dec_transformer = _ChunkedTransformer()
-        self.dec_mapping = nn.Conv1d(DIM, IN_CHANNELS, kernel_size=3, padding=1, bias=True)
+        self.dec_mapping = nn.Conv1d(
+            DIM, IN_CHANNELS, kernel_size=3, padding=1, bias=True
+        )
 
         # Softnorm bottleneck
         self.scaling_factor = nn.Parameter(torch.ones(1, LATENT_DIM, 1))
@@ -257,7 +262,7 @@ class SAMESCore(nn.Module):
         x = self.enc_transformer(x)
 
         x = x.reshape(b * t_lat, self.sub_chunk, self.dim)
-        x = x[:, self.sub_chunk - 1:self.sub_chunk, :]
+        x = x[:, self.sub_chunk - 1 : self.sub_chunk, :]
         x = x.reshape(b, t_lat, self.dim)
 
         x = self.enc_project_out(x)
@@ -288,23 +293,34 @@ class SAMESCore(nn.Module):
         x = self.dec_transformer(x)
 
         x = x.reshape(b * t_lat, self.sub_chunk, self.dim)
-        x = x[:, 1:self.sub_chunk, :]
+        x = x[:, 1 : self.sub_chunk, :]
         x = x.reshape(b, t_lat * self.stride, self.dim)
 
         x = x.transpose(1, 2)
         x = self.dec_mapping(x)
         audio = self._unpatch(x)
-        return audio[..., :t_lat_real * self.patch_size * self.stride]
+        return audio[..., : t_lat_real * self.patch_size * self.stride]
 
     def forward(self, audio: torch.Tensor) -> torch.Tensor:
         n = audio.shape[-1]
         return self.decode(self.encode(audio))[..., :n]
 
 
-def load_same_s_from_safetensors(safetensors_path: str, device: str = "cpu") -> SAMESCore:
+def load_same_s_from_safetensors(
+    safetensors_path: str, device: str = "cpu"
+) -> SAMESCore:
     """Loads SAMESCore directly from a safetensors checkpoint without external dependencies."""
     import safetensors.torch
+
     state_dict = safetensors.torch.load_file(safetensors_path, device=device)
+    if (
+        "encoder.layers.0.mapping.bias" not in state_dict
+        and "pretransform.model.encoder.layers.0.mapping.bias" in state_dict
+    ):
+        prefix = "pretransform.model."
+        state_dict = {
+            k[len(prefix) :]: v for k, v in state_dict.items() if k.startswith(prefix)
+        }
     core = SAMESCore().to(device).eval()
 
     def load_dyt(dst: DyT, prefix: str):
@@ -314,8 +330,12 @@ def load_same_s_from_safetensors(safetensors_path: str, device: str = "cpu") -> 
 
     def load_block(dst: TransformerBlock, prefix: str):
         load_dyt(dst.pre_norm, f"{prefix}.pre_norm")
-        dst.attn.to_qkv.weight.data.copy_(state_dict[f"{prefix}.self_attn.to_qkv.weight"])
-        dst.attn.to_out.weight.data.copy_(state_dict[f"{prefix}.self_attn.to_out.weight"])
+        dst.attn.to_qkv.weight.data.copy_(
+            state_dict[f"{prefix}.self_attn.to_qkv.weight"]
+        )
+        dst.attn.to_out.weight.data.copy_(
+            state_dict[f"{prefix}.self_attn.to_out.weight"]
+        )
         load_dyt(dst.attn.q_norm, f"{prefix}.self_attn.q_norm")
         load_dyt(dst.attn.k_norm, f"{prefix}.self_attn.k_norm")
         load_dyt(dst.ff_norm, f"{prefix}.ff_norm")
@@ -334,8 +354,13 @@ def load_same_s_from_safetensors(safetensors_path: str, device: str = "cpu") -> 
 
     # 2. Encoder Transformer Blocks
     for i in range(3):
-        load_block(core.enc_transformer.blocks_first[i], f"encoder.layers.0.transformers.{i}")
-        load_block(core.enc_transformer.blocks_second[i], f"encoder.layers.0.transformers.{3 + i}")
+        load_block(
+            core.enc_transformer.blocks_first[i], f"encoder.layers.0.transformers.{i}"
+        )
+        load_block(
+            core.enc_transformer.blocks_second[i],
+            f"encoder.layers.0.transformers.{3 + i}",
+        )
 
     core.enc_project_out.weight.data.copy_(state_dict["encoder.layers.2.weight"])
     core.enc_project_out.bias.data.copy_(state_dict["encoder.layers.2.bias"])
@@ -346,8 +371,13 @@ def load_same_s_from_safetensors(safetensors_path: str, device: str = "cpu") -> 
     core.dec_new_tokens.data.copy_(state_dict["decoder.layers.3.new_tokens"])
 
     for i in range(3):
-        load_block(core.dec_transformer.blocks_first[i], f"decoder.layers.3.transformers.{i}")
-        load_block(core.dec_transformer.blocks_second[i], f"decoder.layers.3.transformers.{3 + i}")
+        load_block(
+            core.dec_transformer.blocks_first[i], f"decoder.layers.3.transformers.{i}"
+        )
+        load_block(
+            core.dec_transformer.blocks_second[i],
+            f"decoder.layers.3.transformers.{3 + i}",
+        )
 
     dec_wv = state_dict["decoder.layers.3.mapping.weight_v"]
     dec_wg = state_dict["decoder.layers.3.mapping.weight_g"]
@@ -362,4 +392,3 @@ def load_same_s_from_safetensors(safetensors_path: str, device: str = "cpu") -> 
 
     core.requires_grad_(False)
     return core
-

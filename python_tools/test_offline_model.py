@@ -29,26 +29,31 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 import torch
+
 try:
     import soundfile as sf
 except ImportError:
     sf = None
 
 
-def generate_test_audio(sr: int = 44100, channels: int = 2, duration_sec: float = 2.0) -> torch.Tensor:
+def generate_test_audio(
+    sr: int = 44100, channels: int = 2, duration_sec: float = 2.0
+) -> torch.Tensor:
     """Generate a clean stereo test signal (sine tone + frequency modulation)."""
     num_samples = int(sr * duration_sec)
     t = torch.linspace(0, duration_sec, num_samples)
-    
+
     # Left channel: 440 Hz tone with slight vibrato
-    left = 0.5 * torch.sin(2 * math.pi * 440.0 * t + 0.1 * torch.sin(2 * math.pi * 5.0 * t))
-    
+    left = 0.5 * torch.sin(
+        2 * math.pi * 440.0 * t + 0.1 * torch.sin(2 * math.pi * 5.0 * t)
+    )
+
     if channels == 1:
-        return left.unsqueeze(0).unsqueeze(0) # [1, 1, T]
-        
+        return left.unsqueeze(0).unsqueeze(0)  # [1, 1, T]
+
     # Right channel: 880 Hz harmonic
     right = 0.4 * torch.sin(2 * math.pi * 880.0 * t)
-    audio = torch.stack([left, right], dim=0).unsqueeze(0) # [1, 2, T]
+    audio = torch.stack([left, right], dim=0).unsqueeze(0)  # [1, 2, T]
     return audio
 
 
@@ -91,25 +96,37 @@ def test_model_offline(
     # Determine input/output channels and ratio
     in_channels = attrs.get("forward_params", [2, 1, 2, 1])[0]
     out_channels = attrs.get("forward_params", [2, 1, 2, 1])[2]
-    ratio = attrs.get("encode_params", [2, 1, 64, 2048])[3] if "encode_params" in attrs else 2048
-    latent_dim = attrs.get("encode_params", [2, 1, 64, 2048])[2] if "encode_params" in attrs else 64
-    sr = 44100 # default audio sample rate
+    ratio = (
+        attrs.get("encode_params", [2, 1, 64, 2048])[3]
+        if "encode_params" in attrs
+        else 2048
+    )
+    latent_dim = (
+        attrs.get("encode_params", [2, 1, 64, 2048])[2]
+        if "encode_params" in attrs
+        else 64
+    )
+    sr = 44100  # default audio sample rate
 
-    print(f"   Configured: in_channels={in_channels}, out_channels={out_channels}, "
-          f"latent_dim={latent_dim}, ratio={ratio}")
+    print(
+        f"   Configured: in_channels={in_channels}, out_channels={out_channels}, "
+        f"latent_dim={latent_dim}, ratio={ratio}"
+    )
 
     # 3. Prepare Audio Input
     if input_wav and os.path.exists(input_wav):
         print(f"\n3. Loading input audio from '{input_wav}'...")
         if sf is None:
-            raise ImportError("soundfile library is required to read WAV files. Install with: uv pip install soundfile")
+            raise ImportError(
+                "soundfile library is required to read WAV files. Install with: uv pip install soundfile"
+            )
         data, file_sr = sf.read(input_wav, dtype="float32")
         sr = file_sr
         # Ensure shape [1, channels, samples]
         if data.ndim == 1:
-            data = data[None, :] # mono
+            data = data[None, :]  # mono
         else:
-            data = data.T # [channels, samples]
+            data = data.T  # [channels, samples]
         audio_in = torch.from_numpy(data).unsqueeze(0)
         # Adjust channel count if needed
         if audio_in.size(1) < in_channels:
@@ -129,11 +146,15 @@ def test_model_offline(
     else:
         audio_in = audio_in[:, :, :aligned_samples]
 
-    print(f"   Input shape: {list(audio_in.shape)} (min: {audio_in.min():.3f}, max: {audio_in.max():.3f}, RMS: {audio_in.pow(2).mean().sqrt():.3f})")
+    print(
+        f"   Input shape: {list(audio_in.shape)} (min: {audio_in.min():.3f}, max: {audio_in.max():.3f}, RMS: {audio_in.pow(2).mean().sqrt():.3f})"
+    )
 
     # 4. Optional Circuit Bending Simulation
     if bend_layer:
-        print(f"\n4. Simulating Circuit Bending on layer '{bend_layer}' (scale={bend_scale}, offset={bend_offset})...")
+        print(
+            f"\n4. Simulating Circuit Bending on layer '{bend_layer}' (scale={bend_scale}, offset={bend_offset})..."
+        )
         named_params = dict(model.named_parameters())
         if bend_layer in named_params:
             with torch.no_grad():
@@ -141,10 +162,12 @@ def test_model_offline(
                 orig_norm = param.norm().item()
                 param.mul_(bend_scale).add_(bend_offset)
                 new_norm = param.norm().item()
-                print(f"   Layer bent! Norm changed from {orig_norm:.4f} -> {new_norm:.4f}")
+                print(
+                    f"   Layer bent! Norm changed from {orig_norm:.4f} -> {new_norm:.4f}"
+                )
         else:
             print(f"   WARNING: Layer '{bend_layer}' not found in model parameters!")
-            matching = [p for p in named_params.keys() if "conv" in p or "weight" in p][:5]
+            matching = [p for p in named_params if "conv" in p or "weight" in p][:5]
             print(f"   Available candidate layers: {matching}")
 
     # 5. Offline Inference Test: Single-Pass Forward
@@ -155,19 +178,25 @@ def test_model_offline(
             out_single = model.forward(audio_in)
         dt = time.time() - t0
         rtf = (aligned_samples / sr) / max(1e-6, dt)
-        print(f"   ✓ forward() succeeded in {dt*1000:.1f}ms (Speed: {rtf:.1f}x real-time)!")
-        print(f"   Output shape: {list(out_single.shape)} (min: {out_single.min():.3f}, max: {out_single.max():.3f}, RMS: {out_single.pow(2).mean().sqrt():.3f})")
+        print(
+            f"   ✓ forward() succeeded in {dt * 1000:.1f}ms (Speed: {rtf:.1f}x real-time)!"
+        )
+        print(
+            f"   Output shape: {list(out_single.shape)} (min: {out_single.min():.3f}, max: {out_single.max():.3f}, RMS: {out_single.pow(2).mean().sqrt():.3f})"
+        )
     except Exception as e:
         print(f"   ✗ forward() failed: {e}")
         raise
 
     # 6. Offline Inference Test: Encode -> Latent -> Decode
-    print(f"\n6. Running encode() -> decode() decomposition...")
+    print("\n6. Running encode() -> decode() decomposition...")
     try:
         with torch.no_grad():
             z = model.encode(audio_in)
             print(f"   ✓ encode() succeeded! Latent shape: {list(z.shape)}")
-            print(f"     Latent stats: min={z.min():.3f}, max={z.max():.3f}, mean={z.mean():.3f}, std={z.std():.3f}")
+            print(
+                f"     Latent stats: min={z.min():.3f}, max={z.max():.3f}, mean={z.mean():.3f}, std={z.std():.3f}"
+            )
 
             if latent_bend:
                 print("   Applying latent Fourier-like perturbation...")
@@ -175,7 +204,9 @@ def test_model_offline(
 
             recon = model.decode(z)
             print(f"   ✓ decode() succeeded! Reconstruction shape: {list(recon.shape)}")
-            print(f"     Recon stats: min={recon.min():.3f}, max={recon.max():.3f}, RMS={recon.pow(2).mean().sqrt():.3f}")
+            print(
+                f"     Recon stats: min={recon.min():.3f}, max={recon.max():.3f}, RMS={recon.pow(2).mean().sqrt():.3f}"
+            )
 
             diff = (out_single - recon).abs().max().item()
             print(f"   ✓ Max diff between forward() and decode(encode()): {diff:.6f}")
@@ -197,14 +228,23 @@ def test_model_offline(
     streamed_out = torch.cat(streamed_out_blocks, dim=-1)
     total_audio_sec = (num_blocks * buffer_size) / sr
     total_compute_sec = t_end - t_start
-    print(f"   ✓ Processed {num_blocks} blocks of {buffer_size} samples in {total_compute_sec:.3f}s")
-    print(f"     Streaming RTF: {total_audio_sec / max(1e-6, total_compute_sec):.2f}x real-time")
+    print(
+        f"   ✓ Processed {num_blocks} blocks of {buffer_size} samples in {total_compute_sec:.3f}s"
+    )
+    print(
+        f"     Streaming RTF: {total_audio_sec / max(1e-6, total_compute_sec):.2f}x real-time"
+    )
     print(f"     Streamed output shape: {list(streamed_out.shape)}")
 
     # 8. Save audio to disk for listening
     if output_wav and sf is not None:
-        out_np = streamed_out.squeeze(0).cpu().numpy().T # [samples, channels]
-        os.makedirs(os.path.dirname(os.path.abspath(output_wav)) if os.path.dirname(output_wav) else ".", exist_ok=True)
+        out_np = streamed_out.squeeze(0).cpu().numpy().T  # [samples, channels]
+        os.makedirs(
+            os.path.dirname(os.path.abspath(output_wav))
+            if os.path.dirname(output_wav)
+            else ".",
+            exist_ok=True,
+        )
         sf.write(output_wav, out_np, sr)
         print(f"\n8. Wrote output audio to: {output_wav}")
         print("=" * 70)
@@ -213,15 +253,44 @@ def test_model_offline(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Offline test and audio validator for nn~ models")
-    parser.add_argument("--model", type=str, default="models/stable_audio_1_vae.ts", help="Path to exported .ts model")
-    parser.add_argument("--input", type=str, default=None, help="Optional input .wav file (defaults to synthetic test audio)")
-    parser.add_argument("--output", type=str, default="models/test_recon.wav", help="Output .wav path")
-    parser.add_argument("--buffer-size", type=int, default=2048, help="Streaming block size (default: 2048)")
-    parser.add_argument("--bend-layer", type=str, default=None, help="Layer parameter name to bend")
-    parser.add_argument("--bend-scale", type=float, default=1.0, help="Circuit bend scale factor")
-    parser.add_argument("--bend-offset", type=float, default=0.0, help="Circuit bend offset factor")
-    parser.add_argument("--latent-bend", action="store_true", help="Perturb latents between encode and decode")
+    parser = argparse.ArgumentParser(
+        description="Offline test and audio validator for nn~ models"
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="models/stable_audio_1_vae.ts",
+        help="Path to exported .ts model",
+    )
+    parser.add_argument(
+        "--input",
+        type=str,
+        default=None,
+        help="Optional input .wav file (defaults to synthetic test audio)",
+    )
+    parser.add_argument(
+        "--output", type=str, default="models/test_recon.wav", help="Output .wav path"
+    )
+    parser.add_argument(
+        "--buffer-size",
+        type=int,
+        default=2048,
+        help="Streaming block size (default: 2048)",
+    )
+    parser.add_argument(
+        "--bend-layer", type=str, default=None, help="Layer parameter name to bend"
+    )
+    parser.add_argument(
+        "--bend-scale", type=float, default=1.0, help="Circuit bend scale factor"
+    )
+    parser.add_argument(
+        "--bend-offset", type=float, default=0.0, help="Circuit bend offset factor"
+    )
+    parser.add_argument(
+        "--latent-bend",
+        action="store_true",
+        help="Perturb latents between encode and decode",
+    )
     args = parser.parse_args()
 
     test_model_offline(
